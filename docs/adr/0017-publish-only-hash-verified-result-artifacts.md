@@ -1,0 +1,3 @@
+# Publish only hash-verified result artifacts
+
+The executor will produce an immutable Result Manifest and Evidence Bundle without GitHub write authority. Only after the Evidence Gate and independent Result Review pass may a separate publisher validate the approval, base revision, allowed paths, artifact hash, and per-content hashes before creating the commit, delivery branch, and Delivery Pull Request. The publisher will not execute repository-controlled scripts. This adds artifact packaging and validation work in exchange for preventing candidate code from running with the credential that can write to the Target Repository.

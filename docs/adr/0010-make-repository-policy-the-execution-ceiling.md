@@ -1,0 +1,3 @@
+# Make Repository Policy the execution ceiling
+
+Every onboarded repository must contain a version-controlled `.codex-pipeline.yml` Repository Policy defining setup, test, and build commands; writable and forbidden paths; runtime limits; network permissions and allowed domains; and permitted non-sensitive environment inputs. A Milestone Contract may narrow but never expand this policy, and a repository without a valid policy is ineligible for execution. This requires explicit onboarding and policy maintenance in exchange for preventing the autonomous executor from inventing commands or silently increasing its authority.

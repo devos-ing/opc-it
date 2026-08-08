@@ -1,0 +1,3 @@
+# Inherit approval only for same-scope recovery
+
+A Recovery Issue may enter the front of the Repository Queue without new owner attention only when it references the original Approval Digest and adds a Recovery Addendum that remains entirely inside the approved Milestone Contract and Repository Policy. The addendum must contain failure evidence, a deduplicated error fingerprint, a repair hypothesis, and the next verification focus. Any proposed change to scope, writable paths, permissions, resource limits, or acceptance criteria ends the automatic loop and requires a new Plan Approval. This permits bounded unattended repair in exchange for forbidding the recovery agent from broadening its own authority.

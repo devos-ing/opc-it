@@ -1,0 +1,3 @@
+# Isolate native execution with users, worktrees, and credentials
+
+The Docker-free Mac mini runner will execute under a dedicated macOS account with no personal files, iCloud session, daily-development SSH agent, or reusable developer credentials. Every attempt receives a disposable Execution Workspace; the Codex job receives only its OpenAI credential and read-only GitHub access, while a separate publication job receives GitHub write access without the OpenAI credential. Temporary worktrees and job-scoped credentials are removed after use. This provides less kernel-level isolation than a virtual machine or container in exchange for native macOS support, so the private-repository and owner-approval restrictions remain mandatory controls.

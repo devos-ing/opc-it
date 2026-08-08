@@ -1,0 +1,3 @@
+# Centralize workflow code but keep state in Target Repositories
+
+The `OPC` Control Repository will version reusable GitHub workflows, Issue schemas, validators, and recovery logic, pinned by commit when called from each Target Repository. Each Target Repository will contain only its Repository Policy and a thin caller workflow, while its GitHub Issues, labels, Actions records, branches, and pull requests remain the sole durable state for that repository. Version one will not add a database, Redis, or an external queue. This duplicates a small onboarding surface across repositories in exchange for centralized behavior, local auditability and permissions, and fewer services to operate.

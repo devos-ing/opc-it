@@ -1,0 +1,3 @@
+# Create Recovery Issues only for work failures
+
+Execution failures and failures of the Evidence Gate or Result Review will create a linked Recovery Issue and consume one execution from the Recovery Budget. Runner outages, temporary network or API failures, and similar infrastructure interruptions will instead be recorded as Run Incidents on the existing Work Issue and retried without consuming that budget; the separate twenty-four-hour outage rule still applies. This gives up an Issue per technical event in exchange for a queue whose recovery chain represents actionable work rather than infrastructure noise.

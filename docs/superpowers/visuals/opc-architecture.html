@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OPC 无人值守交付架构</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #121a30;
+      --panel-2: #17213b;
+      --line: #34476f;
+      --text: #eef3ff;
+      --muted: #9fb0d1;
+      --blue: #5da9ff;
+      --green: #65d6a5;
+      --amber: #ffca6a;
+      --red: #ff7b86;
+      --violet: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 10%, #16254d 0, transparent 30%),
+        radial-gradient(circle at 85% 85%, #1c294d 0, transparent 26%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1440px; margin: 0 auto; padding: 42px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 3.2vw, 48px); letter-spacing: -.04em; }
+    header p { margin: 0; color: var(--muted); font-size: 16px; }
+    .badge { border: 1px solid #3b5283; border-radius: 999px; padding: 9px 14px; color: #bfd2ff; white-space: nowrap; }
+    .lane {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: linear-gradient(145deg, rgba(23,33,59,.92), rgba(13,20,39,.9));
+      margin: 16px 0;
+      overflow: hidden;
+      box-shadow: 0 18px 45px rgba(0,0,0,.18);
+    }
+    .lane-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 13px 18px;
+      border-bottom: 1px solid var(--line);
+      color: #dbe6ff;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .lane-title span:last-child { color: var(--muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(54px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      padding: 18px;
+    }
+    .node {
+      min-height: 106px;
+      border: 1px solid #38507d;
+      border-radius: 15px;
+      background: rgba(23,33,59,.96);
+      padding: 15px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .node strong { display: block; font-size: 16px; line-height: 1.25; }
+    .node small { display: block; color: var(--muted); line-height: 1.35; margin-top: 8px; }
+    .node.blue { border-color: #356eae; box-shadow: inset 0 3px 0 var(--blue); }
+    .node.green { border-color: #2b795d; box-shadow: inset 0 3px 0 var(--green); }
+    .node.amber { border-color: #87662e; box-shadow: inset 0 3px 0 var(--amber); }
+    .node.red { border-color: #8e4650; box-shadow: inset 0 3px 0 var(--red); }
+    .node.violet { border-color: #6551a5; box-shadow: inset 0 3px 0 var(--violet); }
+    .arrow { display: grid; place-items: center; color: #7190c8; font-size: 24px; }
+    .span-2 { grid-column: span 2; }
+    .span-3 { grid-column: span 3; }
+    .split {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 14px;
+      align-items: center;
+      margin-top: 4px;
+    }
+    .result { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .loop { color: var(--amber); font-size: 14px; text-align: center; line-height: 1.5; }
+    .guardrails { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 0 18px 18px; }
+    .guardrail { border: 1px dashed #41567f; border-radius: 12px; padding: 11px 13px; color: var(--muted); font-size: 13px; }
+    .guardrail b { color: #dce7ff; }
+    footer { color: var(--muted); font-size: 13px; margin-top: 22px; display: flex; justify-content: space-between; gap: 20px; }
+    @media (max-width: 900px) {
+      main { padding: 20px; }
+      header { align-items: start; flex-direction: column; }
+      .flow, .guardrails, .result { grid-template-columns: 1fr; }
+      .node, .arrow, .span-2, .span-3 { grid-column: 1 !important; }
+      .arrow { transform: rotate(90deg); min-height: 24px; }
+      .split { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>OPC 无人值守交付架构</h1>
+        <p>人只批准计划和审查最终结果；GitHub 保存状态；Mac mini 完成执行。</p>
+      </div>
+      <div class="badge">v1 · GitHub-native · macOS ARM64</div>
+    </header>
+
+    <section class="lane">
+      <div class="lane-title"><span>Human attention</span><span>只有三个 Attention Event</span></div>
+      <div class="flow">
+        <div class="node violet span-3"><strong>Codex Desktop</strong><small>Grill → Milestone Contract → Plan Approval</small></div>
+        <div class="arrow">→</div>
+        <div class="node blue span-3"><strong>批准的计划</strong><small>固定 base commit，并生成 Approval Digest</small></div>
+        <div class="arrow">→</div>
+        <div class="node green span-3"><strong>最终注意事项</strong><small>Delivery PR 或 Terminal Blocker</small></div>
+      </div>
+    </section>
+
+    <section class="lane">
+      <div class="lane-title"><span>Target Repository · GitHub control</span><span>唯一持久状态源</span></div>
+      <div class="flow">
+        <div class="node blue span-2"><strong>Work Issue</strong><small>合约、摘要、批准人、队列时间</small></div>
+        <div class="arrow">→</div>
+        <div class="node blue span-2"><strong>触发与补漏</strong><small>Ready 事件 + 15 分钟 Reconciliation Sweep</small></div>
+        <div class="arrow">→</div>
+        <div class="node violet span-2"><strong>Repository Queue</strong><small>每仓库串行，Recovery 优先，FIFO</small></div>
+        <div class="arrow">→</div>
+        <div class="node amber span-2"><strong>Work Claim</strong><small>5 分钟心跳，30 分钟租约</small></div>
+      </div>
+    </section>
+
+    <section class="lane">
+      <div class="lane-title"><span>Mac mini · native execution</span><span>专用 macOS 用户，无 Docker</span></div>
+      <div class="flow">
+        <div class="node violet span-2"><strong>GitHub Runner</strong><small>薄调度 adapter；job-scoped credentials</small></div>
+        <div class="arrow">→</div>
+        <div class="node blue span-2"><strong>OPC CLI</strong><small>claim · execute · verify · recover · publish</small></div>
+        <div class="arrow">→</div>
+        <div class="node blue span-2"><strong>Codex Executor</strong><small>临时 worktree；只读 GitHub token</small></div>
+        <div class="arrow">→</div>
+        <div class="node amber span-2"><strong>Candidate Result</strong><small>变更、结构化输出与证据包</small></div>
+
+        <div class="split">
+          <div class="node green"><strong>Evidence Gate + Result Review</strong><small>确定性检查先执行，独立 reviewer 再判断是否符合原计划。</small></div>
+          <div class="loop">PASS → 发布<br>FAIL ↺ 恢复</div>
+          <div class="result">
+            <div class="node green"><strong>Delivery PR</strong><small>独立发布 job 才有 GitHub 写权限；不自动 merge。</small></div>
+            <div class="node red"><strong>Recovery Issue</strong><small>同范围自动重试；最多两条；扩权立即重新批准。</small></div>
+          </div>
+        </div>
+      </div>
+      <div class="guardrails">
+        <div class="guardrail"><b>信任：</b>同一 GitHub owner/org 的私有仓库</div>
+        <div class="guardrail"><b>权限：</b>Repository Policy 是上限</div>
+        <div class="guardrail"><b>漂移：</b>base 改变必须重新批准</div>
+        <div class="guardrail"><b>故障：</b>基础设施事件不制造 Issue 风暴</div>
+      </div>
+    </section>
+
+    <footer>
+      <span>核心逻辑与调度器解耦：未来可替换为 daemon，而不重写状态机。</span>
+      <span>OPC design companion</span>
+    </footer>
+  </main>
+</body>
+</html>

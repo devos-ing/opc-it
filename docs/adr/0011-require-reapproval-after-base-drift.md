@@ -1,0 +1,3 @@
+# Require reapproval after Base Drift
+
+A Milestone Contract is bound to the default-branch commit present at Plan Approval. If that revision changes before the Work Claim begins, the system will not execute or silently rebase the approved work; it will produce a change-impact summary, mark the Work Issue `needs-reapproval`, and return it to Codex Desktop for a new Plan Approval. Base Drift does not create a Recovery Issue or consume the Recovery Budget. This may require occasional owner attention before execution in exchange for never applying an approved plan to repository state the owner did not authorize.

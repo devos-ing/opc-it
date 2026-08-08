@@ -1,0 +1,3 @@
+# Bind approval to an immutable milestone contract
+
+A Plan Approval will authorize the schema-validated canonical JSON representation of one machine-readable Milestone Contract, identified by its SHA-256 Approval Digest. The contract binds both its default-branch base commit and the SHA-256 revision of its Repository Policy. Editing any contract field, encountering Base Drift, or encountering Policy Drift invalidates that authorization and requires a new Plan Approval; workflow labels may represent state but never authority. This adds a reapproval step for corrections and policy updates in exchange for preventing unattended execution against silently changed scope, acceptance criteria, repository state, verification commands, permissions, or resource limits.
