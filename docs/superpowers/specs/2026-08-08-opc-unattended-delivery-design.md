@@ -101,14 +101,16 @@ GitHub Agentic Workflows 提供 agent workflow、安全输出和失败 Issue 等
 - 状态转换、fingerprint、Evidence Gate 和恢复策略。
 - executor 与 reviewer 的模型配置别名。
 
-Target Repository 通过 commit SHA 固定调用的 OPC 版本，避免未经批准的中央更新改变正在执行的行为。
+Target Repository 通过 commit SHA 固定调用的 OPC 版本，避免未经批准的中央更新改变正在执行的行为。私有仓库之间不使用 Target Repository 的 `GITHUB_TOKEN` checkout Control Repository；v1 使用 GitHub 的同 owner/organization 私有 Action 与 reusable workflow sharing。
+
+发布采用两个完整 SHA：`control_action_sha` 固定 bundled OPC Action，随后生成的 `control_workflow_sha` 固定引用该 Action 的 reusable workflow。Action commit 先产生，workflow commit 后产生，避免 workflow 自引用尚不存在的 commit SHA，也不需要 PAT 或 GitHub App。
 
 ### 4.3 目标仓库
 
 每个 Target Repository 只增加：
 
 - `.codex-pipeline.yml` Repository Policy。
-- 一个薄 caller workflow。
+- 一个薄 caller workflow 与一个 Delivery PR lifecycle workflow。
 - OPC labels 与 Issue template。
 
 Work Issue、Recovery Issue、Action run、artifact、delivery branch 和 Delivery Pull Request 全部保留在该仓库。
@@ -138,9 +140,10 @@ flowchart LR
 | Job | 运行位置 | Repository code | OpenAI credential | GitHub 权限 | 职责 |
 |---|---|---:|---:|---|---|
 | `dispatch-and-claim` | GitHub-hosted | 不执行 | 无 | Issues write，Actions/Contents read | 验证授权、选择队首、创建 Work Claim |
+| `heartbeat` | GitHub-hosted | 不执行 | 无 | Actions/Contents read | 每五分钟上传最小 liveness artifact，观察 execute/review jobs |
 | `execute` | Mac mini | 执行 | 有 | Contents read | 创建 Execution Workspace，运行 Codex 和 Evidence Gate |
 | `review` | Mac mini | 只读 | 有 | Contents read | 新会话独立审查合约、diff 与 Evidence Bundle |
-| `recover` | GitHub-hosted | 不执行 | 无 | Issues write | 创建去重 Recovery Issue 或 Terminal Blocker |
+| `recover` | GitHub-hosted | 不执行 | 无 | Issues/Actions write | 创建去重 Recovery Issue 或 Terminal Blocker，并显式 dispatch 下一次尝试 |
 | `publish` | GitHub-hosted | 不执行脚本 | 无 | Contents/PR/Issues write | 验证 artifact，创建 commit、branch 和 PR |
 
 权限按 job 明确声明。下游 reusable workflow 只能维持或降低 caller 提供的 `GITHUB_TOKEN` 权限，不能自行提权。
@@ -230,6 +233,8 @@ publisher 不执行 repository-controlled code。v1 使用 GitHub Git Data API �
 
 v1 只允许普通文件 mode；symlink、submodule 和特殊文件结果进入 Recovery Issue，除非未来 Repository Policy 明确增加支持。
 
+使用 repository-scoped `GITHUB_TOKEN` 创建 PR 时，GitHub 可能把该 PR 触发的 workflow checks 放入等待人工批准状态。v1 将这次批准视为 Delivery PR 最终审阅的一部分，而不是中间监控；若未来要求 PR checks 在无人介入时自动启动，则必须重新评估 GitHub App，并作为新的权限设计审批。
+
 ### 6.6 人类完成交付
 
 - PR 创建后，Work Issue 进入 `opc:result-ready`，但保持打开。
@@ -304,7 +309,7 @@ paths:
   forbidden: [.github/**, .env*, secrets/**]
 
 commands:
-  bootstrap: npm ci --ignore-scripts
+  bootstrap: npm ci --offline --ignore-scripts
   evidence:
     - id: unit-tests
       run: npm test
@@ -313,8 +318,8 @@ commands:
 
 network:
   bootstrap:
-    mode: allowlist
-    allow_domains: [registry.npmjs.org]
+    mode: deny
+    allow_domains: []
   agent:
     mode: deny
 
@@ -323,7 +328,7 @@ environment_allowlist: [CI, NODE_ENV]
 
 Repository Policy 是权限上限。Milestone Contract 只能进一步收紧。缺失、无效或 `enabled: false` 的仓库不能进入队列。
 
-Bootstrap 与 Evidence commands 由 OPC 编排器执行；agent 不能替换这些命令。bootstrap egress 与 agent egress 是不同权限，默认示例只允许 bootstrap 访问包仓库，而 Codex 断网。若 runner 无法强制执行所声明的网络模式和域名 allowlist，仓库 onboarding 必须失败，不能静默放宽。Codex 的普通代码探索仍受 sandbox、可写路径、断网、专用账户和无写凭证共同约束。
+Bootstrap 与 Evidence commands 由 OPC 编排器执行；agent 不能替换这些命令。bootstrap egress 与 agent egress 是不同权限，但 v1 的安全基线是两者都断网并依赖预热的 package cache。schema 保留 domain allowlist 表达能力；若 runner 尚未配置可证明的 egress enforcement，声明非空 allowlist 的仓库 onboarding 必须失败，不能静默放宽。Codex 的普通代码探索仍受 sandbox、可写路径、断网、专用账户和无写凭证共同约束。
 
 ### 8.2 Milestone Contract
 
@@ -478,6 +483,7 @@ Mac mini 离线、GitHub/OpenAI/API 暂时不可用或 runner 未能可靠启动
 - 总执行次数为三次：初次执行加最多两条 Recovery Issue。
 - Recovery Issue 在 Repository Queue 中优先于新 Work Issue。
 - 同一授权范围内自动进入队列，不通知或指派用户。
+- 因为 `GITHUB_TOKEN` 产生的普通 Issue/label event 不会递归触发新 workflow，recover job 使用被 GitHub 明确允许的 `workflow_dispatch` 启动下一次尝试；15 分钟 Reconciliation Sweep 仍负责补漏。
 - 需要扩大 scope、权限、路径、网络、资源或改变验收标准时立即停止，进入新的 Plan Approval。
 - 第三次工作失败形成 Terminal Blocker。
 
@@ -634,10 +640,12 @@ executor 与 reviewer 使用中央逻辑别名。别名固定具体 model、版�
 
 - [OpenAI Codex GitHub Action](https://learn.chatgpt.com/docs/github-action)
 - [OpenAI Codex Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [OpenAI model catalog](https://developers.openai.com/api/docs/models/all)
 - [GitHub Self-hosted runners reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 - [GitHub Adding self-hosted runners](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
 - [GitHub Reusing workflow configurations](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations)
 - [GitHub Actions concurrency](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency)
+- [GitHub GITHUB_TOKEN behavior](https://docs.github.com/en/actions/concepts/security/github_token)
 - [GitHub Agentic Workflows](https://github.github.com/gh-aw/)
 - [GitHub Agentic Workflows self-hosted runners](https://github.github.com/gh-aw/reference/self-hosted-runners/)
 - [Temporal Platform documentation](https://docs.temporal.io/)

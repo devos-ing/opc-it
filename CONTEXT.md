@@ -24,6 +24,14 @@ _Avoid_: Task prompt, optional configuration
 The `OPC` repository that versions the reusable workflows, schemas, validators, and recovery logic shared by all onboarded repositories.
 _Avoid_: State database, target codebase
 
+**Control Action SHA**:
+The full commit SHA of the bundled private OPC JavaScript Action that Target Repositories may execute through same-Trust-Domain GitHub Action sharing.
+_Avoid_: Workflow version, branch, tag
+
+**Control Workflow SHA**:
+The later full commit SHA of the reusable workflow rendered to call one specific Control Action SHA and pinned by each Target Repository caller.
+_Avoid_: Action version, branch, tag
+
 **Orchestration Core**:
 The scheduler-independent OPC CLI that implements claim, execute, verify, recover, and publish transitions for a Target Repository.
 _Avoid_: GitHub workflow, background daemon
