@@ -1,0 +1,31 @@
+name: OPC Reusable Delivery
+on:
+  workflow_call:
+    inputs:
+      event_name:
+        required: true
+        type: string
+      issue_number:
+        required: false
+        type: string
+
+jobs:
+  dispatch-and-claim:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: write
+    outputs:
+      claimed: ${{ steps.opc.outputs.claimed }}
+      issue_number: ${{ steps.opc.outputs['issue-number'] }}
+    steps:
+      - name: Claim or reconcile
+        id: opc
+        uses: "0xroylee/OPC@a6194bbf543d5b85cae7a4a1f50e632a3b6e103e"
+        with:
+          command: ${{ inputs.event_name == 'schedule' && 'reconcile' || 'claim' }}
+          repository: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          workflow-ref: ${{ github.event.repository.default_branch }}
+          github-token: ${{ github.token }}

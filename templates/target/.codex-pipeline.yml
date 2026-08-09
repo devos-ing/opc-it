@@ -1,0 +1,23 @@
+version: 1
+enabled: false
+approvers: ["{{approver_login}}"]
+runner:
+  labels: [self-hosted, macOS, ARM64, opc]
+limits:
+  timeout_minutes: 90
+  max_attempts: 3
+  evidence_bundle_mb: 100
+paths:
+  writable: [src/**, tests/**, docs/**]
+  forbidden: [.github/**, .env*, secrets/**]
+commands:
+  bootstrap: bun install --frozen-lockfile --ignore-scripts
+  evidence:
+    - id: unit-tests
+      run: bun test
+    - id: build
+      run: bun run build
+network:
+  bootstrap: { mode: deny, allow_domains: [] }
+  agent: { mode: deny }
+environment_allowlist: [CI, NODE_ENV]
