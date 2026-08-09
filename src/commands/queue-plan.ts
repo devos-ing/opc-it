@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { interactiveGitHubToken } from "../adapters/github/auth.js";
 import { createGitHubClient } from "../adapters/github/client.js";
 import { GitHubPlanQueue } from "../adapters/github/plan-queue.js";
 import { queueApprovedPlan } from "../application/queue-approved-plan.js";
@@ -30,19 +31,6 @@ function parseDigest(value: string): Sha256 {
     throw new DomainError("INVALID_QUEUE_PLAN_INPUT", "--approved-digest");
   }
   return value as Sha256;
-}
-
-async function interactiveGitHubToken(): Promise<string> {
-  const child = Bun.spawn(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
-  const [exitCode, stdout] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-  ]);
-  const token = stdout.trim();
-  if (exitCode !== 0 || token.length === 0) {
-    throw new DomainError("GITHUB_AUTH_UNAVAILABLE", String(exitCode));
-  }
-  return token;
 }
 
 export async function runQueuePlan(args: readonly string[]): Promise<string> {

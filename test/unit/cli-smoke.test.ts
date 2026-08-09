@@ -21,6 +21,13 @@ describe("runCli", () => {
     });
   });
 
+  it("rejects incomplete onboarding input before GitHub authentication", async () => {
+    expect(await runCli(["onboard-preview"])).toEqual({
+      exitCode: 2,
+      message: '{"error":"INVALID_ONBOARD_PREVIEW_INPUT"}',
+    });
+  });
+
   it("routes a local simulation fixture", async () => {
     const path = fileURLToPath(
       new URL("../fixtures/simulation/success.json", import.meta.url),

@@ -2,6 +2,7 @@
 
 import { runSimulation } from "../commands/simulate.js";
 import { runQueuePlan } from "../commands/queue-plan.js";
+import { runOnboardPreview } from "../commands/onboard-preview.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 
 export interface CliResult {
@@ -31,6 +32,9 @@ export async function runCli(argv: readonly string[]): Promise<CliResult> {
     return executeCommand(() => runSimulation(path));
   }
   if (command === "queue-plan") return executeCommand(() => runQueuePlan(argv.slice(1)));
+  if (command === "onboard-preview") {
+    return executeCommand(() => runOnboardPreview(argv.slice(1)));
+  }
   return { exitCode: 2, message: `Unknown OPC command: ${command}` };
 }
 
