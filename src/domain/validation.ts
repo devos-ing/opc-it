@@ -2,10 +2,12 @@ import Ajv from "ajv";
 import { isAlias, isScalar, parseDocument, visit } from "yaml";
 import {
   MilestoneContractSchema,
+  RecoveryAddendumSchema,
   RepositoryPolicySchema,
   ResultManifestSchema,
   ResultReviewSchema,
   type MilestoneContract,
+  type RecoveryAddendum,
   type RepositoryPolicy,
   type ResultManifest,
   type ResultReviewContract,
@@ -14,6 +16,7 @@ import { DomainError } from "./errors.js";
 
 const ajv = new Ajv({ allErrors: true, strict: true });
 const milestoneValidator = ajv.compile<MilestoneContract>(MilestoneContractSchema);
+const recoveryAddendumValidator = ajv.compile<RecoveryAddendum>(RecoveryAddendumSchema);
 const repositoryPolicyValidator = ajv.compile<RepositoryPolicy>(RepositoryPolicySchema);
 const resultManifestValidator = ajv.compile<ResultManifest>(ResultManifestSchema);
 const resultReviewValidator = ajv.compile<ResultReviewContract>(ResultReviewSchema);
@@ -57,11 +60,28 @@ export function parseMilestoneYaml(text: string): MilestoneContract {
   return value;
 }
 
+export function parseIssueContractYaml(text: string): MilestoneContract | RecoveryAddendum {
+  const value = parseStrictYaml(text);
+  if (milestoneValidator(value)) return value;
+  if (recoveryAddendumValidator(value)) return value;
+  throw new DomainError(
+    "INVALID_CONTRACT",
+    [
+      ajv.errorsText(milestoneValidator.errors),
+      ajv.errorsText(recoveryAddendumValidator.errors),
+    ].join("; "),
+  );
+}
+
 export function validateRepositoryPolicy(value: unknown): RepositoryPolicy {
   if (!repositoryPolicyValidator(value)) {
     throw new DomainError("INVALID_POLICY", ajv.errorsText(repositoryPolicyValidator.errors));
   }
   return value;
+}
+
+export function parseRepositoryPolicyYaml(text: string): RepositoryPolicy {
+  return validateRepositoryPolicy(parseStrictYaml(text));
 }
 
 export function validateResultManifest(value: unknown, maximumBytes: number): ResultManifest {

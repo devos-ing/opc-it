@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { runSimulation } from "../commands/simulate.js";
+import { runQueuePlan } from "../commands/queue-plan.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 
 export interface CliResult {
@@ -8,9 +9,17 @@ export interface CliResult {
   readonly message: string;
 }
 
-function simulationErrorResult(error: unknown): CliResult {
+function commandErrorResult(error: unknown): CliResult {
   const code: DomainErrorCode = error instanceof DomainError ? error.code : "INTERNAL_ERROR";
   return { exitCode: 2, message: JSON.stringify({ error: code }) };
+}
+
+async function executeCommand(command: () => Promise<string>): Promise<CliResult> {
+  try {
+    return { exitCode: 0, message: await command() };
+  } catch (error) {
+    return commandErrorResult(error);
+  }
 }
 
 export async function runCli(argv: readonly string[]): Promise<CliResult> {
@@ -19,12 +28,9 @@ export async function runCli(argv: readonly string[]): Promise<CliResult> {
   if (command === "simulate") {
     const path = argv[1];
     if (!path) return { exitCode: 2, message: "Usage: opc simulate <fixture.json>" };
-    try {
-      return { exitCode: 0, message: await runSimulation(path) };
-    } catch (error) {
-      return simulationErrorResult(error);
-    }
+    return executeCommand(() => runSimulation(path));
   }
+  if (command === "queue-plan") return executeCommand(() => runQueuePlan(argv.slice(1)));
   return { exitCode: 2, message: `Unknown OPC command: ${command}` };
 }
 

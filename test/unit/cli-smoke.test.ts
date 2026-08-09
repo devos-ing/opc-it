@@ -14,6 +14,13 @@ describe("runCli", () => {
     });
   });
 
+  it("rejects incomplete queue-plan input before GitHub authentication", async () => {
+    expect(await runCli(["queue-plan"])).toEqual({
+      exitCode: 2,
+      message: '{"error":"INVALID_QUEUE_PLAN_INPUT"}',
+    });
+  });
+
   it("routes a local simulation fixture", async () => {
     const path = fileURLToPath(
       new URL("../fixtures/simulation/success.json", import.meta.url),
