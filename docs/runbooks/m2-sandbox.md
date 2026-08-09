@@ -5,8 +5,8 @@
 ## 固定版本
 
 - Control Repository：`0xroylee/OPC`（private）
-- Action SHA：`a6194bbf543d5b85cae7a4a1f50e632a3b6e103e`
-- Reusable Workflow SHA：`66164c300889e12917c48afc704bb3841322f6ef`
+- Action SHA：`41ba03538fc572e0e6f010f41f517c4eac0d44a7`
+- Reusable Workflow SHA：`715323d1cff3f194e77bc20e91148529fce9d9f0`
 - Sandbox 示例：`0xroylee/opc-m2-sandbox`
 
 若任一 SHA 与仓库历史不一致，停止验收并重新渲染；不得用 `main`、tag 或短 SHA 替代。
@@ -44,7 +44,7 @@ rtk bun run build
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m2-sandbox \
   --control-owner 0xroylee \
-  --control-ref 66164c300889e12917c48afc704bb3841322f6ef \
+  --control-ref 715323d1cff3f194e77bc20e91148529fce9d9f0 \
   --approver 0xroylee \
   --output .opc/m2-sandbox-preview
 ```
@@ -98,9 +98,9 @@ rtk gh workflow run opc.yml \
 
 - Issue 最终只有一个 `opc:claimed` 状态标签；
 - transition timeline 只有一次成功的 `ready → claimed`；
-- 第二次为 empty/lost-race no-op，没有第二个 claim；
+- 第二次为 `active-claim` no-op，没有第二个 claim；
 - transition metadata 包含 `run_id`、`claimed_at`、30 分钟 `lease_deadline`、attempt、base SHA 与 approval digest；
-- Actions 日志显示 reusable workflow SHA `66164c3…` 与 Action SHA `a6194bb…`；
+- Actions 日志显示 reusable workflow SHA `715323d…` 与 Action SHA `41ba035…`；
 - workflow 只运行 GitHub-hosted `dispatch-and-claim`，没有 Target checkout、本地进程、Mac runner 或执行阶段。
 
 M2 的预期停止点是 `opc:claimed`。不要手工伪造 Delivered、分支或 PR。
