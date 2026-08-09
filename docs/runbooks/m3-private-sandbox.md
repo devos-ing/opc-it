@@ -5,8 +5,8 @@
 ## 固定版本与停止条件
 
 - Control Repository：`0xroylee/OPC`（private）
-- Action SHA：`143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2`
-- Reusable Workflow SHA：`c0c7dbbb6e6dc8905208fd2da5f1ae9ef2c8b648`
+- Action SHA：`fd474f9c651420d70e5e7e0108de67ec739dc173`
+- Reusable Workflow SHA：`7b5d8da0e876ee3da963ee8d46cea1adab931147`
 - Sandbox：`0xroylee/opc-m3-sandbox`（private、非 fork、无外部 collaborator）
 - Bun：`1.3.8`
 - Codex CLI：`0.144.4`
@@ -52,7 +52,7 @@ rtk gh variable set OPC_ENABLED --body false --repo 0xroylee/opc-m3-sandbox
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m3-sandbox \
   --control-owner 0xroylee \
-  --control-ref c0c7dbbb6e6dc8905208fd2da5f1ae9ef2c8b648 \
+  --control-ref 7b5d8da0e876ee3da963ee8d46cea1adab931147 \
   --approver 0xroylee \
   --output .opc/m3-sandbox-preview
 ```
@@ -65,6 +65,8 @@ rtk bun dist/cli.js onboard-preview \
 - checkout 使用批准 base SHA、`persist-credentials: false`；local Action commands 不接收 `github-token`；
 - 没有 provider secret、publisher、Contents write、commit、branch、Pull Request 或 merge step。
 - Target caller 不能传 model、effort、profile 或 Codex version；固定 Action 内部将 executor 锁定为 `gpt-5.6-luna/high`，reviewer 锁定为 `gpt-5.6-sol/xhigh`。
+- `OPC_ENABLED` 在 execute、review 和 conclude/recover 各边界重新求值；关闭后不得产生新的状态转换。
+- executor 的批准时限是一个绝对 deadline，bootstrap、Codex 与全部 Evidence 共用；95 分钟 job 上限只为最多 90 分钟批准预算预留 5 分钟清理余量。reviewer 固定 900 秒，20 分钟 job 上限同样保留收尾余量。
 
 完成 setup 与 runner 检查后才启用：
 
@@ -106,7 +108,7 @@ rtk gh workflow run opc.yml \
 | Evidence failure | 使用人工审查的 sandbox policy，让固定 evidence command 对该 base 确定退出非零 | bundle 保留；review 未启动；消耗一个 attempt；log 已脱敏 |
 | review mismatch | 使用 acceptance 与候选内容确定不一致的批准 fixture | bundle 保留；review 为 fail；消耗一个 attempt；不能进入 verified |
 | duplicate trigger | success Work 在第一次 claim 后立即重复手动 dispatch | 只有一个 claim / execution；第二次为 active-claim no-op |
-| timeout | 使用批准 timeout 下限和确定超时的 sandbox fixture | bounded failure；worktree 清理；消耗一个 attempt；无遗留 Codex 进程 |
+| timeout | 使用批准 timeout 下限和确定超时的 sandbox fixture | bootstrap、Codex 与 Evidence 共享同一个 deadline；bounded execution failure；worktree 清理；消耗一个 attempt；无遗留 Codex 进程 |
 | simulated offline recovery | claim 后停止 runner service，保持 `OPC_ENABLED=true`，等待 lease expiry 与 schedule reconcile | `queued` 不产生 heartbeat；未开始的 attempt 消耗为零；回到 ready；旧 run 被取消；恢复后仍用同一 approval/base |
 
 若某个负向 fixture 没有确定地产生目标故障，记录为未完成，不得把手工编辑 Issue label、artifact 或 review JSON 当作通过证据。
@@ -129,10 +131,11 @@ rtk gh api repos/0xroylee/opc-m3-sandbox/branches
 - `bundle-index.json` 的 outer digest、manifest `artifact_sha256`、每个 changed content/evidence log digest；
 - Result Manifest、Result Review、criterion-to-evidence 映射与 heartbeat 首条/5 分钟节拍/最终 stopped 时间线；
 - 只有 `in_progress` executor/reviewer 可以产生 running heartbeat；普通 workflow `updated_at` 与纯 queued 状态都不能续租；
+- conclude 必须等待 heartbeat job；heartbeat job list 不可信、超时或失败时必须归类为 infrastructure Run Incident，不能写入 `result-ready`；
 - executor 与 reviewer 是两个 fresh ephemeral session；reviewer 只下载 Candidate bundle；
 - 日志和 artifacts 不含 `GITHUB_TOKEN`、Actions runtime token、API key、Codex home、`auth.json`、ChatGPT credential、环境 dump、executor conversation 或 rollout/session 文件；
 - GitHub permission summary 保持 Contents read-only；没有 OPC commit、delivery branch、Pull Request 或 repository write。
-- 成功 run 的 transition comments 最终为 `result-ready`；execution/evidence/review 失败由 `complete-run` 从可信 Jobs API 状态分类，并只占用一个批准的 Recovery attempt。旧的 caller-supplied `recover` payload 必须被拒绝。
+- 成功 run 的 transition comments 最终为 `result-ready`；execution/evidence/review 失败由 `complete-run` 从可信 Jobs API job 与固定 step 名分类，并只占用一个批准的 Recovery attempt；OpenAI/API/runner incident 不占用 attempt。旧的 caller-supplied `recover` payload 必须被拒绝。
 
 Branch 取证要区分 sandbox setup branch 与 OPC 新建分支；M3 预期 OPC 新建分支为零。PR 列表为空。
 
