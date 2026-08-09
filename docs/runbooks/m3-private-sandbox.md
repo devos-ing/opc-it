@@ -5,8 +5,8 @@
 ## 固定版本与停止条件
 
 - Control Repository：`0xroylee/OPC`（private）
-- Action SHA：`fd474f9c651420d70e5e7e0108de67ec739dc173`
-- Reusable Workflow SHA：`7b5d8da0e876ee3da963ee8d46cea1adab931147`
+- Action SHA：`e0c54d6350d0be14d0482fd1d1b535469455f95d`
+- Reusable Workflow SHA：`8053a44e6990956fdf512d82caf377ef4566aa58`
 - Sandbox：`0xroylee/opc-m3-sandbox`（private、非 fork、无外部 collaborator）
 - Bun：`1.3.8`
 - Codex CLI：`0.144.4`
@@ -52,7 +52,7 @@ rtk gh variable set OPC_ENABLED --body false --repo 0xroylee/opc-m3-sandbox
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m3-sandbox \
   --control-owner 0xroylee \
-  --control-ref 7b5d8da0e876ee3da963ee8d46cea1adab931147 \
+  --control-ref 8053a44e6990956fdf512d82caf377ef4566aa58 \
   --approver 0xroylee \
   --output .opc/m3-sandbox-preview
 ```
@@ -65,8 +65,9 @@ rtk bun dist/cli.js onboard-preview \
 - checkout 使用批准 base SHA、`persist-credentials: false`；local Action commands 不接收 `github-token`；
 - 没有 provider secret、publisher、Contents write、commit、branch、Pull Request 或 merge step。
 - Target caller 不能传 model、effort、profile 或 Codex version；固定 Action 内部将 executor 锁定为 `gpt-5.6-luna/high`，reviewer 锁定为 `gpt-5.6-sol/xhigh`。
-- `OPC_ENABLED` 在 execute、review 和 conclude/recover 各边界重新求值；关闭后不得产生新的状态转换。
-- executor 的批准时限是一个绝对 deadline，bootstrap、Codex 与全部 Evidence 共用；95 分钟 job 上限只为最多 90 分钟批准预算预留 5 分钟清理余量。reviewer 固定 900 秒，20 分钟 job 上限同样保留收尾余量。
+- `OPC_ENABLED` 在 execute、review 和 conclude/recover 各边界重新求值；GitHub-hosted review gate 与 `complete-run` 还必须重新读取 default branch 当前 Repository Policy 的 `enabled`。任一开关关闭后不得产生新的状态转换。
+- executor 的批准时限在 checkout 前的第一个 durable step 建立为绝对 deadline，checkout、bootstrap、Codex 与全部 Evidence 共用；95 分钟 job 上限为最多 90 分钟批准预算保留清理余量。reviewer 固定 900 秒，20 分钟 job 上限同样保留收尾余量。
+- heartbeat 的 165 分钟上限覆盖 30 分钟排队 lease、95 分钟 execute 与 20 分钟 review，并留有轮询收尾余量；人工取消不得进入 `complete-run` 或自动 Recovery。
 
 完成 setup 与 runner 检查后才启用：
 
