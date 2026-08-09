@@ -12,14 +12,14 @@ const outageBlockDurationMs = 24 * 60 * 60 * 1_000;
 
 export function reconcileClaim(input: ReconcileClaimInput): ReconcileDecision {
   if (input.cancelledByOwner) return "cancelled";
+  const leaseExpired =
+    input.now.getTime() - input.lastHeartbeat.getTime() >= leaseDurationMs;
+  if (!leaseExpired) return "keep";
   if (
     input.outageStarted &&
     input.now.getTime() - input.outageStarted.getTime() >= outageBlockDurationMs
   ) {
     return "block";
   }
-  if (input.now.getTime() - input.lastHeartbeat.getTime() >= leaseDurationMs) {
-    return "requeue";
-  }
-  return "keep";
+  return "requeue";
 }

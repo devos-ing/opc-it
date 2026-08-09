@@ -57,7 +57,12 @@ it("connects lease decisions to fail-closed state transitions", async () => {
     await reconcileRepository(port, { now: () => new Date("2026-08-08T10:00:00Z") }),
   ).toEqual({ active: 4, kept: 1, requeued: 1, blocked: 1, cancelled: 1 });
   expect(port.transitions).toMatchObject([
-    { issueNumber: 2, expected: "claimed", event: "lease-expired" },
+    {
+      issueNumber: 2,
+      expected: "claimed",
+      event: "lease-expired",
+      metadata: { outage_started: "2026-08-08T09:00:00.000Z" },
+    },
     { issueNumber: 3, expected: "claimed", event: "outage-block" },
   ]);
 });

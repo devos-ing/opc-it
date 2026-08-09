@@ -12,6 +12,7 @@ const validTransitions: ReadonlyArray<readonly [WorkState, WorkEvent, WorkState]
   ["running", "work-failure", "recovering"],
   ["reviewing", "work-failure", "recovering"],
   ["running", "incident", "ready"],
+  ["reviewing", "incident", "ready"],
   ["recovering", "retry", "ready"],
   ["recovering", "block", "blocked"],
   ["ready", "drift", "needs-reapproval"],

@@ -4,7 +4,8 @@ import { parseActionInputs } from "../../src/action/inputs.js";
 const failurePayload = {
   category: "execution",
   requiresExpansion: false,
-  fingerprint: `sha256:${"f".repeat(64)}`,
+  checkId: "unit",
+  message: "assertion failed in payment test",
   evidenceUrl: "https://github.com/acme/app/actions/runs/123/artifacts/456",
   repairHypothesis: "retry the failed unit test",
   verificationFocus: "unit",

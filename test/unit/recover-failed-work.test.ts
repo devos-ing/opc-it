@@ -105,6 +105,19 @@ it("requeues an infrastructure incident without consuming an attempt", async () 
   expect(port.recoveries).toHaveLength(0);
 });
 
+it("requeues a reviewing infrastructure incident without consuming an attempt", async () => {
+  const port = new MemoryRecoveryControl("reviewing");
+
+  expect(
+    await recoverFailedWork(
+      { ...failedAttempt(), category: "infrastructure", state: "reviewing" },
+      port,
+    ),
+  ).toEqual({ outcome: "requeued", attempt: 1 });
+  expect(port.transitions.map((command) => command.event)).toEqual(["incident"]);
+  expect(port.recoveries).toHaveLength(0);
+});
+
 it("blocks the root after the approved attempt budget is exhausted", async () => {
   const port = new MemoryRecoveryControl("running");
 

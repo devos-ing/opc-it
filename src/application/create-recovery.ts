@@ -27,16 +27,23 @@ export interface FailedAttempt {
 }
 
 export interface RecoveryPort {
-  findOpenRecovery(
-    rootIssueNumber: number,
-    fingerprint: Sha256,
-  ): Promise<number | undefined>;
+  findOpenRecovery(input: RecoveryLookup): Promise<number | undefined>;
   createRecovery(input: RecoveryIssueInput): Promise<number>;
   dispatch(
     workflowFile: string,
     ref: string,
     inputs: Readonly<Record<string, string>>,
   ): Promise<void>;
+}
+
+export interface RecoveryLookup {
+  readonly rootIssueNumber: number;
+  readonly parentIssueNumber: number;
+  readonly workId: string;
+  readonly approvalDigest: Sha256;
+  readonly fingerprint: Sha256;
+  readonly attempt: 2 | 3;
+  readonly category: FailureCategory;
 }
 
 export type RecoveryResult =
@@ -85,11 +92,6 @@ export async function createRecovery(
     throw new Error("INFRASTRUCTURE_RECOVERY_INVARIANT");
   }
 
-  const existing = await port.findOpenRecovery(input.rootIssueNumber, input.fingerprint);
-  if (existing !== undefined) {
-    return { outcome: "deduplicated", issueNumber: existing };
-  }
-
   const addendum: RecoveryAddendum = {
     kind: "Recovery",
     root_work_id: input.workId,
@@ -102,6 +104,18 @@ export async function createRecovery(
     repair_hypothesis: input.repairHypothesis,
     verification_focus: input.verificationFocus,
   };
+  const existing = await port.findOpenRecovery({
+    rootIssueNumber: input.rootIssueNumber,
+    parentIssueNumber: input.issueNumber,
+    workId: input.workId,
+    approvalDigest: input.approvalDigest,
+    fingerprint: input.fingerprint,
+    attempt: decision.nextAttempt,
+    category: input.category,
+  });
+  if (existing !== undefined) {
+    return { outcome: "deduplicated", issueNumber: existing };
+  }
   const issueNumber = await port.createRecovery({
     rootIssueNumber: input.rootIssueNumber,
     body: serializeRecoveryIssue(addendum),

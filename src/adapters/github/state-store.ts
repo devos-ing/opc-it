@@ -85,6 +85,7 @@ export class GitHubStateStore implements ClaimPort {
       private: data.private,
       fork: data.fork,
       sameTrustDomain: data.owner.login === this.trustedOwner,
+      defaultBranch: data.default_branch,
     };
   }
 

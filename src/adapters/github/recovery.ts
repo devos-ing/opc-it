@@ -1,5 +1,8 @@
 import type { Octokit } from "@octokit/rest";
-import type { RecoveryPort } from "../../application/create-recovery.js";
+import type {
+  RecoveryLookup,
+  RecoveryPort,
+} from "../../application/create-recovery.js";
 import type { RecoveryControlPort } from "../../application/recover-failed-work.js";
 import type {
   RecoveryIssueInput,
@@ -8,6 +11,7 @@ import type {
   WorkIssueRecord,
 } from "../../application/ports.js";
 import type { Sha256 } from "../../domain/identity.js";
+import { DomainError } from "../../domain/errors.js";
 import { parseIssueContractYaml } from "../../domain/validation.js";
 import { extractContractBlock } from "./issue-parser.js";
 import { GitHubStateStore } from "./state-store.js";
@@ -36,10 +40,7 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
     return this.stateStore.transition(command);
   }
 
-  async findOpenRecovery(
-    rootIssueNumber: number,
-    fingerprint: Sha256,
-  ): Promise<number | undefined> {
+  async findOpenRecovery(input: RecoveryLookup): Promise<number | undefined> {
     const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
       repo: this.repo,
@@ -47,12 +48,29 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
       labels: "opc:recovery",
       per_page: 100,
     });
-    const marker = recoveryMarker(rootIssueNumber, fingerprint);
+    const marker = recoveryMarker(input.rootIssueNumber, input.fingerprint);
     for (const issue of issues) {
-      if (!issue.body?.includes(marker)) continue;
-      const contract = parseIssueContractYaml(extractContractBlock(issue.body));
-      if (contract.kind === "Recovery" && contract.error_fingerprint === fingerprint) {
-        return issue.number;
+      if (
+        issue.user?.login !== "github-actions[bot]" ||
+        !issue.body?.includes(marker)
+      ) {
+        continue;
+      }
+      try {
+        const contract = parseIssueContractYaml(extractContractBlock(issue.body));
+        if (
+          contract.kind === "Recovery" &&
+          contract.root_work_id === input.workId &&
+          contract.parent_issue === input.parentIssueNumber &&
+          contract.approval_digest === input.approvalDigest &&
+          contract.error_fingerprint === input.fingerprint &&
+          contract.attempt === input.attempt &&
+          contract.failure_type === input.category
+        ) {
+          return issue.number;
+        }
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
       }
     }
     return undefined;

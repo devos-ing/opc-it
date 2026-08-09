@@ -41,7 +41,7 @@ const transitions: TransitionMap = {
   ready: { claim: "claimed", drift: "needs-reapproval" },
   claimed: { start: "running", "lease-expired": "ready", "outage-block": "blocked" },
   running: { candidate: "reviewing", "work-failure": "recovering", incident: "ready" },
-  reviewing: { verify: "result-ready", "work-failure": "recovering" },
+  reviewing: { verify: "result-ready", "work-failure": "recovering", incident: "ready" },
   recovering: { retry: "ready", block: "blocked" },
   "result-ready": { merge: "delivered", "close-unmerged": "needs-decision" },
   "needs-reapproval": { approve: "ready" },

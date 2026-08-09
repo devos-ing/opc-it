@@ -123,7 +123,10 @@ it("returns the existing open Recovery without dispatching again", async () => {
     {
       method: "GET",
       path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
-      response: [{ number: 42, body: recoveryBody() }],
+      response: [
+        { number: 41, user: { login: "mallory" }, body: recoveryBody() },
+        { number: 42, user: { login: "github-actions[bot]" }, body: recoveryBody() },
+      ],
     },
   ]);
   const port = new GitHubRecovery(
@@ -145,7 +148,10 @@ it("creates one unassigned Recovery and dispatches it exactly once", async () =>
     {
       method: "GET",
       path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
-      response: [],
+      response: [
+        { number: 40, user: { login: "mallory" }, body: recoveryBody() },
+        { number: 41, user: { login: "github-actions[bot]" }, body: "# malformed" },
+      ],
     },
     { method: "POST", path: "/repos/acme/app/issues", response: { number: 42 }, status: 201 },
     {

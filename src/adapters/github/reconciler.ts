@@ -15,6 +15,11 @@ interface ClaimMetadata {
   readonly claimedAt: Date;
 }
 
+interface TransitionRecord {
+  readonly event: string;
+  readonly metadata: Record<string, unknown>;
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value))
@@ -27,7 +32,9 @@ function parseDate(value: unknown): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
-function claimMetadata(body: string | null | undefined): ClaimMetadata | undefined {
+function parseTransitionRecord(
+  body: string | null | undefined,
+): TransitionRecord | undefined {
   const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
   if (!payload) return undefined;
   let value: unknown;
@@ -38,9 +45,16 @@ function claimMetadata(body: string | null | undefined): ClaimMetadata | undefin
   }
   const transitionRecord = record(value);
   const metadata = record(transitionRecord?.metadata);
-  const runId = metadata?.run_id;
-  const claimedAt = parseDate(metadata?.claimed_at);
-  return transitionRecord?.event === "claim" && typeof runId === "string" && claimedAt
+  const event = transitionRecord?.event;
+  return typeof event === "string" && metadata ? { event, metadata } : undefined;
+}
+
+function claimMetadata(record: TransitionRecord | undefined): ClaimMetadata | undefined {
+  if (!record) return undefined;
+  const metadata = record.metadata;
+  const runId = metadata.run_id;
+  const claimedAt = parseDate(metadata.claimed_at);
+  return record.event === "claim" && typeof runId === "string" && claimedAt
     ? { runId, claimedAt }
     : undefined;
 }
@@ -83,18 +97,31 @@ export class GitHubReconciler implements ReconcilePort {
       issue_number: issueNumber,
       per_page: 100,
     });
-    const metadata = comments
+    const records = comments
       .filter(
         (comment) =>
           comment.user?.login === "github-actions[bot]" &&
           comment.created_at === comment.updated_at,
       )
-      .map((comment) => claimMetadata(comment.body))
-      .filter((candidate): candidate is ClaimMetadata => candidate !== undefined)
-      .at(-1);
+      .map((comment) => parseTransitionRecord(comment.body))
+      .filter((candidate): candidate is TransitionRecord => candidate !== undefined);
+    let claimIndex = -1;
+    let metadata: ClaimMetadata | undefined;
+    for (const [index, candidate] of records.entries()) {
+      const claim = claimMetadata(candidate);
+      if (!claim) continue;
+      claimIndex = index;
+      metadata = claim;
+    }
     if (!metadata || !/^\d+$/.test(metadata.runId)) {
       throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
     }
+
+    const previous = records[claimIndex - 1];
+    const persistedOutageStarted =
+      previous?.event === "lease-expired"
+        ? parseDate(previous.metadata.outage_started)
+        : undefined;
 
     let lastHeartbeat = metadata.claimedAt;
     let cancelledByOwner = false;
@@ -113,7 +140,7 @@ export class GitHubReconciler implements ReconcilePort {
     return {
       issueNumber,
       lastHeartbeat,
-      outageStarted: metadata.claimedAt,
+      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
       cancelledByOwner,
     };
   }

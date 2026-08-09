@@ -1,6 +1,5 @@
 import { DomainError } from "../domain/errors.js";
 import { failureCategories, type FailureCategory } from "../domain/recovery.js";
-import type { Sha256 } from "../domain/identity.js";
 
 export const actionCommands = ["validate", "claim", "reconcile", "recover", "publish"] as const;
 
@@ -9,7 +8,8 @@ export type ActionCommand = (typeof actionCommands)[number];
 export interface RecoveryFailurePayload {
   readonly category: FailureCategory;
   readonly requiresExpansion: boolean;
-  readonly fingerprint: Sha256;
+  readonly checkId: string;
+  readonly message: string;
   readonly evidenceUrl: string;
   readonly repairHypothesis: string;
   readonly verificationFocus: string;
@@ -65,8 +65,9 @@ function parseFailurePayload(
   const keys = payload ? Object.keys(payload).sort() : [];
   const expectedKeys = [
     "category",
+    "checkId",
     "evidenceUrl",
-    "fingerprint",
+    "message",
     "repairHypothesis",
     "requiresExpansion",
     "verificationFocus",
@@ -75,16 +76,17 @@ function parseFailurePayload(
     throw new DomainError("INVALID_FAILURE_PAYLOAD", "unexpected payload shape");
   }
   const category = payload.category;
-  const fingerprint = payload.fingerprint;
+  const checkId = payload.checkId;
   const evidenceUrl = payload.evidenceUrl;
+  const message = payload.message;
   const repairHypothesis = payload.repairHypothesis;
   const verificationFocus = payload.verificationFocus;
   if (
     !isFailureCategory(category) ||
     typeof payload.requiresExpansion !== "boolean" ||
-    typeof fingerprint !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/.test(fingerprint) ||
+    !boundedText(checkId) ||
     !boundedText(evidenceUrl) ||
+    !boundedText(message) ||
     !boundedText(repairHypothesis) ||
     !boundedText(verificationFocus)
   ) {
@@ -106,7 +108,8 @@ function parseFailurePayload(
   return {
     category,
     requiresExpansion: payload.requiresExpansion,
-    fingerprint: fingerprint as Sha256,
+    checkId,
+    message,
     evidenceUrl,
     repairHypothesis,
     verificationFocus,

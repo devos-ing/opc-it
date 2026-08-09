@@ -39,20 +39,30 @@ function createGitHubApi(routes: readonly Route[]): {
   };
 }
 
-function claimComment(actor: string, runId: string, createdAt: string) {
+function transitionComment(
+  actor: string,
+  event: string,
+  metadata: Readonly<Record<string, string>>,
+  createdAt: string,
+) {
   return {
     user: { login: actor },
     body: `<!-- opc-transition ${JSON.stringify({
-      expected: "ready",
-      event: "claim",
-      metadata: {
-        run_id: runId,
-        claimed_at: "2026-08-08T09:00:00.000Z",
-      },
+      event,
+      metadata,
     })} -->`,
     created_at: createdAt,
     updated_at: createdAt,
   };
+}
+
+function claimComment(actor: string, runId: string, claimedAt: string) {
+  return transitionComment(
+    actor,
+    "claim",
+    { run_id: runId, claimed_at: claimedAt },
+    claimedAt,
+  );
 }
 
 it("ignores a newer forged claim heartbeat from a collaborator", async () => {
@@ -64,6 +74,13 @@ it("ignores a newer forged claim heartbeat from a collaborator", async () => {
     {
       path: "/repos/acme/app/issues/7/comments?per_page=100",
       response: [
+        claimComment("github-actions[bot]", "111", "2026-08-07T09:00:00Z"),
+        transitionComment(
+          "github-actions[bot]",
+          "lease-expired",
+          { outage_started: "2026-08-07T09:00:00.000Z" },
+          "2026-08-07T09:31:00Z",
+        ),
         claimComment("github-actions[bot]", "123", "2026-08-08T09:00:00Z"),
         claimComment("mallory", "999", "2026-08-08T09:29:00Z"),
       ],
@@ -87,7 +104,7 @@ it("ignores a newer forged claim heartbeat from a collaborator", async () => {
     {
       issueNumber: 7,
       lastHeartbeat: new Date("2026-08-08T09:10:00Z"),
-      outageStarted: new Date("2026-08-08T09:00:00Z"),
+      outageStarted: new Date("2026-08-07T09:00:00Z"),
       cancelledByOwner: false,
     },
   ]);

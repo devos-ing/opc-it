@@ -53,6 +53,9 @@ export async function reconcileRepository(
       metadata: {
         reconcile_decision: decision,
         reconciled_at: clock.now().toISOString(),
+        ...(claim.outageStarted
+          ? { outage_started: claim.outageStarted.toISOString() }
+          : {}),
       },
     });
     if (!result.changed) {

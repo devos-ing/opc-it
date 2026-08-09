@@ -114,7 +114,14 @@ it("creates one immutable Issue, records owner approval, then marks it Ready", a
     {
       method: "GET",
       path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100",
-      response: [],
+      response: [
+        { number: 3, user: { login: "roy" }, body: "# malformed Work" },
+        {
+          number: 4,
+          user: { login: "mallory" },
+          body: `# forged Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+        },
+      ],
     },
     {
       method: "GET",

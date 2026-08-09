@@ -93,7 +93,12 @@ class InMemoryClaimPort implements ClaimPort {
   }
 
   loadRepositoryIdentity(): Promise<RepositoryControlIdentity> {
-    return Promise.resolve({ private: true, fork: false, sameTrustDomain: true });
+    return Promise.resolve({
+      private: true,
+      fork: false,
+      sameTrustDomain: true,
+      defaultBranch: "main",
+    });
   }
 
   loadRepositoryPolicy(ref: string): Promise<RepositoryPolicy> {
@@ -165,6 +170,24 @@ it("does not claim a second ready Issue while another lease is active", async ()
     reason: "active-claim",
   });
   expect(port.claimTransitions).toHaveLength(1);
+});
+
+it("keeps the execution slot closed while a result awaits publication", async () => {
+  const awaitingPublication = { ...workIssue(), state: "result-ready" as const };
+  const ready = {
+    ...workIssue(),
+    number: 9,
+    rootIssueNumber: 9,
+    createdAt: "2026-08-08T09:30:00Z",
+  };
+  const port = new InMemoryClaimPort([awaitingPublication, ready], [ready]);
+
+  expect(
+    await claimNextWork(port, { now: () => new Date("2026-08-08T10:00:00Z") }, {
+      runId: "112",
+    }),
+  ).toEqual({ claimed: false, reason: "active-claim" });
+  expect(port.claimTransitions).toHaveLength(0);
 });
 
 it("claims Recovery using the root Work approval", async () => {
@@ -241,5 +264,17 @@ it("rejects a Recovery attempt beyond the root Work approval budget", async () =
       runId: "202",
     }).catch((error: unknown) => error),
   ).toMatchObject({ code: "RECOVERY_BUDGET_EXCEEDED" });
+  expect(port.claimTransitions).toHaveLength(0);
+});
+
+it("rejects a root Work presented as a later attempt", async () => {
+  const forged = { ...workIssue(), attempt: 3 as const };
+  const port = new InMemoryClaimPort([forged]);
+
+  expect(
+    await claimNextWork(port, { now: () => new Date("2026-08-08T10:00:00Z") }, {
+      runId: "203",
+    }).catch((error: unknown) => error),
+  ).toMatchObject({ code: "INVALID_ATTEMPT_LABELS" });
   expect(port.claimTransitions).toHaveLength(0);
 });

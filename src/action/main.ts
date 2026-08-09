@@ -9,6 +9,7 @@ import { toActionOutputs } from "./outputs.js";
 
 export interface ActionRuntime {
   getActionRepository(): string;
+  getWorkflowRef(): string;
   getInput(name: string): string;
   getRunId(): string;
   createGitHubClient?(token: string): Octokit;
@@ -18,6 +19,7 @@ export interface ActionRuntime {
 
 const githubActionsRuntime: ActionRuntime = {
   getActionRepository: () => process.env.GITHUB_ACTION_REPOSITORY ?? "",
+  getWorkflowRef: () => process.env.GITHUB_WORKFLOW_REF ?? "",
   getInput: (name) => core.getInput(name),
   getRunId: () => String(github.context.runId),
   setOutput: (name, value) => {
@@ -58,6 +60,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       {
         runId: runtime.getRunId(),
         controlOwner: controlOwnerFromActionRepository(runtime.getActionRepository()),
+        callerWorkflowRef: runtime.getWorkflowRef(),
       },
     );
     runtime.setOutput("result-json", JSON.stringify(result));

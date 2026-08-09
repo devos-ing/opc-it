@@ -72,7 +72,10 @@ export class GitHubPlanQueue implements PlanQueuePort {
     return data.commit.sha;
   }
 
-  async findOpenWorkById(workId: string): Promise<ExistingWork | undefined> {
+  async findOpenWorkById(
+    workId: string,
+    trustedAuthor: string,
+  ): Promise<ExistingWork | undefined> {
     const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
       repo: this.repo,
@@ -81,10 +84,20 @@ export class GitHubPlanQueue implements PlanQueuePort {
       per_page: 100,
     });
     for (const issue of issues) {
-      if (issue.body === null || issue.body === undefined) continue;
-      const contract = parseIssueContractYaml(extractContractBlock(issue.body));
-      if (contract.kind === "Work" && contract.work_id === workId) {
-        return { issueNumber: issue.number, approvalDigest: digestCanonical(contract) };
+      if (
+        issue.user?.login !== trustedAuthor ||
+        issue.body === null ||
+        issue.body === undefined
+      ) {
+        continue;
+      }
+      try {
+        const contract = parseIssueContractYaml(extractContractBlock(issue.body));
+        if (contract.kind === "Work" && contract.work_id === workId) {
+          return { issueNumber: issue.number, approvalDigest: digestCanonical(contract) };
+        }
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
       }
     }
     return undefined;

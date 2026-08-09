@@ -94,6 +94,7 @@ class ScenarioClaimPort implements ClaimPort {
       private: true,
       fork: false,
       sameTrustDomain: true,
+      defaultBranch: "main",
     },
   ) {
     this.issues = new Map(issues.map((issue) => [issue.number, issue]));
@@ -156,8 +157,13 @@ class ScenarioClaimPort implements ClaimPort {
 class ScenarioRecoveryPort implements RecoveryPort {
   readonly issues = new Map<string, number>();
 
-  findOpenRecovery(rootIssueNumber: number, value: Sha256): Promise<number | undefined> {
-    return Promise.resolve(this.issues.get(`${String(rootIssueNumber)}:${value}`));
+  findOpenRecovery(input: {
+    readonly rootIssueNumber: number;
+    readonly fingerprint: Sha256;
+  }): Promise<number | undefined> {
+    return Promise.resolve(
+      this.issues.get(`${String(input.rootIssueNumber)}:${input.fingerprint}`),
+    );
   }
 
   createRecovery(input: RecoveryIssueInput): Promise<number> {
@@ -248,6 +254,7 @@ export async function runControlScenario(
         private: false,
         fork: false,
         sameTrustDomain: true,
+        defaultBranch: "main",
       });
       try {
         await claimNextWork(port, fixedClock, { runId: "400" });

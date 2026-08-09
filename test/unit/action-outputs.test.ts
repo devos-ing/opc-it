@@ -25,6 +25,7 @@ it("encodes the immutable claim envelope and heartbeat payload", () => {
       contract: validMilestoneObject,
       policy: validPolicy,
       approvalDigest: digestCanonical(validMilestoneObject),
+      defaultBranch: "main",
     },
   };
 
@@ -83,6 +84,7 @@ it("exports a claim obtained by a scheduled reconciliation", () => {
         contract: validMilestoneObject,
         policy: validPolicy,
         approvalDigest: digestCanonical(validMilestoneObject),
+        defaultBranch: "main",
       },
     },
   };

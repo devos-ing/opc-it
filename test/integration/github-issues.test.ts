@@ -181,6 +181,41 @@ const hostileCases: readonly {
     code: "CONTRADICTORY_STATE_LABELS",
   },
   {
+    name: "root Work labeled as a later attempt",
+    issue: issueFixture({
+      labels: [{ name: "opc:ready" }, { name: "opc:attempt-3" }],
+    }),
+    comments: [approvalFixture()],
+    code: "INVALID_ATTEMPT_LABELS",
+  },
+  {
+    name: "missing attempt label",
+    issue: issueFixture({ labels: [{ name: "opc:ready" }] }),
+    comments: [approvalFixture()],
+    code: "INVALID_ATTEMPT_LABELS",
+  },
+  {
+    name: "multiple attempt labels",
+    issue: issueFixture({
+      labels: [
+        { name: "opc:ready" },
+        { name: "opc:attempt-1" },
+        { name: "opc:attempt-2" },
+      ],
+    }),
+    comments: [approvalFixture()],
+    code: "INVALID_ATTEMPT_LABELS",
+  },
+  {
+    name: "Recovery label that contradicts its addendum",
+    issue: {
+      ...recoveryIssueFixture(7),
+      labels: [{ name: "opc:ready" }, { name: "opc:attempt-3" }],
+    },
+    comments: [approvalFixture()],
+    code: "INVALID_ATTEMPT_LABELS",
+  },
+  {
     name: "missing body",
     issue: issueFixture({ body: null }),
     comments: [approvalFixture()],

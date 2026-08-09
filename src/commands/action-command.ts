@@ -16,6 +16,7 @@ import {
   type RepositoryReconciliation,
 } from "../application/reconcile-repository.js";
 import { DomainError } from "../domain/errors.js";
+import { errorFingerprint } from "../domain/fingerprint.js";
 
 export type ActionCommandResult =
   | { readonly command: "validate"; readonly valid: true }
@@ -28,6 +29,7 @@ export type ActionCommandResult =
   | { readonly command: "recover"; readonly recovery: RecoveryResult };
 
 interface ActionCommandContext {
+  readonly callerWorkflowRef: string;
   readonly controlOwner: string;
   readonly runId: string;
   readonly clock?: Clock;
@@ -49,6 +51,15 @@ export async function runActionCommand(
 
   if (inputs.owner !== context.controlOwner) {
     throw new DomainError("UNTRUSTED_REPOSITORY", `${inputs.owner}/${inputs.repo}`);
+  }
+
+  if (
+    inputs.command === "recover" &&
+    !context.callerWorkflowRef.startsWith(
+      `${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@`,
+    )
+  ) {
+    throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
   }
 
   if (
@@ -78,9 +89,30 @@ export async function runActionCommand(
     }
     const issue = await store.loadWorkIssue(issueNumber);
     const envelope = await verifyWorkIssue(issue, store);
+    const expectedCallerWorkflow = `${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@refs/heads/${envelope.defaultBranch}`;
+    if (
+      workflowRef !== envelope.defaultBranch ||
+      context.callerWorkflowRef !== expectedCallerWorkflow
+    ) {
+      throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
+    }
+    const evidencePath = `/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}/`;
+    if (!new URL(failure.evidenceUrl).pathname.startsWith(evidencePath)) {
+      throw new DomainError("INVALID_FAILURE_PAYLOAD", "evidence run does not match caller");
+    }
     const recovery = await recoverFailedWork(
       {
-        ...failure,
+        category: failure.category,
+        requiresExpansion: failure.requiresExpansion,
+        evidenceUrl: failure.evidenceUrl,
+        repairHypothesis: failure.repairHypothesis,
+        verificationFocus: failure.verificationFocus,
+        fingerprint: errorFingerprint({
+          type: failure.category,
+          checkId: failure.checkId,
+          message: failure.message,
+          baseSha: envelope.contract.base_sha,
+        }),
         state: issue.state,
         attempt: issue.attempt,
         approvedAttempts: approvedAttempts(envelope.contract.limits.attempts),
@@ -89,7 +121,7 @@ export async function runActionCommand(
         workId: envelope.contract.work_id,
         approvalDigest: envelope.approvalDigest,
         actionsUrl: `https://github.com/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}`,
-        defaultBranch: workflowRef,
+        defaultBranch: envelope.defaultBranch,
       },
       new GitHubRecovery(
         octokit,

@@ -81,12 +81,12 @@ async function requeueInfrastructure(
   const result = await createRecovery(input, port);
   if (result.outcome !== "requeued") return result;
   if (input.state === "ready") return result;
-  if (input.state !== "running") {
+  if (input.state !== "running" && input.state !== "reviewing") {
     throw new DomainError("INVALID_TRANSITION", `${input.state}:incident`);
   }
   const transitionResult = await port.transition({
     issueNumber: input.issueNumber,
-    expected: "running",
+    expected: input.state,
     event: "incident",
     metadata: transitionMetadata(input),
   });

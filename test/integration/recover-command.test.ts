@@ -47,14 +47,46 @@ function createGitHubApi(routes: readonly Route[]): {
   };
 }
 
-it("verifies GitHub state and creates one bounded Recovery from the Action command", async () => {
+it.each([
+  {
+    name: "creates one bounded Recovery for an execution failure",
+    state: "running",
+    category: "execution",
+    expected: { outcome: "created", issueNumber: 42, nextAttempt: 2 },
+    creationRoutes: [
+      {
+        method: "GET",
+        path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
+        response: [],
+      },
+      {
+        method: "POST",
+        path: "/repos/acme/app/issues",
+        response: { number: 42 },
+        status: 201,
+      },
+      {
+        method: "POST",
+        path: "/repos/acme/app/actions/workflows/opc.yml/dispatches",
+        status: 204,
+      },
+    ],
+  },
+  {
+    name: "requeues a reviewing infrastructure incident",
+    state: "reviewing",
+    category: "infrastructure",
+    expected: { outcome: "requeued", attempt: 1 },
+    creationRoutes: [],
+  },
+] as const)("$name", async ({ state, category, expected, creationRoutes }) => {
   const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
   const approvalDigest = digestCanonical(contract);
   const issue = {
     number: 7,
     user: { login: "roy" },
     body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
-    labels: [{ name: "opc:work" }, { name: "opc:running" }, { name: "opc:attempt-1" }],
+    labels: [{ name: "opc:work" }, { name: `opc:${state}` }, { name: "opc:attempt-1" }],
     created_at: "2026-08-08T00:00:00Z",
   };
   const comments = [
@@ -102,23 +134,14 @@ it("verifies GitHub state and creates one bounded Recovery from the Action comma
       status: 201,
     },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels", response: [] },
-    {
-      method: "GET",
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
-      response: [],
-    },
-    { method: "POST", path: "/repos/acme/app/issues", response: { number: 42 }, status: 201 },
-    {
-      method: "POST",
-      path: "/repos/acme/app/actions/workflows/opc.yml/dispatches",
-      status: 204,
-    },
+    ...creationRoutes,
   ]);
   const failurePayloadB64 = Buffer.from(
     JSON.stringify({
-      category: "execution",
+      category,
       requiresExpansion: false,
-      fingerprint: `sha256:${"f".repeat(64)}`,
+      checkId: "unit",
+      message: "assertion failed in payment test",
       evidenceUrl: "https://github.com/acme/app/actions/runs/123/artifacts/456",
       repairHypothesis: "retry the failed unit test",
       verificationFocus: "unit",
@@ -134,20 +157,19 @@ it("verifies GitHub state and creates one bounded Recovery from the Action comma
       failurePayloadB64,
     }),
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
-    { runId: "123", controlOwner: "acme" },
+    {
+      runId: "123",
+      controlOwner: "acme",
+      callerWorkflowRef: "acme/app/.github/workflows/opc.yml@refs/heads/main",
+    },
   );
 
   expect(result).toEqual({
     command: "recover",
-    recovery: { outcome: "created", issueNumber: 42, nextAttempt: 2 },
+    recovery: expected,
   });
-  expect(api.requests.slice(-3)).toEqual([
-    {
-      method: "GET",
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
-    },
-    { method: "POST", path: "/repos/acme/app/issues" },
-    { method: "POST", path: "/repos/acme/app/actions/workflows/opc.yml/dispatches" },
-  ]);
+  expect(
+    api.requests.some((request) => request.path.includes("labels=opc%3Arecovery")),
+  ).toBe(category === "execution");
   expect(api.isDone()).toBe(true);
 });

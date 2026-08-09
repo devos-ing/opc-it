@@ -40036,7 +40036,7 @@ var transitions = {
   ready: { claim: "claimed", drift: "needs-reapproval" },
   claimed: { start: "running", "lease-expired": "ready", "outage-block": "blocked" },
   running: { candidate: "reviewing", "work-failure": "recovering", incident: "ready" },
-  reviewing: { verify: "result-ready", "work-failure": "recovering" },
+  reviewing: { verify: "result-ready", "work-failure": "recovering", incident: "ready" },
   recovering: { retry: "ready", block: "blocked" },
   "result-ready": { merge: "delivered", "close-unmerged": "needs-decision" },
   "needs-reapproval": { approve: "ready" }
@@ -42831,11 +42831,17 @@ function labelForWorkState(state) {
   return `opc:${state}`;
 }
 function attemptFromLabels(labels) {
-  if (labels.includes("opc:attempt-3"))
-    return 3;
-  if (labels.includes("opc:attempt-2"))
+  const attempts = labels.filter((label) => label.startsWith("opc:attempt-"));
+  if (attempts.length !== 1) {
+    throw new DomainError("INVALID_ATTEMPT_LABELS", attempts.join(","));
+  }
+  if (attempts[0] === "opc:attempt-1")
+    return 1;
+  if (attempts[0] === "opc:attempt-2")
     return 2;
-  return 1;
+  if (attempts[0] === "opc:attempt-3")
+    return 3;
+  throw new DomainError("INVALID_ATTEMPT_LABELS", attempts[0] ?? "missing");
 }
 function approvalFromComments(comments, approvers) {
   const approvals = comments.flatMap((comment) => {
@@ -42940,6 +42946,10 @@ class GitHubIssues {
     const labels = issue.labels.map((label) => typeof label === "string" ? label : label.name).filter((label) => Boolean(label));
     const state = workStateFromLabels(labels);
     const contract = parseIssueContractYaml(extractContractBlock(body));
+    const attempt = attemptFromLabels(labels);
+    if (contract.kind === "Work" && attempt !== 1 || contract.kind === "Recovery" && attempt !== contract.attempt) {
+      throw new DomainError("INVALID_ATTEMPT_LABELS", `${contract.kind}:${String(attempt)}`);
+    }
     const rootIssueNumber = await this.rootIssueNumber(contract, number);
     const approval = approvalFromComments(comments, this.approvers);
     return {
@@ -42949,7 +42959,7 @@ class GitHubIssues {
       state,
       createdAt,
       rootIssueNumber,
-      attempt: attemptFromLabels(labels),
+      attempt,
       ...approval
     };
   }
@@ -43011,7 +43021,8 @@ class GitHubStateStore {
     return {
       private: data.private,
       fork: data.fork,
-      sameTrustDomain: data.owner.login === this.trustedOwner
+      sameTrustDomain: data.owner.login === this.trustedOwner,
+      defaultBranch: data.default_branch
     };
   }
   async loadRepositoryPolicy(ref) {
@@ -43081,7 +43092,7 @@ function parseDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
-function claimMetadata(body) {
+function parseTransitionRecord(body) {
   const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
   if (!payload)
     return;
@@ -43093,9 +43104,16 @@ function claimMetadata(body) {
   }
   const transitionRecord = record(value);
   const metadata = record(transitionRecord?.metadata);
-  const runId = metadata?.run_id;
-  const claimedAt = parseDate(metadata?.claimed_at);
-  return transitionRecord?.event === "claim" && typeof runId === "string" && claimedAt ? { runId, claimedAt } : undefined;
+  const event = transitionRecord?.event;
+  return typeof event === "string" && metadata ? { event, metadata } : undefined;
+}
+function claimMetadata(record2) {
+  if (!record2)
+    return;
+  const metadata = record2.metadata;
+  const runId = metadata.run_id;
+  const claimedAt = parseDate(metadata.claimed_at);
+  return record2.event === "claim" && typeof runId === "string" && claimedAt ? { runId, claimedAt } : undefined;
 }
 function hasHttpStatus2(error) {
   return typeof error === "object" && error !== null && "status" in error;
@@ -43132,10 +43150,21 @@ class GitHubReconciler {
       issue_number: issueNumber,
       per_page: 100
     });
-    const metadata = comments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.created_at === comment.updated_at).map((comment) => claimMetadata(comment.body)).filter((candidate) => candidate !== undefined).at(-1);
+    const records = comments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.created_at === comment.updated_at).map((comment) => parseTransitionRecord(comment.body)).filter((candidate) => candidate !== undefined);
+    let claimIndex = -1;
+    let metadata;
+    for (const [index, candidate] of records.entries()) {
+      const claim = claimMetadata(candidate);
+      if (!claim)
+        continue;
+      claimIndex = index;
+      metadata = claim;
+    }
     if (!metadata || !/^\d+$/.test(metadata.runId)) {
       throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
     }
+    const previous = records[claimIndex - 1];
+    const persistedOutageStarted = previous?.event === "lease-expired" ? parseDate(previous.metadata.outage_started) : undefined;
     let lastHeartbeat = metadata.claimedAt;
     let cancelledByOwner = false;
     try {
@@ -43155,7 +43184,7 @@ class GitHubReconciler {
     return {
       issueNumber,
       lastHeartbeat,
-      outageStarted: metadata.claimedAt,
+      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
       cancelledByOwner
     };
   }
@@ -43183,7 +43212,7 @@ class GitHubRecovery {
   transition(command) {
     return this.stateStore.transition(command);
   }
-  async findOpenRecovery(rootIssueNumber, fingerprint) {
+  async findOpenRecovery(input) {
     const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
       repo: this.repo,
@@ -43191,13 +43220,19 @@ class GitHubRecovery {
       labels: "opc:recovery",
       per_page: 100
     });
-    const marker = recoveryMarker(rootIssueNumber, fingerprint);
+    const marker = recoveryMarker(input.rootIssueNumber, input.fingerprint);
     for (const issue of issues) {
-      if (!issue.body?.includes(marker))
+      if (issue.user?.login !== "github-actions[bot]" || !issue.body?.includes(marker)) {
         continue;
-      const contract = parseIssueContractYaml(extractContractBlock(issue.body));
-      if (contract.kind === "Recovery" && contract.error_fingerprint === fingerprint) {
-        return issue.number;
+      }
+      try {
+        const contract = parseIssueContractYaml(extractContractBlock(issue.body));
+        if (contract.kind === "Recovery" && contract.root_work_id === input.workId && contract.parent_issue === input.parentIssueNumber && contract.approval_digest === input.approvalDigest && contract.error_fingerprint === input.fingerprint && contract.attempt === input.attempt && contract.failure_type === input.category) {
+          return issue.number;
+        }
+      } catch (error) {
+        if (!(error instanceof DomainError))
+          throw error;
       }
     }
     return;
@@ -43290,6 +43325,9 @@ async function verifyWorkIssue(issue, port) {
   let approvalIssue;
   let recovery;
   if (parsed.kind === "Work") {
+    if (issue.attempt !== 1) {
+      throw new DomainError("INVALID_ATTEMPT_LABELS", `Work:${String(issue.attempt)}`);
+    }
     contract = parsed;
     approvalIssue = issue;
   } else {
@@ -43332,6 +43370,7 @@ async function verifyWorkIssue(issue, port) {
     contract,
     policy,
     approvalDigest,
+    defaultBranch: identity.defaultBranch,
     ...recovery ? { recovery } : {}
   };
 }
@@ -43428,10 +43467,6 @@ async function createRecovery(input, port) {
   if (input.category === "infrastructure") {
     throw new Error("INFRASTRUCTURE_RECOVERY_INVARIANT");
   }
-  const existing = await port.findOpenRecovery(input.rootIssueNumber, input.fingerprint);
-  if (existing !== undefined) {
-    return { outcome: "deduplicated", issueNumber: existing };
-  }
   const addendum = {
     kind: "Recovery",
     root_work_id: input.workId,
@@ -43444,6 +43479,18 @@ async function createRecovery(input, port) {
     repair_hypothesis: input.repairHypothesis,
     verification_focus: input.verificationFocus
   };
+  const existing = await port.findOpenRecovery({
+    rootIssueNumber: input.rootIssueNumber,
+    parentIssueNumber: input.issueNumber,
+    workId: input.workId,
+    approvalDigest: input.approvalDigest,
+    fingerprint: input.fingerprint,
+    attempt: decision.nextAttempt,
+    category: input.category
+  });
+  if (existing !== undefined) {
+    return { outcome: "deduplicated", issueNumber: existing };
+  }
   const issueNumber = await port.createRecovery({
     rootIssueNumber: input.rootIssueNumber,
     body: serializeRecoveryIssue(addendum),
@@ -43511,12 +43558,12 @@ async function requeueInfrastructure(input, port) {
     return result;
   if (input.state === "ready")
     return result;
-  if (input.state !== "running") {
+  if (input.state !== "running" && input.state !== "reviewing") {
     throw new DomainError("INVALID_TRANSITION", `${input.state}:incident`);
   }
   const transitionResult = await port.transition({
     issueNumber: input.issueNumber,
-    expected: "running",
+    expected: input.state,
     event: "incident",
     metadata: transitionMetadata(input)
   });
@@ -43542,13 +43589,13 @@ var outageBlockDurationMs = 24 * 60 * 60 * 1000;
 function reconcileClaim(input) {
   if (input.cancelledByOwner)
     return "cancelled";
+  const leaseExpired = input.now.getTime() - input.lastHeartbeat.getTime() >= leaseDurationMs;
+  if (!leaseExpired)
+    return "keep";
   if (input.outageStarted && input.now.getTime() - input.outageStarted.getTime() >= outageBlockDurationMs) {
     return "block";
   }
-  if (input.now.getTime() - input.lastHeartbeat.getTime() >= leaseDurationMs) {
-    return "requeue";
-  }
-  return "keep";
+  return "requeue";
 }
 
 // src/application/reconcile-repository.ts
@@ -43579,7 +43626,8 @@ async function reconcileRepository(port, clock) {
       event: decision === "block" ? "outage-block" : "lease-expired",
       metadata: {
         reconcile_decision: decision,
-        reconciled_at: clock.now().toISOString()
+        reconciled_at: clock.now().toISOString(),
+        ...claim.outageStarted ? { outage_started: claim.outageStarted.toISOString() } : {}
       }
     });
     if (!result.changed) {
@@ -43591,6 +43639,17 @@ async function reconcileRepository(port, clock) {
     }
   }
   return { active: claims.length, kept, requeued, blocked, cancelled };
+}
+
+// src/domain/fingerprint.ts
+function errorFingerprint(input) {
+  const stableMessage = input.message.replace(/\d{4}-\d{2}-\d{2}T\S+/g, "<time>").replace(/\/private\/tmp\/\S+/g, "<tmp>").replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, "<id>");
+  return digestCanonical({
+    type: input.type,
+    checkId: input.checkId,
+    message: stableMessage,
+    baseSha: input.baseSha
+  });
 }
 
 // src/commands/action-command.ts
@@ -43605,6 +43664,9 @@ async function runActionCommand(inputs, octokit, context) {
     return { command: "validate", valid: true };
   if (inputs.owner !== context.controlOwner) {
     throw new DomainError("UNTRUSTED_REPOSITORY", `${inputs.owner}/${inputs.repo}`);
+  }
+  if (inputs.command === "recover" && !context.callerWorkflowRef.startsWith(`${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@`)) {
+    throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
   }
   if (inputs.command !== "claim" && inputs.command !== "reconcile" && inputs.command !== "recover") {
     throw new DomainError("ACTION_COMMAND_NOT_IMPLEMENTED", inputs.command);
@@ -43622,8 +43684,26 @@ async function runActionCommand(inputs, octokit, context) {
     }
     const issue = await store.loadWorkIssue(issueNumber);
     const envelope = await verifyWorkIssue(issue, store);
+    const expectedCallerWorkflow = `${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@refs/heads/${envelope.defaultBranch}`;
+    if (workflowRef !== envelope.defaultBranch || context.callerWorkflowRef !== expectedCallerWorkflow) {
+      throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
+    }
+    const evidencePath = `/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}/`;
+    if (!new URL(failure.evidenceUrl).pathname.startsWith(evidencePath)) {
+      throw new DomainError("INVALID_FAILURE_PAYLOAD", "evidence run does not match caller");
+    }
     const recovery = await recoverFailedWork({
-      ...failure,
+      category: failure.category,
+      requiresExpansion: failure.requiresExpansion,
+      evidenceUrl: failure.evidenceUrl,
+      repairHypothesis: failure.repairHypothesis,
+      verificationFocus: failure.verificationFocus,
+      fingerprint: errorFingerprint({
+        type: failure.category,
+        checkId: failure.checkId,
+        message: failure.message,
+        baseSha: envelope.contract.base_sha
+      }),
       state: issue.state,
       attempt: issue.attempt,
       approvedAttempts: approvedAttempts(envelope.contract.limits.attempts),
@@ -43632,7 +43712,7 @@ async function runActionCommand(inputs, octokit, context) {
       workId: envelope.contract.work_id,
       approvalDigest: envelope.approvalDigest,
       actionsUrl: `https://github.com/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}`,
-      defaultBranch: workflowRef
+      defaultBranch: envelope.defaultBranch
     }, new GitHubRecovery(octokit, inputs.owner, inputs.repo, context.controlOwner));
     return { command: "recover", recovery };
   }
@@ -43679,8 +43759,9 @@ function parseFailurePayload(encoded, owner, repo) {
   const keys = payload ? Object.keys(payload).sort() : [];
   const expectedKeys = [
     "category",
+    "checkId",
     "evidenceUrl",
-    "fingerprint",
+    "message",
     "repairHypothesis",
     "requiresExpansion",
     "verificationFocus"
@@ -43689,11 +43770,12 @@ function parseFailurePayload(encoded, owner, repo) {
     throw new DomainError("INVALID_FAILURE_PAYLOAD", "unexpected payload shape");
   }
   const category = payload.category;
-  const fingerprint = payload.fingerprint;
+  const checkId = payload.checkId;
   const evidenceUrl = payload.evidenceUrl;
+  const message = payload.message;
   const repairHypothesis = payload.repairHypothesis;
   const verificationFocus = payload.verificationFocus;
-  if (!isFailureCategory(category) || typeof payload.requiresExpansion !== "boolean" || typeof fingerprint !== "string" || !/^sha256:[0-9a-f]{64}$/.test(fingerprint) || !boundedText(evidenceUrl) || !boundedText(repairHypothesis) || !boundedText(verificationFocus)) {
+  if (!isFailureCategory(category) || typeof payload.requiresExpansion !== "boolean" || !boundedText(checkId) || !boundedText(evidenceUrl) || !boundedText(message) || !boundedText(repairHypothesis) || !boundedText(verificationFocus)) {
     throw new DomainError("INVALID_FAILURE_PAYLOAD", "invalid payload value");
   }
   let evidence;
@@ -43708,7 +43790,8 @@ function parseFailurePayload(encoded, owner, repo) {
   return {
     category,
     requiresExpansion: payload.requiresExpansion,
-    fingerprint,
+    checkId,
+    message,
     evidenceUrl,
     repairHypothesis,
     verificationFocus
@@ -43773,6 +43856,7 @@ function toActionOutputs(result) {
 // src/action/main.ts
 var githubActionsRuntime = {
   getActionRepository: () => process.env.GITHUB_ACTION_REPOSITORY ?? "",
+  getWorkflowRef: () => process.env.GITHUB_WORKFLOW_REF ?? "",
   getInput: (name) => core.getInput(name),
   getRunId: () => String(github.context.runId),
   setOutput: (name, value) => {
@@ -43805,7 +43889,8 @@ async function main(runtime = githubActionsRuntime) {
     const octokit = token ? runtime.createGitHubClient?.(token) ?? createGitHubClient(token) : undefined;
     const result = await runActionCommand(inputs, octokit, {
       runId: runtime.getRunId(),
-      controlOwner: controlOwnerFromActionRepository(runtime.getActionRepository())
+      controlOwner: controlOwnerFromActionRepository(runtime.getActionRepository()),
+      callerWorkflowRef: runtime.getWorkflowRef()
     });
     runtime.setOutput("result-json", JSON.stringify(result));
     for (const [name, value] of Object.entries(toActionOutputs(result))) {

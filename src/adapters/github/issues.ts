@@ -47,9 +47,14 @@ export function labelForWorkState(state: WorkState): string {
 }
 
 function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
-  if (labels.includes("opc:attempt-3")) return 3;
-  if (labels.includes("opc:attempt-2")) return 2;
-  return 1;
+  const attempts = labels.filter((label) => label.startsWith("opc:attempt-"));
+  if (attempts.length !== 1) {
+    throw new DomainError("INVALID_ATTEMPT_LABELS", attempts.join(","));
+  }
+  if (attempts[0] === "opc:attempt-1") return 1;
+  if (attempts[0] === "opc:attempt-2") return 2;
+  if (attempts[0] === "opc:attempt-3") return 3;
+  throw new DomainError("INVALID_ATTEMPT_LABELS", attempts[0] ?? "missing");
 }
 
 function approvalFromComments(
@@ -195,6 +200,13 @@ export class GitHubIssues {
     const state = workStateFromLabels(labels);
 
     const contract = parseIssueContractYaml(extractContractBlock(body));
+    const attempt = attemptFromLabels(labels);
+    if (
+      (contract.kind === "Work" && attempt !== 1) ||
+      (contract.kind === "Recovery" && attempt !== contract.attempt)
+    ) {
+      throw new DomainError("INVALID_ATTEMPT_LABELS", `${contract.kind}:${String(attempt)}`);
+    }
     const rootIssueNumber = await this.rootIssueNumber(contract, number);
     const approval = approvalFromComments(comments, this.approvers);
     return {
@@ -204,7 +216,7 @@ export class GitHubIssues {
       state,
       createdAt,
       rootIssueNumber,
-      attempt: attemptFromLabels(labels),
+      attempt,
       ...approval,
     };
   }

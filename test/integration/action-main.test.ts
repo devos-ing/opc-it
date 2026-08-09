@@ -54,10 +54,15 @@ class TestActionRuntime implements ActionRuntime {
     private readonly inputs: Readonly<Record<string, string>>,
     private readonly octokit?: Octokit,
     private readonly actionRepository = "acme/OPC",
+    private readonly workflowRef = "acme/app/.github/workflows/opc.yml@refs/heads/main",
   ) {}
 
   getActionRepository(): string {
     return this.actionRepository;
+  }
+
+  getWorkflowRef(): string {
+    return this.workflowRef;
   }
 
   getInput(name: string): string {
@@ -123,6 +128,37 @@ it("rejects a target outside the control Action owner", async () => {
 
   expect(runtime.outputs.size).toBe(0);
   expect(runtime.failures).toEqual(["UNTRUSTED_REPOSITORY"]);
+});
+
+it("rejects recover when invoked from an arbitrary target workflow", async () => {
+  const failurePayloadB64 = Buffer.from(
+    JSON.stringify({
+      category: "execution",
+      requiresExpansion: false,
+      checkId: "unit",
+      message: "assertion failed",
+      evidenceUrl: "https://github.com/acme/app/actions/runs/123/artifacts/456",
+      repairHypothesis: "retry the failed unit test",
+      verificationFocus: "unit",
+    }),
+  ).toString("base64url");
+  const runtime = new TestActionRuntime(
+    {
+      command: "recover",
+      repository: "acme/app",
+      "issue-number": "7",
+      "workflow-ref": "main",
+      "failure-payload-b64": failurePayloadB64,
+    },
+    undefined,
+    "acme/OPC",
+    "acme/app/.github/workflows/other.yml@refs/heads/main",
+  );
+
+  await main(runtime);
+
+  expect(runtime.outputs.size).toBe(0);
+  expect(runtime.failures).toEqual(["INVALID_WORKFLOW_REF"]);
 });
 
 it.each(["claim", "reconcile"] as const)(

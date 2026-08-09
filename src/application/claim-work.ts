@@ -24,6 +24,7 @@ export interface RepositoryControlIdentity {
   readonly private: boolean;
   readonly fork: boolean;
   readonly sameTrustDomain: boolean;
+  readonly defaultBranch: string;
 }
 
 export interface ClaimPort {
@@ -43,6 +44,7 @@ export interface ExecutionEnvelope {
   readonly contract: MilestoneContract;
   readonly policy: RepositoryPolicy;
   readonly approvalDigest: Sha256;
+  readonly defaultBranch: string;
   readonly recovery?: RecoveryAddendum;
 }
 
@@ -102,6 +104,9 @@ export async function verifyWorkIssue(
   let approvalIssue: WorkIssueRecord;
   let recovery: RecoveryAddendum | undefined;
   if (parsed.kind === "Work") {
+    if (issue.attempt !== 1) {
+      throw new DomainError("INVALID_ATTEMPT_LABELS", `Work:${String(issue.attempt)}`);
+    }
     contract = parsed;
     approvalIssue = issue;
   } else {
@@ -154,6 +159,7 @@ export async function verifyWorkIssue(
     contract,
     policy,
     approvalDigest,
+    defaultBranch: identity.defaultBranch,
     ...(recovery ? { recovery } : {}),
   };
 }
