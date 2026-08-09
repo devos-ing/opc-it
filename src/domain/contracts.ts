@@ -76,6 +76,71 @@ export const RecoveryAddendumSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ResultManifestSchema = Type.Object(
+  {
+    kind: Type.Literal("CandidateResult"),
+    work_id: NonEmpty,
+    attempt: Type.Integer({ minimum: 1, maximum: 3 }),
+    approval_digest: Digest,
+    base_sha: Sha,
+    artifact_sha256: Digest,
+    changes: Type.Array(
+      Type.Object(
+        {
+          path: NonEmpty,
+          operation: Type.Union([
+            Type.Literal("add"),
+            Type.Literal("modify"),
+            Type.Literal("delete"),
+          ]),
+          mode: Type.Union([Type.Literal("100644"), Type.Literal("100755")]),
+          content_sha256: Digest,
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    evidence: Type.Array(
+      Type.Object(
+        {
+          id: NonEmpty,
+          status: Type.Union([Type.Literal("pass"), Type.Literal("fail")]),
+          exit_code: Type.Integer(),
+          log_sha256: Digest,
+        },
+        { additionalProperties: false },
+      ),
+      { minItems: 1 },
+    ),
+    duration_seconds: Type.Integer({ minimum: 0, maximum: 5_400 }),
+  },
+  { additionalProperties: false },
+);
+
+export const ResultReviewSchema = Type.Object(
+  {
+    decision: Type.Union([Type.Literal("pass"), Type.Literal("fail")]),
+    criteria: Type.Array(
+      Type.Object(
+        {
+          id: NonEmpty,
+          status: Type.Union([Type.Literal("satisfied"), Type.Literal("unsatisfied")]),
+          evidence: Type.Array(NonEmpty),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    scope_status: Type.Union([
+      Type.Literal("inside_contract"),
+      Type.Literal("outside_contract"),
+    ]),
+    unexpected_paths: Type.Array(NonEmpty),
+    material_risks: Type.Array(NonEmpty),
+  },
+  { additionalProperties: false },
+);
+
 export type RepositoryPolicy = Static<typeof RepositoryPolicySchema>;
 export type MilestoneContract = Static<typeof MilestoneContractSchema>;
 export type RecoveryAddendum = Static<typeof RecoveryAddendumSchema>;
+export type ResultManifest = Static<typeof ResultManifestSchema>;
+export type ResultReviewContract = Static<typeof ResultReviewSchema>;

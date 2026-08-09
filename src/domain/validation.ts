@@ -3,14 +3,28 @@ import { isAlias, isScalar, parseDocument, visit } from "yaml";
 import {
   MilestoneContractSchema,
   RepositoryPolicySchema,
+  ResultManifestSchema,
+  ResultReviewSchema,
   type MilestoneContract,
   type RepositoryPolicy,
+  type ResultManifest,
+  type ResultReviewContract,
 } from "./contracts.js";
 import { DomainError } from "./errors.js";
 
 const ajv = new Ajv({ allErrors: true, strict: true });
 const milestoneValidator = ajv.compile<MilestoneContract>(MilestoneContractSchema);
 const repositoryPolicyValidator = ajv.compile<RepositoryPolicy>(RepositoryPolicySchema);
+const resultManifestValidator = ajv.compile<ResultManifest>(ResultManifestSchema);
+const resultReviewValidator = ajv.compile<ResultReviewContract>(ResultReviewSchema);
+
+function jsonByteLength(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value));
+  } catch {
+    throw new DomainError("INVALID_RESULT_MANIFEST", "not JSON serializable");
+  }
+}
 
 function parseStrictYaml(text: string): unknown {
   const document = parseDocument(text, { uniqueKeys: true, schema: "core" });
@@ -46,6 +60,26 @@ export function parseMilestoneYaml(text: string): MilestoneContract {
 export function validateRepositoryPolicy(value: unknown): RepositoryPolicy {
   if (!repositoryPolicyValidator(value)) {
     throw new DomainError("INVALID_POLICY", ajv.errorsText(repositoryPolicyValidator.errors));
+  }
+  return value;
+}
+
+export function validateResultManifest(value: unknown, maximumBytes: number): ResultManifest {
+  if (jsonByteLength(value) > maximumBytes) {
+    throw new DomainError("RESULT_TOO_LARGE", String(maximumBytes));
+  }
+  if (!resultManifestValidator(value)) {
+    throw new DomainError(
+      "INVALID_RESULT_MANIFEST",
+      ajv.errorsText(resultManifestValidator.errors),
+    );
+  }
+  return value;
+}
+
+export function validateResultReview(value: unknown): ResultReviewContract {
+  if (!resultReviewValidator(value)) {
+    throw new DomainError("INVALID_RESULT_REVIEW", ajv.errorsText(resultReviewValidator.errors));
   }
   return value;
 }
