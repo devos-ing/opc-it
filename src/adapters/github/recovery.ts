@@ -1,5 +1,6 @@
 import type { Octokit } from "@octokit/rest";
 import type {
+  ExistingRecovery,
   RecoveryLookup,
   RecoveryPort,
 } from "../../application/create-recovery.js";
@@ -47,7 +48,7 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
     return this.stateStore.transition(command);
   }
 
-  async findOpenRecovery(input: RecoveryLookup): Promise<number | undefined> {
+  async findOpenRecovery(input: RecoveryLookup): Promise<ExistingRecovery | undefined> {
     const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
       repo: this.repo,
@@ -67,12 +68,16 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
         const contract = parseIssueContractYaml(extractContractBlock(issue.body));
         if (
           contract.kind === "Recovery" &&
-          contract.root_work_id === input.workId &&
           contract.parent_issue === input.parentIssueNumber &&
-          contract.approval_digest === input.approvalDigest &&
           contract.attempt === input.attempt
         ) {
-          return issue.number;
+          return {
+            issueNumber: issue.number,
+            workId: contract.root_work_id,
+            approvalDigest: contract.approval_digest as Sha256,
+            fingerprint: contract.error_fingerprint as Sha256,
+            category: contract.failure_type,
+          };
         }
       } catch (error) {
         if (!(error instanceof DomainError)) throw error;

@@ -1,5 +1,6 @@
 import { stringify } from "yaml";
 import type { RecoveryAddendum } from "../domain/contracts.js";
+import { DomainError } from "../domain/errors.js";
 import type { Sha256 } from "../domain/identity.js";
 import {
   decideRecovery,
@@ -27,7 +28,7 @@ export interface FailedAttempt {
 }
 
 export interface RecoveryPort {
-  findOpenRecovery(input: RecoveryLookup): Promise<number | undefined>;
+  findOpenRecovery(input: RecoveryLookup): Promise<ExistingRecovery | undefined>;
   createRecovery(input: RecoveryIssueInput): Promise<number>;
   dispatch(
     workflowFile: string,
@@ -39,9 +40,15 @@ export interface RecoveryPort {
 export interface RecoveryLookup {
   readonly rootIssueNumber: number;
   readonly parentIssueNumber: number;
+  readonly attempt: 2 | 3;
+}
+
+export interface ExistingRecovery {
+  readonly issueNumber: number;
   readonly workId: string;
   readonly approvalDigest: Sha256;
-  readonly attempt: 2 | 3;
+  readonly fingerprint: Sha256;
+  readonly category: FailureCategory;
 }
 
 export type RecoveryResult =
@@ -105,12 +112,21 @@ export async function createRecovery(
   const existing = await port.findOpenRecovery({
     rootIssueNumber: input.rootIssueNumber,
     parentIssueNumber: input.issueNumber,
-    workId: input.workId,
-    approvalDigest: input.approvalDigest,
     attempt: decision.nextAttempt,
   });
   if (existing !== undefined) {
-    return { outcome: "deduplicated", issueNumber: existing };
+    if (
+      existing.workId !== input.workId ||
+      existing.approvalDigest !== input.approvalDigest ||
+      existing.fingerprint !== input.fingerprint ||
+      existing.category !== input.category
+    ) {
+      throw new DomainError(
+        "RECOVERY_ATTEMPT_CONFLICT",
+        `${String(input.rootIssueNumber)}:${String(decision.nextAttempt)}`,
+      );
+    }
+    return { outcome: "deduplicated", issueNumber: existing.issueNumber };
   }
   const issueNumber = await port.createRecovery({
     rootIssueNumber: input.rootIssueNumber,

@@ -9,7 +9,13 @@ import type {
   WorkIssueRecord,
 } from "../../application/ports.js";
 import { DomainError } from "../../domain/errors.js";
-import { transition } from "../../domain/state.js";
+import {
+  transition,
+  workEvents,
+  workStates,
+  type WorkEvent,
+  type WorkState,
+} from "../../domain/state.js";
 import { parseRepositoryPolicyYaml } from "../../domain/validation.js";
 import {
   GitHubIssues,
@@ -17,6 +23,10 @@ import {
   labelForWorkState,
   workStateFromLabels,
 } from "./issues.js";
+import {
+  trustedTransitionRecords,
+  type TransitionRecord,
+} from "./transition-record.js";
 
 function issueLabels(labels: readonly (string | { readonly name?: string | null })[]): string[] {
   return labels
@@ -24,12 +34,38 @@ function issueLabels(labels: readonly (string | { readonly name?: string | null 
     .filter((label): label is string => Boolean(label));
 }
 
-const activeStateLabels = new Set([
-  "opc:claimed",
-  "opc:running",
-  "opc:reviewing",
-  "opc:result-ready",
+const activeStates = new Set<WorkState>([
+  "claimed",
+  "running",
+  "reviewing",
+  "result-ready",
 ]);
+
+function includesWorkState(value: string): value is WorkState {
+  return workStates.some((state) => state === value);
+}
+
+function includesWorkEvent(value: string): value is WorkEvent {
+  return workEvents.some((event) => event === value);
+}
+
+function stateAfterTransition(
+  transitionRecord: TransitionRecord | undefined,
+): WorkState | undefined {
+  if (
+    !transitionRecord?.expected ||
+    !includesWorkState(transitionRecord.expected) ||
+    !includesWorkEvent(transitionRecord.event)
+  ) {
+    return undefined;
+  }
+  try {
+    return transition(transitionRecord.expected, transitionRecord.event);
+  } catch (error) {
+    if (error instanceof DomainError) return undefined;
+    throw error;
+  }
+}
 
 export class GitHubStateStore implements ClaimPort {
   private readonly issues: GitHubIssues;
@@ -55,18 +91,31 @@ export class GitHubStateStore implements ClaimPort {
       state: "open",
       per_page: 100,
     });
-    const activeIssues = issues.filter((issue) =>
-      issueLabels(issue.labels).some((label) => activeStateLabels.has(label)),
+    const activeIssues = issues.flatMap((issue) => {
+      try {
+        const state = workStateFromLabels(issueLabels(issue.labels));
+        return activeStates.has(state) ? [{ number: issue.number, state }] : [];
+      } catch (error) {
+        if (error instanceof DomainError) return [];
+        throw error;
+      }
+    });
+    const recordedStates = await Promise.all(
+      activeIssues.map(async (issue) => {
+        const comments = await this.octokit.paginate(
+          this.octokit.rest.issues.listComments,
+          {
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: issue.number,
+            per_page: 100,
+          },
+        );
+        const records = trustedTransitionRecords(comments);
+        return { current: issue.state, recorded: stateAfterTransition(records.at(-1)) };
+      }),
     );
-    const loaded = await Promise.all(
-      activeIssues.map((issue) =>
-        this.loadWorkIssue(issue.number).catch((error: unknown) => {
-          if (error instanceof DomainError) return undefined;
-          throw error;
-        }),
-      ),
-    );
-    return loaded.some((issue) => issue?.claimRecorded === true);
+    return recordedStates.some((state) => state.current === state.recorded);
   }
 
   async listEligibleWork(): Promise<readonly WorkIssueRecord[]> {

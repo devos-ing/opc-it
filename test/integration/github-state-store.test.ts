@@ -120,7 +120,7 @@ it("recognizes an active slot only after a trusted claim transition", async () =
   const activeIssue = {
     number: 7,
     user: { login: "roy" },
-    body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+    body: "# contract damaged after claim",
     labels: [
       { name: "opc:work" },
       { name: "opc:claimed" },
@@ -168,4 +168,61 @@ it("recognizes an active slot only after a trusted claim transition", async () =
   );
 
   expect(await store.hasActiveClaim()).toBe(true);
+});
+
+it("does not revive an old claim when the latest trusted transition is ready", async () => {
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
+  const activeLabelIssue = {
+    number: 7,
+    user: { login: "roy" },
+    body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+    labels: [
+      { name: "opc:work" },
+      { name: "opc:claimed" },
+      { name: "opc:attempt-1" },
+    ],
+    created_at: "2026-08-08T00:00:00Z",
+  };
+  const claimBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "ready",
+    event: "claim",
+    metadata: { run_id: "123", claimed_at: "2026-08-08T00:02:00Z" },
+  })} -->`;
+  const expiredBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "claimed",
+    event: "lease-expired",
+    metadata: { reconciled_at: "2026-08-08T00:33:00Z" },
+  })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues?state=open&per_page=100", [activeLabelIssue]],
+      ["GET /repos/acme/app/issues/7", activeLabelIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: claimBody,
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: expiredBody,
+            created_at: "2026-08-08T00:33:00Z",
+            updated_at: "2026-08-08T00:33:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.hasActiveClaim()).toBe(false);
 });

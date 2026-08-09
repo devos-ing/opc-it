@@ -43,7 +43,7 @@ class MemoryRecoveryControl implements RecoveryControlPort {
     this.state = state;
   }
 
-  findOpenRecovery(): Promise<number | undefined> {
+  findOpenRecovery(): Promise<undefined> {
     return Promise.resolve(undefined);
   }
 

@@ -5,6 +5,7 @@ import {
 } from "../../src/application/claim-work.js";
 import {
   createRecovery,
+  type ExistingRecovery,
   type FailedAttempt,
   type RecoveryLookup,
   type RecoveryPort,
@@ -156,9 +157,9 @@ class ScenarioClaimPort implements ClaimPort {
 }
 
 class ScenarioRecoveryPort implements RecoveryPort {
-  readonly issues = new Map<string, number>();
+  readonly issues = new Map<string, ExistingRecovery>();
 
-  findOpenRecovery(input: RecoveryLookup): Promise<number | undefined> {
+  findOpenRecovery(input: RecoveryLookup): Promise<ExistingRecovery | undefined> {
     return Promise.resolve(
       this.issues.get(`${String(input.rootIssueNumber)}:${String(input.attempt)}`),
     );
@@ -166,7 +167,13 @@ class ScenarioRecoveryPort implements RecoveryPort {
 
   createRecovery(input: RecoveryIssueInput): Promise<number> {
     const issueNumber = 42 + this.issues.size;
-    this.issues.set(`${String(input.rootIssueNumber)}:${String(input.attempt)}`, issueNumber);
+    this.issues.set(`${String(input.rootIssueNumber)}:${String(input.attempt)}`, {
+      issueNumber,
+      workId: contract.work_id,
+      approvalDigest,
+      fingerprint: input.fingerprint,
+      category: "execution",
+    });
     return Promise.resolve(issueNumber);
   }
 

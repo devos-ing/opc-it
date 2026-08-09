@@ -143,7 +143,7 @@ it("returns the existing open Recovery without dispatching again", async () => {
   expect(api.isDone()).toBe(true);
 });
 
-it("reuses the approved attempt slot when a replay has a new fingerprint", async () => {
+it("rejects a new fingerprint that conflicts with an occupied attempt slot", async () => {
   const replayFingerprint: Sha256 = `sha256:${"e".repeat(64)}`;
   const api = createGitHubApi([
     {
@@ -164,10 +164,9 @@ it("reuses the approved attempt slot when a replay has a new fingerprint", async
     "app",
   );
 
-  expect(await createRecovery(failedAttempt(), port)).toEqual({
-    outcome: "deduplicated",
-    issueNumber: 42,
-  });
+  expect(
+    await createRecovery(failedAttempt(), port).catch((error: unknown) => error),
+  ).toMatchObject({ code: "RECOVERY_ATTEMPT_CONFLICT" });
   expect(api.isDone()).toBe(true);
 });
 

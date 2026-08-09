@@ -82,25 +82,17 @@ export class GitHubReconciler implements ReconcilePort {
       per_page: 100,
     });
     const records = trustedTransitionRecords(comments);
-    let claimIndex = -1;
-    let metadata: ClaimMetadata | undefined;
-    for (const [index, candidate] of records.entries()) {
-      const claim = claimMetadata(candidate);
-      if (!claim) continue;
-      claimIndex = index;
-      metadata = claim;
-    }
+    const metadata = claimMetadata(records.at(-1));
     if (!metadata || !/^\d+$/.test(metadata.runId)) {
       throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
     }
 
-    const previous = records[claimIndex - 1];
+    const previous = records.at(-2);
     const persistedOutageStarted =
       previous?.event === "lease-expired"
         ? parseDate(previous.metadata.outage_started)
         : undefined;
 
-    let lastHeartbeat = metadata.claimedAt;
     let cancelledByOwner = false;
     try {
       const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
@@ -108,18 +100,16 @@ export class GitHubReconciler implements ReconcilePort {
         repo: this.repo,
         run_id: Number(metadata.runId),
       });
-      const updatedAt = parseDate(run.updated_at);
-      if (updatedAt && updatedAt > lastHeartbeat) lastHeartbeat = updatedAt;
       cancelledByOwner = run.conclusion === "cancelled";
     } catch (error) {
       if (!hasHttpStatus(error) || error.status !== 404) throw error;
     }
+    // M2 has no executor heartbeat artifact reader. Workflow bookkeeping such as
+    // run.updated_at is not runner liveness, so the trusted lease anchor remains the claim.
     return {
       issueNumber,
-      lastHeartbeat,
-      ...(lastHeartbeat > metadata.claimedAt
-        ? {}
-        : { outageStarted: persistedOutageStarted ?? metadata.claimedAt }),
+      lastHeartbeat: metadata.claimedAt,
+      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
       cancelledByOwner,
     };
   }

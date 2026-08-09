@@ -40031,6 +40031,35 @@ class DomainError extends Error {
 }
 
 // src/domain/state.ts
+var workStates = [
+  "needs-approval",
+  "ready",
+  "claimed",
+  "running",
+  "reviewing",
+  "recovering",
+  "result-ready",
+  "needs-reapproval",
+  "needs-decision",
+  "blocked",
+  "delivered"
+];
+var workEvents = [
+  "approve",
+  "claim",
+  "start",
+  "candidate",
+  "verify",
+  "merge",
+  "close-unmerged",
+  "work-failure",
+  "incident",
+  "retry",
+  "block",
+  "drift",
+  "lease-expired",
+  "outage-block"
+];
 var transitions = {
   "needs-approval": { approve: "ready" },
   ready: { claim: "claimed", drift: "needs-reapproval" },
@@ -42799,42 +42828,6 @@ function extractContractBlock(body) {
   return contract;
 }
 
-// src/adapters/github/transition-record.ts
-function record(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
-}
-function parseTransitionRecord(body) {
-  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
-  if (!payload)
-    return;
-  let value;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const transitionRecord = record(value);
-  const metadata = record(transitionRecord?.metadata);
-  const event = transitionRecord?.event;
-  const expected = transitionRecord?.expected;
-  if (typeof event !== "string" || !metadata)
-    return;
-  return {
-    event,
-    metadata,
-    ...typeof expected === "string" ? { expected } : {}
-  };
-}
-function trustedTransitionRecords(comments) {
-  return comments.flatMap((comment) => {
-    if (comment.user?.login !== "github-actions[bot]" || comment.created_at !== comment.updated_at) {
-      return [];
-    }
-    const transitionRecord = parseTransitionRecord(comment.body);
-    return transitionRecord ? [transitionRecord] : [];
-  });
-}
-
 // src/adapters/github/issues.ts
 var stateLabels = new Map([
   ["opc:needs-approval", "needs-approval"],
@@ -42910,13 +42903,6 @@ function approvalFromComments(comments, approvers) {
 }
 function hasHttpStatus(error) {
   return typeof error === "object" && error !== null && "status" in error;
-}
-function hasTrustedClaimTransition(comments) {
-  return trustedTransitionRecords(comments).some((transitionRecord) => {
-    const runId = transitionRecord.metadata.run_id;
-    const claimedAt = transitionRecord.metadata.claimed_at;
-    return transitionRecord.expected === "ready" && transitionRecord.event === "claim" && typeof runId === "string" && /^\d+$/.test(runId) && typeof claimedAt === "string" && !Number.isNaN(new Date(claimedAt).getTime());
-  });
 }
 
 class GitHubIssues {
@@ -43003,22 +42989,75 @@ class GitHubIssues {
       createdAt,
       rootIssueNumber,
       attempt,
-      claimRecorded: hasTrustedClaimTransition(comments),
       ...approval
     };
   }
+}
+
+// src/adapters/github/transition-record.ts
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
+}
+function parseTransitionRecord(body) {
+  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
+  if (!payload)
+    return;
+  let value;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const transitionRecord = record(value);
+  const metadata = record(transitionRecord?.metadata);
+  const event = transitionRecord?.event;
+  const expected = transitionRecord?.expected;
+  if (typeof event !== "string" || !metadata)
+    return;
+  return {
+    event,
+    metadata,
+    ...typeof expected === "string" ? { expected } : {}
+  };
+}
+function trustedTransitionRecords(comments) {
+  return comments.flatMap((comment) => {
+    if (comment.user?.login !== "github-actions[bot]" || comment.created_at !== comment.updated_at) {
+      return [];
+    }
+    const transitionRecord = parseTransitionRecord(comment.body);
+    return transitionRecord ? [transitionRecord] : [];
+  });
 }
 
 // src/adapters/github/state-store.ts
 function issueLabels(labels) {
   return labels.map((label) => typeof label === "string" ? label : label.name).filter((label) => Boolean(label));
 }
-var activeStateLabels = new Set([
-  "opc:claimed",
-  "opc:running",
-  "opc:reviewing",
-  "opc:result-ready"
+var activeStates = new Set([
+  "claimed",
+  "running",
+  "reviewing",
+  "result-ready"
 ]);
+function includesWorkState(value) {
+  return workStates.some((state) => state === value);
+}
+function includesWorkEvent(value) {
+  return workEvents.some((event) => event === value);
+}
+function stateAfterTransition(transitionRecord) {
+  if (!transitionRecord?.expected || !includesWorkState(transitionRecord.expected) || !includesWorkEvent(transitionRecord.event)) {
+    return;
+  }
+  try {
+    return transition(transitionRecord.expected, transitionRecord.event);
+  } catch (error) {
+    if (error instanceof DomainError)
+      return;
+    throw error;
+  }
+}
 
 class GitHubStateStore {
   octokit;
@@ -43043,13 +43082,27 @@ class GitHubStateStore {
       state: "open",
       per_page: 100
     });
-    const activeIssues = issues.filter((issue) => issueLabels(issue.labels).some((label) => activeStateLabels.has(label)));
-    const loaded = await Promise.all(activeIssues.map((issue) => this.loadWorkIssue(issue.number).catch((error) => {
-      if (error instanceof DomainError)
-        return;
-      throw error;
-    })));
-    return loaded.some((issue) => issue?.claimRecorded === true);
+    const activeIssues = issues.flatMap((issue) => {
+      try {
+        const state = workStateFromLabels(issueLabels(issue.labels));
+        return activeStates.has(state) ? [{ number: issue.number, state }] : [];
+      } catch (error) {
+        if (error instanceof DomainError)
+          return [];
+        throw error;
+      }
+    });
+    const recordedStates = await Promise.all(activeIssues.map(async (issue) => {
+      const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: issue.number,
+        per_page: 100
+      });
+      const records = trustedTransitionRecords(comments);
+      return { current: issue.state, recorded: stateAfterTransition(records.at(-1)) };
+    }));
+    return recordedStates.some((state) => state.current === state.recorded);
   }
   async listEligibleWork() {
     const candidates = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
@@ -43188,21 +43241,12 @@ class GitHubReconciler {
       per_page: 100
     });
     const records = trustedTransitionRecords(comments);
-    let claimIndex = -1;
-    let metadata;
-    for (const [index, candidate] of records.entries()) {
-      const claim = claimMetadata(candidate);
-      if (!claim)
-        continue;
-      claimIndex = index;
-      metadata = claim;
-    }
+    const metadata = claimMetadata(records.at(-1));
     if (!metadata || !/^\d+$/.test(metadata.runId)) {
       throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
     }
-    const previous = records[claimIndex - 1];
+    const previous = records.at(-2);
     const persistedOutageStarted = previous?.event === "lease-expired" ? parseDate(previous.metadata.outage_started) : undefined;
-    let lastHeartbeat = metadata.claimedAt;
     let cancelledByOwner = false;
     try {
       const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
@@ -43210,9 +43254,6 @@ class GitHubReconciler {
         repo: this.repo,
         run_id: Number(metadata.runId)
       });
-      const updatedAt = parseDate(run.updated_at);
-      if (updatedAt && updatedAt > lastHeartbeat)
-        lastHeartbeat = updatedAt;
       cancelledByOwner = run.conclusion === "cancelled";
     } catch (error) {
       if (!hasHttpStatus2(error) || error.status !== 404)
@@ -43220,8 +43261,8 @@ class GitHubReconciler {
     }
     return {
       issueNumber,
-      lastHeartbeat,
-      ...lastHeartbeat > metadata.claimedAt ? {} : { outageStarted: persistedOutageStarted ?? metadata.claimedAt },
+      lastHeartbeat: metadata.claimedAt,
+      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
       cancelledByOwner
     };
   }
@@ -43266,8 +43307,14 @@ class GitHubRecovery {
       }
       try {
         const contract = parseIssueContractYaml(extractContractBlock(issue.body));
-        if (contract.kind === "Recovery" && contract.root_work_id === input.workId && contract.parent_issue === input.parentIssueNumber && contract.approval_digest === input.approvalDigest && contract.attempt === input.attempt) {
-          return issue.number;
+        if (contract.kind === "Recovery" && contract.parent_issue === input.parentIssueNumber && contract.attempt === input.attempt) {
+          return {
+            issueNumber: issue.number,
+            workId: contract.root_work_id,
+            approvalDigest: contract.approval_digest,
+            fingerprint: contract.error_fingerprint,
+            category: contract.failure_type
+          };
         }
       } catch (error) {
         if (!(error instanceof DomainError))
@@ -43521,12 +43568,13 @@ async function createRecovery(input, port) {
   const existing = await port.findOpenRecovery({
     rootIssueNumber: input.rootIssueNumber,
     parentIssueNumber: input.issueNumber,
-    workId: input.workId,
-    approvalDigest: input.approvalDigest,
     attempt: decision.nextAttempt
   });
   if (existing !== undefined) {
-    return { outcome: "deduplicated", issueNumber: existing };
+    if (existing.workId !== input.workId || existing.approvalDigest !== input.approvalDigest || existing.fingerprint !== input.fingerprint || existing.category !== input.category) {
+      throw new DomainError("RECOVERY_ATTEMPT_CONFLICT", `${String(input.rootIssueNumber)}:${String(decision.nextAttempt)}`);
+    }
+    return { outcome: "deduplicated", issueNumber: existing.issueNumber };
   }
   const issueNumber = await port.createRecovery({
     rootIssueNumber: input.rootIssueNumber,

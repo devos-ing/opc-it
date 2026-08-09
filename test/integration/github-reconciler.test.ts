@@ -65,7 +65,7 @@ function claimComment(actor: string, runId: string, claimedAt: string) {
   );
 }
 
-it("ignores a forged claim and clears a prior outage after a real heartbeat", async () => {
+it("ignores forged claims without treating workflow bookkeeping as heartbeat", async () => {
   const api = createGitHubApi([
     {
       path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
@@ -107,7 +107,8 @@ it("ignores a forged claim and clears a prior outage after a real heartbeat", as
   expect(await reconciler.listActiveClaims()).toEqual([
     {
       issueNumber: 7,
-      lastHeartbeat: new Date("2026-08-08T09:10:00Z"),
+      lastHeartbeat: new Date("2026-08-08T09:00:00Z"),
+      outageStarted: new Date("2026-08-07T09:00:00Z"),
       cancelledByOwner: false,
     },
   ]);
@@ -158,5 +159,35 @@ it("preserves the original outage when a reclaimed run has no later heartbeat", 
       cancelledByOwner: false,
     },
   ]);
+  expect(api.isDone()).toBe(true);
+});
+
+it("ignores a relabeled claim after a later trusted transition ended it", async () => {
+  const api = createGitHubApi([
+    {
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
+      response: [{ number: 7 }],
+    },
+    {
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [
+        claimComment("github-actions[bot]", "123", "2026-08-08T09:00:00Z"),
+        transitionComment(
+          "github-actions[bot]",
+          "lease-expired",
+          { outage_started: "2026-08-08T09:00:00.000Z" },
+          "2026-08-08T09:31:00Z",
+        ),
+      ],
+    },
+  ]);
+  const reconciler = new GitHubReconciler(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    "acme",
+  );
+
+  expect(await reconciler.listActiveClaims()).toEqual([]);
   expect(api.isDone()).toBe(true);
 });

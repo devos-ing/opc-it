@@ -11,7 +11,6 @@ import type { Sha256 } from "../../domain/identity.js";
 import type { WorkState } from "../../domain/state.js";
 import { parseIssueContractYaml } from "../../domain/validation.js";
 import { extractContractBlock } from "./issue-parser.js";
-import { trustedTransitionRecords } from "./transition-record.js";
 
 const stateLabels = new Map<string, WorkState>([
   ["opc:needs-approval", "needs-approval"],
@@ -116,23 +115,6 @@ function hasHttpStatus(error: unknown): error is { readonly status: number } {
   return typeof error === "object" && error !== null && "status" in error;
 }
 
-function hasTrustedClaimTransition(
-  comments: Awaited<ReturnType<Octokit["rest"]["issues"]["listComments"]>>["data"],
-): boolean {
-  return trustedTransitionRecords(comments).some((transitionRecord) => {
-    const runId = transitionRecord.metadata.run_id;
-    const claimedAt = transitionRecord.metadata.claimed_at;
-    return (
-      transitionRecord.expected === "ready" &&
-      transitionRecord.event === "claim" &&
-      typeof runId === "string" &&
-      /^\d+$/.test(runId) &&
-      typeof claimedAt === "string" &&
-      !Number.isNaN(new Date(claimedAt).getTime())
-    );
-  });
-}
-
 export class GitHubIssues {
   constructor(
     private readonly octokit: Octokit,
@@ -235,7 +217,6 @@ export class GitHubIssues {
       createdAt,
       rootIssueNumber,
       attempt,
-      claimRecorded: hasTrustedClaimTransition(comments),
       ...approval,
     };
   }
