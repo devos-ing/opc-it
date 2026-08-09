@@ -1,4 +1,7 @@
+import { readFile } from "node:fs/promises";
+import Ajv2020 from "ajv/dist/2020.js";
 import { expect, it } from "bun:test";
+import { ResultReviewSchema } from "../../src/domain/contracts.js";
 import { decideCandidate } from "../../src/domain/result.js";
 import { validateResultManifest, validateResultReview } from "../../src/domain/validation.js";
 
@@ -277,4 +280,59 @@ it.each([
     verified: false,
     reason: "criterion-unsatisfied:AC-1",
   });
+});
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("expected JSON object");
+  }
+  return value as Record<string, unknown>;
+}
+
+async function readJsonSchema(name: string): Promise<Record<string, unknown>> {
+  const source = await readFile(new URL(`../../schemas/${name}`, import.meta.url), "utf8");
+  const parsed: unknown = JSON.parse(source);
+  return objectRecord(parsed);
+}
+
+it("keeps the published result-review schema aligned with the TypeBox contract", async () => {
+  const schema = await readJsonSchema("result-review.schema.json");
+  const properties = objectRecord(schema.properties);
+  const decision = objectRecord(properties.decision);
+  const scopeStatus = objectRecord(properties.scope_status);
+  const criteria = objectRecord(properties.criteria);
+  const criterion = objectRecord(criteria.items);
+
+  expect(schema.required).toEqual(ResultReviewSchema.required);
+  expect(decision.enum).toEqual(ResultReviewSchema.properties.decision.anyOf.map((item) => item.const));
+  expect(scopeStatus.enum).toEqual(
+    ResultReviewSchema.properties.scope_status.anyOf.map((item) => item.const),
+  );
+  expect(schema.additionalProperties).toBe(false);
+  expect(criterion.additionalProperties).toBe(false);
+
+  const validate = new Ajv2020({ strict: true }).compile(schema);
+  expect(validate({ ...validResultReview, injected: true })).toBe(false);
+  expect(
+    validate({
+      ...validResultReview,
+      criteria: [{ ...validResultReview.criteria[0], injected: true }],
+    }),
+  ).toBe(false);
+});
+
+it("publishes a closed executor output schema", async () => {
+  const schema = await readJsonSchema("executor-output.schema.json");
+  const properties = objectRecord(schema.properties);
+  const status = objectRecord(properties.status);
+
+  expect(schema.required).toEqual(["status", "summary", "risks"]);
+  expect(status.enum).toEqual(["completed", "failed"]);
+  expect(schema.additionalProperties).toBe(false);
+
+  const validate = new Ajv2020({ strict: true }).compile(schema);
+  expect(validate({ status: "completed", summary: "done", risks: [] })).toBe(true);
+  expect(validate({ status: "completed", summary: "done", risks: [], injected: true })).toBe(
+    false,
+  );
 });
