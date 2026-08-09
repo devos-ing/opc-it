@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { failureCategories, type FailureCategory } from "../domain/recovery.js";
+import type { Sha256 } from "../domain/identity.js";
 
 export const actionCommands = [
   "validate",
@@ -11,6 +12,8 @@ export const actionCommands = [
   "verify-codex-runner",
   "prepare-execution",
   "finalize-execution",
+  "prepare-review",
+  "decide-result",
 ] as const;
 
 export type ActionCommand = (typeof actionCommands)[number];
@@ -36,6 +39,7 @@ export interface ActionInputs {
   readonly inputFile?: string;
   readonly codexVersion?: string;
   readonly permissionProfile?: "opc-executor" | "opc-reviewer";
+  readonly artifactSha256?: Sha256;
 }
 
 function isActionCommand(value: unknown): value is ActionCommand {
@@ -157,6 +161,8 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     "heartbeat",
     "prepare-execution",
     "finalize-execution",
+    "prepare-review",
+    "decide-result",
   ];
   const payloadB64 = raw.payloadB64;
   if (
@@ -166,8 +172,20 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires issue and payload`);
   }
   const inputFile = raw.inputFile;
-  if (raw.command === "finalize-execution" && !inputFile) {
-    throw new DomainError("INVALID_EXECUTION_INPUT", "finalize-execution requires input-file");
+  if (
+    (raw.command === "finalize-execution" ||
+      raw.command === "prepare-review" ||
+      raw.command === "decide-result") &&
+    !inputFile
+  ) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires input-file`);
+  }
+  const artifactSha256 = raw.artifactSha256;
+  if (
+    (raw.command === "prepare-review" || raw.command === "decide-result") &&
+    (!artifactSha256 || !/^sha256:[0-9a-f]{64}$/.test(artifactSha256))
+  ) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires artifact digest`);
   }
   const codexVersion = raw.codexVersion;
   const permissionProfile = raw.permissionProfile;
@@ -197,6 +215,9 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     ...(codexVersion ? { codexVersion } : {}),
     ...(permissionProfile === "opc-executor" || permissionProfile === "opc-reviewer"
       ? { permissionProfile }
+      : {}),
+    ...(artifactSha256 && /^sha256:[0-9a-f]{64}$/.test(artifactSha256)
+      ? { artifactSha256: artifactSha256 as Sha256 }
       : {}),
   };
 }

@@ -25,6 +25,9 @@ inputs:
   codex-version:
     description: exact host-installed Codex CLI version
     required: false
+  artifact-sha256:
+    description: trusted outer bundle-index digest from finalize-execution
+    required: false
   permission-profile:
     description: host-owned opc-executor or opc-reviewer profile
     required: false
@@ -60,6 +63,10 @@ outputs:
     description: true only when a Candidate Result bundle is complete
   bundle-directory:
     description: verified Candidate Result bundle directory
+  artifact-sha256:
+    description: outer Candidate Result bundle-index digest
+  outcome:
+    description: deterministic Evidence Gate outcome
 runs:
   using: node24
   main: dist/action/index.cjs

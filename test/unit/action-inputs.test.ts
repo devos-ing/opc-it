@@ -57,6 +57,16 @@ it("accepts local execution commands only with their bounded inputs", () => {
     codexVersion: "0.144.4",
     permissionProfile: "opc-executor",
   });
+  expect(
+    parseActionInputs({
+      command: "prepare-review",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      inputFile: "/tmp/bundle",
+      artifactSha256: `sha256:${"a".repeat(64)}`,
+    }),
+  ).toMatchObject({ command: "prepare-review", artifactSha256: `sha256:${"a".repeat(64)}` });
 });
 
 it("accepts and validates a narrow recover failure payload", () => {
@@ -93,6 +103,16 @@ it.each([
   [
     { command: "verify-codex-runner", repository: "acme/app", codexVersion: "0.144.4" },
     "INVALID_CODEX_RUNNER",
+  ],
+  [
+    {
+      command: "prepare-review",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      inputFile: "/tmp/bundle",
+    },
+    "INVALID_EXECUTION_INPUT",
   ],
   [
     { command: "recover", repository: "acme/app", workflowRef: "main" },

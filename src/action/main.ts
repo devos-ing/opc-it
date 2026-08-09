@@ -6,8 +6,10 @@ import { execa } from "execa";
 import { createGitHubClient } from "../adapters/github/client.js";
 import { runActionCommand } from "../commands/action-command.js";
 import { finalizeExecution } from "../commands/finalize-execution.js";
+import { decideResult } from "../commands/decide-result.js";
 import { runActionHeartbeat } from "../commands/heartbeat.js";
 import { prepareExecution, type LocalExecutionRuntime } from "../commands/prepare-execution.js";
+import { prepareReview } from "../commands/prepare-review.js";
 import {
   productionRunnerManifestPath,
   productionRunnerUser,
@@ -63,6 +65,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     const inputFile = runtime.getInput("input-file");
     const codexVersion = runtime.getInput("codex-version");
     const permissionProfile = runtime.getInput("permission-profile");
+    const artifactSha256 = runtime.getInput("artifact-sha256");
     const inputs = parseActionInputs({
       command: runtime.getInput("command"),
       repository: runtime.getInput("repository"),
@@ -73,6 +76,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       ...(inputFile ? { inputFile } : {}),
       ...(codexVersion ? { codexVersion } : {}),
       ...(permissionProfile ? { permissionProfile } : {}),
+      ...(artifactSha256 ? { artifactSha256 } : {}),
     });
     const token = runtime.getInput("github-token");
     const octokit = token
@@ -107,7 +111,9 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     if (
       inputs.command === "verify-codex-runner" ||
       inputs.command === "prepare-execution" ||
-      inputs.command === "finalize-execution"
+      inputs.command === "finalize-execution" ||
+      inputs.command === "prepare-review" ||
+      inputs.command === "decide-result"
     ) {
       if (octokit) throw new DomainError("UNEXPECTED_GITHUB_CLIENT", inputs.command);
       if (inputs.command === "verify-codex-runner") {
@@ -152,7 +158,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
           "executor-schema-file": prepared.executorSchemaFile,
           "review-schema-file": prepared.reviewSchemaFile,
         };
-      } else {
+      } else if (inputs.command === "finalize-execution") {
         if (inputs.issueNumber === undefined || !inputs.payloadB64 || !inputs.inputFile) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing finalize input");
         }
@@ -168,7 +174,60 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
         outputs = {
           "bundle-ready": "true",
           "bundle-directory": finalized.bundleDirectory,
+          "artifact-sha256": finalized.artifactSha256,
         };
+      } else if (inputs.command === "prepare-review") {
+        if (
+          inputs.issueNumber === undefined ||
+          !inputs.payloadB64 ||
+          !inputs.inputFile ||
+          !inputs.artifactSha256
+        ) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing prepare-review input");
+        }
+        const executionRuntime = localRuntime();
+        const reviewRuntime = {
+          runnerTemp: executionRuntime.runnerTemp,
+          actionPath: executionRuntime.actionPath,
+        };
+        const prepared = await prepareReview(
+          {
+            issueNumber: inputs.issueNumber,
+            payloadB64: inputs.payloadB64,
+            inputDirectory: inputs.inputFile,
+            artifactSha256: inputs.artifactSha256,
+          },
+          reviewRuntime,
+        );
+        result = prepared;
+        outputs = {
+          "prompt-file": prepared.promptFile,
+          "review-schema-file": prepared.reviewSchemaFile,
+        };
+      } else {
+        if (
+          inputs.issueNumber === undefined ||
+          !inputs.payloadB64 ||
+          !inputs.inputFile ||
+          !inputs.artifactSha256
+        ) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing decide-result input");
+        }
+        const executionRuntime = localRuntime();
+        const decision = await decideResult(
+          {
+            issueNumber: inputs.issueNumber,
+            payloadB64: inputs.payloadB64,
+            reviewFile: inputs.inputFile,
+            artifactSha256: inputs.artifactSha256,
+          },
+          {
+            runnerTemp: executionRuntime.runnerTemp,
+            actionPath: executionRuntime.actionPath,
+          },
+        );
+        result = decision;
+        outputs = { outcome: decision.outcome };
       }
     } else if (inputs.command === "heartbeat") {
       if (!octokit) throw new DomainError("MISSING_GITHUB_TOKEN", "heartbeat requires token");
