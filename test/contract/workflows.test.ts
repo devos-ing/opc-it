@@ -41,8 +41,7 @@ it("keeps the Target caller thin, serialized, and immutably pinned", async () =>
   expect(events).not.toHaveProperty("pull_request");
   expect(events).not.toHaveProperty("pull_request_target");
   expect(source).toMatch(/uses: "0xroylee\/OPC\/.github\/workflows\/reusable-opc\.yml@1{40}"/);
-  expect(source).toContain("group: opc-${{ github.repository }}");
-  expect(source).toContain("cancel-in-progress: false");
+  expect(workflow).not.toHaveProperty("concurrency");
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
   assertTargetCallerPermissions(workflow);
@@ -57,6 +56,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   const heartbeat = record(jobs.heartbeat, "heartbeat");
   const execute = record(jobs.execute, "execute");
   const review = record(jobs.review, "review");
+  const conclude = record(jobs.conclude, "conclude");
 
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
@@ -77,4 +77,23 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   });
   expect(record(execute.permissions, "execute permissions")).toEqual({ contents: "read" });
   expect(record(review.permissions, "review permissions")).toEqual({ contents: "read" });
+  expect(record(conclude.permissions, "conclude permissions")).toEqual({
+    contents: "read",
+    issues: "write",
+    actions: "write",
+  });
+  expect(record(dispatchAndClaim.concurrency, "dispatch concurrency")).toEqual({
+    group: "opc-control-${{ github.repository }}",
+    "cancel-in-progress": false,
+  });
+  expect(conclude.needs).toEqual(["dispatch-and-claim", "execute", "review"]);
+  expect(conclude.if).toContain("always()");
+  const concludeStep = record(
+    (conclude.steps as Record<string, unknown>[])[0],
+    "conclude step",
+  );
+  expect(record(concludeStep.with, "conclude.with")).toMatchObject({
+    command: "complete-run",
+    "payload-b64": "${{ needs.dispatch-and-claim.outputs.envelope_b64 }}",
+  });
 });

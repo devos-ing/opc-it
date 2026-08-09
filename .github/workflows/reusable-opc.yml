@@ -8,25 +8,13 @@ on:
       issue_number:
         required: false
         type: string
-      codex_version:
-        required: true
-        type: string
-      executor_model:
-        required: true
-        type: string
-      executor_effort:
-        required: true
-        type: string
-      reviewer_model:
-        required: true
-        type: string
-      reviewer_effort:
-        required: true
-        type: string
 
 jobs:
   dispatch-and-claim:
     runs-on: ubuntu-latest
+    concurrency:
+      group: opc-control-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
@@ -41,12 +29,11 @@ jobs:
     steps:
       - name: Claim or reconcile
         id: opc
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: ${{ inputs.event_name == 'schedule' && 'reconcile' || 'claim' }}
           repository: ${{ github.repository }}
           issue-number: ${{ inputs.issue_number }}
-          workflow-ref: ${{ github.event.repository.default_branch }}
           github-token: ${{ github.token }}
 
   heartbeat:
@@ -59,7 +46,7 @@ jobs:
       actions: read
     steps:
       - name: Watch executor and reviewer liveness
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: heartbeat
           repository: ${{ github.repository }}
@@ -71,7 +58,7 @@ jobs:
     needs: dispatch-and-claim
     if: needs.dispatch-and-claim.outputs.claimed == 'true'
     runs-on: [self-hosted, macOS, ARM64, opc]
-    timeout-minutes: 90
+    timeout-minutes: 95
     permissions:
       contents: read
     outputs:
@@ -89,50 +76,29 @@ jobs:
           fetch-depth: 0
       - name: Prepare workspace and run network-denied bootstrap
         id: prepare
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: prepare-execution
           repository: ${{ github.repository }}
           issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
-      - name: Verify local Codex runner
-        id: codex-preflight
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
-        with:
-          command: verify-codex-runner
-          repository: ${{ github.repository }}
-          codex-version: ${{ inputs.codex_version }}
-          permission-profile: opc-executor
+          enabled: ${{ vars.OPC_ENABLED }}
       - name: Execute approved milestone
         id: codex
-        shell: bash
-        env:
-          OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
-          OPC_PROMPT_FILE: ${{ steps.prepare.outputs['prompt-file'] }}
-          OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-executor-output.json
-          OPC_SCHEMA_FILE: ${{ steps.prepare.outputs['executor-schema-file'] }}
-          OPC_WORKSPACE: ${{ steps.prepare.outputs.workspace }}
-          OPC_MODEL: ${{ inputs.executor_model }}
-          OPC_EFFORT: ${{ inputs.executor_effort }}
-        run: |
-          env -i \
-            HOME="$HOME" \
-            PATH="$PATH" \
-            TMPDIR="$RUNNER_TEMP" \
-            "$OPC_CODEX_BIN" exec \
-            --ephemeral \
-            --strict-config \
-            --profile opc-executor \
-            --model "$OPC_MODEL" \
-            --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
-            --cd "$OPC_WORKSPACE" \
-            --output-schema "$OPC_SCHEMA_FILE" \
-            --output-last-message "$OPC_OUTPUT_FILE" \
-            - < "$OPC_PROMPT_FILE"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        with:
+          command: run-codex
+          repository: ${{ github.repository }}
+          permission-profile: opc-executor
+          workspace: ${{ steps.prepare.outputs.workspace }}
+          prompt-file: ${{ steps.prepare.outputs['prompt-file'] }}
+          output-file: ${{ runner.temp }}/opc-executor-output.json
+          schema-file: ${{ steps.prepare.outputs['executor-schema-file'] }}
+          timeout-seconds: ${{ steps.prepare.outputs['timeout-seconds'] }}
       - name: Build Candidate Result
         if: always()
         id: finalize
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: finalize-execution
           repository: ${{ github.repository }}
@@ -152,7 +118,7 @@ jobs:
     needs: [dispatch-and-claim, execute]
     if: needs.execute.result == 'success'
     runs-on: [self-hosted, macOS, ARM64, opc]
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     outputs:
@@ -164,7 +130,7 @@ jobs:
           path: ${{ runner.temp }}/opc-review-input
       - name: Verify bundle and prepare review input
         id: prepare-review
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: prepare-review
           repository: ${{ github.repository }}
@@ -172,42 +138,20 @@ jobs:
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           input-file: ${{ runner.temp }}/opc-review-input
           artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
-      - name: Verify local Codex reviewer
-        id: codex-preflight
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
-        with:
-          command: verify-codex-runner
-          repository: ${{ github.repository }}
-          codex-version: ${{ inputs.codex_version }}
-          permission-profile: opc-reviewer
       - name: Review candidate independently
-        shell: bash
-        env:
-          OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
-          OPC_PROMPT_FILE: ${{ steps.prepare-review.outputs['prompt-file'] }}
-          OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-result-review.json
-          OPC_SCHEMA_FILE: ${{ steps.prepare-review.outputs['review-schema-file'] }}
-          OPC_WORKSPACE: ${{ runner.temp }}/opc-review-input
-          OPC_MODEL: ${{ inputs.reviewer_model }}
-          OPC_EFFORT: ${{ inputs.reviewer_effort }}
-        run: |
-          env -i \
-            HOME="$HOME" \
-            PATH="$PATH" \
-            TMPDIR="$RUNNER_TEMP" \
-            "$OPC_CODEX_BIN" exec \
-            --ephemeral \
-            --strict-config \
-            --profile opc-reviewer \
-            --model "$OPC_MODEL" \
-            --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
-            --cd "$OPC_WORKSPACE" \
-            --output-schema "$OPC_SCHEMA_FILE" \
-            --output-last-message "$OPC_OUTPUT_FILE" \
-            - < "$OPC_PROMPT_FILE"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        with:
+          command: run-codex
+          repository: ${{ github.repository }}
+          permission-profile: opc-reviewer
+          workspace: ${{ runner.temp }}/opc-review-input
+          prompt-file: ${{ steps.prepare-review.outputs['prompt-file'] }}
+          output-file: ${{ runner.temp }}/opc-result-review.json
+          schema-file: ${{ steps.prepare-review.outputs['review-schema-file'] }}
+          timeout-seconds: 900
       - name: Apply deterministic Evidence Gate
         id: decision
-        uses: "0xroylee/OPC@9c71c4afc248fbe757b50322521cf17d53ffa720"
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
         with:
           command: decide-result
           repository: ${{ github.repository }}
@@ -225,3 +169,21 @@ jobs:
             ${{ runner.temp }}/opc-result-review.json
           if-no-files-found: error
           retention-days: 30
+
+  conclude:
+    needs: [dispatch-and-claim, execute, review]
+    if: always() && needs.dispatch-and-claim.outputs.claimed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: write
+    steps:
+      - name: Persist verified result or bounded Recovery
+        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        with:
+          command: complete-run
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+          github-token: ${{ github.token }}

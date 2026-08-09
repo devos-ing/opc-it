@@ -35,11 +35,12 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   const heartbeat = record(jobs.heartbeat, "heartbeat");
   const steps = records(execute.steps, "execute.steps");
 
-  for (const input of ["codex_version", "executor_model", "executor_effort"]) {
-    expect(record(inputs[input], input).required).toBe(true);
-  }
+  expect(inputs).toEqual({
+    event_name: { required: true, type: "string" },
+    issue_number: { required: false, type: "string" },
+  });
   expect(execute["runs-on"]).toEqual(["self-hosted", "macOS", "ARM64", "opc"]);
-  expect(execute["timeout-minutes"]).toBe(90);
+  expect(execute["timeout-minutes"]).toBe(95);
   expect(execute.needs).toBe("dispatch-and-claim");
   expect(execute.if).toContain("claimed == 'true'");
   expect(record(execute.permissions, "execute.permissions")).toEqual({ contents: "read" });
@@ -53,28 +54,20 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   });
 
   const prepare = namedStep(steps, "Prepare workspace and run network-denied bootstrap");
-  const preflight = namedStep(steps, "Verify local Codex runner");
+  const codex = namedStep(steps, "Execute approved milestone");
   const finalize = namedStep(steps, "Build Candidate Result");
-  for (const step of [prepare, preflight, finalize]) {
+  for (const step of [prepare, codex, finalize]) {
     expect(step.uses).toMatch(/^0xroylee\/OPC@[0-9a-f]{40}$/);
     expect(record(step.with, "local.with")).not.toHaveProperty("github-token");
   }
   expect(finalize.if).toBe("always()");
-
-  const codex = namedStep(steps, "Execute approved milestone");
-  expect(codex.run).toContain("env -i");
-  expect(codex.run).toContain('"$OPC_CODEX_BIN" exec');
-  for (const flag of [
-    "--ephemeral",
-    "--strict-config",
-    "--profile opc-executor",
-    '--model "$OPC_MODEL"',
-    '--cd "$OPC_WORKSPACE"',
-    '--output-schema "$OPC_SCHEMA_FILE"',
-    '--output-last-message "$OPC_OUTPUT_FILE"',
-  ]) {
-    expect(codex.run).toContain(flag);
-  }
+  expect(record(prepare.with, "prepare.with").enabled).toBe("${{ vars.OPC_ENABLED }}");
+  expect(record(codex.with, "codex.with")).toMatchObject({
+    command: "run-codex",
+    "permission-profile": "opc-executor",
+    "timeout-seconds": "${{ steps.prepare.outputs['timeout-seconds'] }}",
+  });
+  expect(codex).not.toHaveProperty("run");
 
   expect(heartbeat["runs-on"]).toBe("ubuntu-latest");
   expect(heartbeat["timeout-minutes"]).toBe(110);
@@ -93,13 +86,10 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     (match) => match[1],
   );
   expect(new Set(opcActionRefs).size).toBe(1);
-  expect(opcActionRefs).toHaveLength(8);
+  expect(opcActionRefs).toHaveLength(9);
 });
 
-it("pins executor route constants in the generated Target caller", async () => {
+it("keeps executor route selection outside the generated Target caller", async () => {
   const source = await readFile("templates/target/.github/workflows/opc.yml", "utf8");
-  expect(source).toContain('codex_version: "0.144.4"');
-  expect(source).toContain('executor_model: "gpt-5.6-luna"');
-  expect(source).toContain('executor_effort: "high"');
-  expect(source).not.toMatch(/vars\..*(codex|model|profile)|inputs\..*(codex|model|profile)/i);
+  expect(source).not.toMatch(/codex|model|effort|profile/i);
 });
