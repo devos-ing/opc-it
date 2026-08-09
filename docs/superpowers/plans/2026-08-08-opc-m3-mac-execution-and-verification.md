@@ -4,7 +4,7 @@
 
 **Goal:** Run one approved milestone on the dedicated Mac mini, produce a content-addressed Candidate Result, and independently review it without granting any repository write credential.
 
-**Architecture:** The reusable workflow hands an immutable execution envelope to a self-hosted macOS runner. OPC creates a disposable worktree at the approved base, runs fixed bootstrap and evidence commands through a bounded process adapter, invokes the official Codex Action as executor, verifies every changed file, and uploads a hash-addressed bundle. A separate job downloads only the approved review inputs and starts a fresh read-only Codex session whose structured output is checked by the deterministic Evidence Gate.
+**Architecture:** The reusable workflow hands an immutable execution envelope to a self-hosted macOS runner. OPC creates a disposable worktree at the approved base, runs fixed bootstrap and evidence commands through a bounded process adapter, and invokes a pinned Codex CLI through the official Codex Action. The implementation route uses GPT-5.6 Luna at high effort, verifies every changed file, and uploads a hash-addressed bundle. A separate job downloads only the approved review inputs and starts a fresh read-only GPT-5.6 Sol session at xhigh effort whose structured output is checked by the deterministic Evidence Gate.
 
 **Tech Stack:** Node.js 24, TypeScript, Vitest, `execa`, `shell-quote`, `@actions/artifact`, Git worktrees, GitHub reusable workflows, and `openai/codex-action@v1`.
 
@@ -720,7 +720,7 @@ In this task, extend `workflow_call.secrets` with required `OPENAI_API_KEY` and 
 
 - [ ] **Step 3: Make model aliases explicit inputs pinned by Control Repository**
 
-Define `workflow_call` inputs `codex_version`, `executor_model`, and `executor_effort` as required strings. The M3 acceptance release uses `codex_version: "0.144.4"`, `executor_model: "gpt-5.3-codex"`, and `executor_effort: "high"`. Target repositories cannot choose them: the generated thin caller receives these constants from the approved Control Repository release manifest. Add a contract test that fails if the caller reads these values from Issue content or repository variables.
+Define `workflow_call` inputs `codex_version`, `executor_model`, and `executor_effort` as required strings. The M3 acceptance release uses `codex_version: "0.144.4"`, `executor_model: "gpt-5.6-luna"`, and `executor_effort: "high"`. Target repositories cannot choose them: the generated thin caller receives these constants from the approved Control Repository release manifest. Add a contract test that fails if the caller reads these values from Issue content or repository variables. The official Action is the hardened wrapper that installs this CLI version and forwards these values to `codex exec`; no custom Responses API agent client is introduced.
 
 Build and commit the Action, record the new `control_action_sha`, render both `templates/control/reusable-opc.yml` and `.github/workflows/reusable-opc.yml` so every OPC `uses:` points to that SHA, then commit the workflow separately. This is the M3 two-commit private Action release; no step checkouts the Control Repository.
 
@@ -862,7 +862,7 @@ review:
 
 The reviewer job does not download executor stdout, Codex home, chat history, or hidden runner files. `prepare-review` verifies `bundle-index.json` and every entry digest before constructing the prompt. `decide-result` revalidates both JSON schemas, exact criterion set, evidence references, path scope, and bundle limit; it emits one of `verified`, `execution-failure`, `evidence-failure`, `review-failure`, or `run-incident`.
 
-Add `reviewer_model` and `reviewer_effort` as required reusable-workflow inputs fixed by the same release manifest. M3 uses `reviewer_model: "gpt-5.3-codex"` and `reviewer_effort: "high"`.
+Add `reviewer_model` and `reviewer_effort` as required reusable-workflow inputs fixed by the same release manifest. M3 uses the thinking route: `reviewer_model: "gpt-5.6-sol"` and `reviewer_effort: "xhigh"`.
 
 Extend the private Action command union with `prepare-review` and `decide-result`, rebuild and commit the Action, record its new full SHA, then render and commit the reusable workflow separately. The contract test rejects any cross-repository checkout and requires every OPC Action `uses:` reference to the recorded full SHA.
 

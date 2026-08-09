@@ -716,13 +716,15 @@ The runbook permits only one small, reversible milestone whose writable paths ex
 ```json
 {
   "version": 1,
+  "runtime": "codex-cli",
   "codex_version": "0.144.4",
-  "executor": { "model": "gpt-5.3-codex", "effort": "high" },
-  "reviewer": { "model": "gpt-5.3-codex", "effort": "high" }
+  "planner": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+  "executor": { "model": "gpt-5.6-luna", "effort": "high" },
+  "reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" }
 }
 ```
 
-These are the concrete routing values approved for the first acceptance run: the locally verified Codex CLI is `0.144.4`, and the current official coding model is `gpt-5.3-codex`. If either value is unavailable when M3 begins, stop before execution, update M3 and M4 together with the replacement and its acceptance evidence, and obtain milestone approval. Compute and record this file's digest in `opc-v1-acceptance.md`. The release check rejects unpinned GitHub Action tags other than the explicitly approved `openai/codex-action@v1`, or Control Repository references that are not full commit SHAs.
+These are the concrete routing values approved for the first acceptance run: the locally verified Codex CLI is `0.144.4`; planning and independent review use the thinking route `gpt-5.6-sol` + `xhigh`; implementation uses `gpt-5.6-luna` + `high`. The planner runs through Codex CLI before Plan Approval. Unattended executor and reviewer jobs use the official `openai/codex-action`, which installs the pinned CLI and forwards model and effort to `codex exec`; OPC does not introduce a custom Responses API agent client. If any pinned value is unavailable when M3 begins, stop before execution, update M3 and M4 together with the replacement and its acceptance evidence, and obtain milestone approval. Compute and record this file's digest in `opc-v1-acceptance.md`. The release check rejects unpinned GitHub Action tags other than the explicitly approved `openai/codex-action@v1`, or Control Repository references that are not full commit SHAs.
 
 - [ ] **Step 3: Add final CI release checks**
 

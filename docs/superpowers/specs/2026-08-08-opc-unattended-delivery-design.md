@@ -10,11 +10,11 @@
 
 ## 1. 结论
 
-OPC v1 使用标准 GitHub Actions、官方 `openai/codex-action` 和一台专用 Mac mini self-hosted macOS runner，实现从批准计划到验证结果的无人值守交付。
+OPC v1 使用标准 GitHub Actions、固定版本的 Codex CLI、官方 `openai/codex-action` 和一台专用 Mac mini self-hosted macOS runner，实现从批准计划到验证结果的无人值守交付。官方 Action 负责安装并调用 Codex CLI；OPC 不实现自定义 Responses API agent runtime。
 
 人的参与被严格限制为：
 
-1. 在 Codex Desktop 中 grill、审阅并批准一个 Milestone Contract。
+1. 使用 Codex CLI 的 `gpt-5.6-sol` + `xhigh` 路由 grill、审阅并批准一个 Milestone Contract。
 2. 审阅最终 Delivery Pull Request。
 3. 只在重新批准、Needs Decision 或 Terminal Blocker 时介入。
 
@@ -99,7 +99,7 @@ GitHub Agentic Workflows 提供 agent workflow、安全输出和失败 Issue 等
 - JSON Schema 与 canonicalization 实现。
 - Issue、Result Manifest、Result Review 和 Recovery Addendum 模板。
 - 状态转换、fingerprint、Evidence Gate 和恢复策略。
-- executor 与 reviewer 的模型配置别名。
+- planner、executor 与 reviewer 的 Codex CLI 模型配置别名。
 
 Target Repository 通过 commit SHA 固定调用的 OPC 版本，避免未经批准的中央更新改变正在执行的行为。私有仓库之间不使用 Target Repository 的 `GITHUB_TOKEN` checkout Control Repository；v1 使用 GitHub 的同 owner/organization 私有 Action 与 reusable workflow sharing。
 
@@ -119,7 +119,7 @@ Work Issue、Recovery Issue、Action run、artifact、delivery branch 和 Delive
 
 ```mermaid
 flowchart LR
-    Human["Codex Desktop<br/>Grill 与 Plan Approval"] --> Issue["Work Issue<br/>Milestone Contract 与 Approval Digest"]
+    Human["Codex CLI · Sol xhigh<br/>Grill 与 Plan Approval"] --> Issue["Work Issue<br/>Milestone Contract 与 Approval Digest"]
     Issue --> Trigger["Ready event<br/>加 15 分钟 Reconciliation Sweep"]
     Trigger --> Claim["Repository Queue<br/>与 Work Claim"]
     Claim --> Runner["Mac mini Runner"]
@@ -165,7 +165,7 @@ Target Repository checkout 使用 `persist-credentials: false`。OPC 在启动 C
 
 ### 6.1 计划与批准
 
-1. 用户在 Codex Desktop 发起 grill。
+1. 用户通过 Codex CLI 的 `gpt-5.6-sol` + `xhigh` 路由发起 grill；Codex Desktop 可以作为交互界面，但运行时和版本契约属于 CLI。
 2. Codex 读取目标仓库当前 default branch SHA 和 `.codex-pipeline.yml`。
 3. Codex 生成一个机器可读 Milestone Contract，并展示人类可读计划。
 4. 用户明确批准一个 milestone。
@@ -194,7 +194,7 @@ Plan Approval 只授权该 Milestone Contract，不授权相邻工作、后续 m
 
 1. 在批准的 `base_sha` 创建 Execution Workspace。
 2. 编排器在注入 OpenAI credential 前，按 Repository Policy 的独立 bootstrap network policy 执行固定 bootstrap 命令。
-3. Codex executor 获得：
+3. `gpt-5.6-luna` + `high` 的 Codex CLI executor 获得：
    - Milestone Contract。
    - Repository Policy 的收紧视图。
    - Recovery Addendum（如果存在）。
@@ -206,7 +206,7 @@ Plan Approval 只授权该 Milestone Contract，不授权相邻工作、后续 m
 
 ### 6.4 结果审查
 
-reviewer 是新的只读 Codex 会话：
+reviewer 是新的 `gpt-5.6-sol` + `xhigh` 只读 Codex CLI 会话：
 
 - 不读取 executor 的 reasoning 或对话。
 - 不修改候选结果。
@@ -515,7 +515,7 @@ v1 不尝试判断代码变化“看起来无关”后自动重签，因为这�
 
 Repository Policy 和 Milestone Contract 可以降低但不能提高这些上限。执行超时是 Execution Failure；在可信执行尚未开始前的 runner 或服务不可用是 Run Incident。
 
-executor 与 reviewer 使用中央逻辑别名。别名固定具体 model、版本与 reasoning profile，升级必须通过 OPC 自身 acceptance suite。每次运行记录可用的 model version、token usage、duration、transition 和 artifact hashes。
+planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 使用 implementation route：`gpt-5.6-luna` + `high`。三个角色都通过固定版本的 Codex CLI 运行；无人值守 executor/reviewer 可由官方 `openai/codex-action` 安装并调用该 CLI。中央别名固定具体 model、CLI 版本与 reasoning profile，升级必须通过 OPC 自身 acceptance suite。每次运行记录可用的 model version、token usage、duration、transition 和 artifact hashes。
 
 ## 13. 通知与可观测性
 
