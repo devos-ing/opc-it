@@ -8,6 +8,15 @@ on:
       issue_number:
         required: false
         type: string
+      codex_version:
+        required: true
+        type: string
+      executor_model:
+        required: true
+        type: string
+      executor_effort:
+        required: true
+        type: string
 
 jobs:
   dispatch-and-claim:
@@ -19,6 +28,10 @@ jobs:
     outputs:
       claimed: ${{ steps.opc.outputs.claimed }}
       issue_number: ${{ steps.opc.outputs['issue-number'] }}
+      attempt: ${{ steps.opc.outputs.attempt }}
+      base_sha: ${{ steps.opc.outputs['base-sha'] }}
+      envelope_b64: ${{ steps.opc.outputs['envelope-b64'] }}
+      heartbeat_payload_b64: ${{ steps.opc.outputs['heartbeat-payload-b64'] }}
     steps:
       - name: Claim or reconcile
         id: opc
@@ -29,3 +42,96 @@ jobs:
           issue-number: ${{ inputs.issue_number }}
           workflow-ref: ${{ github.event.repository.default_branch }}
           github-token: ${{ github.token }}
+
+  heartbeat:
+    needs: dispatch-and-claim
+    if: needs.dispatch-and-claim.outputs.claimed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Watch executor and reviewer liveness
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: heartbeat
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.heartbeat_payload_b64 }}
+          github-token: ${{ github.token }}
+
+  execute:
+    needs: dispatch-and-claim
+    if: needs.dispatch-and-claim.outputs.claimed == 'true'
+    runs-on: [self-hosted, macOS, ARM64, opc]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      OPC_BUNDLE_DIR: ${{ runner.temp }}/opc-bundle-${{ github.run_id }}
+      OPC_WORKTREE_ROOT: ${{ runner.temp }}/opc-worktrees/${{ github.run_id }}
+    steps:
+      - name: Checkout target without persistent credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch-and-claim.outputs.base_sha }}
+          path: target-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prepare workspace and run network-denied bootstrap
+        id: prepare
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: prepare-execution
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+      - name: Verify local Codex runner
+        id: codex-preflight
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: verify-codex-runner
+          repository: ${{ github.repository }}
+          codex-version: ${{ inputs.codex_version }}
+          permission-profile: opc-executor
+      - name: Execute approved milestone
+        id: codex
+        shell: bash
+        env:
+          OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
+          OPC_PROMPT_FILE: ${{ steps.prepare.outputs['prompt-file'] }}
+          OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-executor-output.json
+          OPC_SCHEMA_FILE: ${{ steps.prepare.outputs['executor-schema-file'] }}
+          OPC_WORKSPACE: ${{ steps.prepare.outputs.workspace }}
+          OPC_MODEL: ${{ inputs.executor_model }}
+          OPC_EFFORT: ${{ inputs.executor_effort }}
+        run: |
+          "$OPC_CODEX_BIN" exec \
+            --ephemeral \
+            --strict-config \
+            --profile opc-executor \
+            --model "$OPC_MODEL" \
+            --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
+            --cd "$OPC_WORKSPACE" \
+            --output-schema "$OPC_SCHEMA_FILE" \
+            --output-last-message "$OPC_OUTPUT_FILE" \
+            - < "$OPC_PROMPT_FILE"
+      - name: Build Candidate Result
+        if: always()
+        id: finalize
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: finalize-execution
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+          input-file: ${{ runner.temp }}/opc-executor-output.json
+      - name: Upload Candidate Result
+        if: always() && steps.finalize.outputs['bundle-ready'] == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opc-candidate-${{ github.run_id }}
+          path: ${{ steps.finalize.outputs['bundle-directory'] }}
+          if-no-files-found: error
+          retention-days: 30

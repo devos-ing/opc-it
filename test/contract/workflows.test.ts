@@ -17,7 +17,7 @@ function parseStrictWorkflow(source: string, name: string): Record<string, unkno
   return record(document.toJS(), name);
 }
 
-function assertExplicitJobPermissions(workflow: Record<string, unknown>): void {
+function assertTargetCallerPermissions(workflow: Record<string, unknown>): void {
   const jobs = record(workflow.jobs, "jobs");
   for (const [name, value] of Object.entries(jobs)) {
     const job = record(value, name);
@@ -45,15 +45,17 @@ it("keeps the Target caller thin, serialized, and immutably pinned", async () =>
   expect(source).toContain("cancel-in-progress: false");
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
-  assertExplicitJobPermissions(workflow);
+  assertTargetCallerPermissions(workflow);
 });
 
-it("keeps the reusable control workflow GitHub-hosted and Action-pinned", async () => {
+it("keeps the reusable control workflow permission-separated and Action-pinned", async () => {
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
   const workflow = parseStrictWorkflow(source, "reusable-opc.yml");
   const events = record(workflow.on, "on");
   const jobs = record(workflow.jobs, "jobs");
   const dispatchAndClaim = record(jobs["dispatch-and-claim"], "dispatch-and-claim");
+  const heartbeat = record(jobs.heartbeat, "heartbeat");
+  const execute = record(jobs.execute, "execute");
 
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
@@ -63,5 +65,14 @@ it("keeps the reusable control workflow GitHub-hosted and Action-pinned", async 
   expect(source).not.toContain("pull_request");
   expect(source).not.toContain("pull_request_target");
   expect(source).not.toContain("OPENAI");
-  assertExplicitJobPermissions(workflow);
+  expect(record(dispatchAndClaim.permissions, "dispatch permissions")).toEqual({
+    contents: "read",
+    issues: "write",
+    actions: "write",
+  });
+  expect(record(heartbeat.permissions, "heartbeat permissions")).toEqual({
+    contents: "read",
+    actions: "read",
+  });
+  expect(record(execute.permissions, "execute permissions")).toEqual({ contents: "read" });
 });
