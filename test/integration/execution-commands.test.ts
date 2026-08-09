@@ -1,0 +1,151 @@
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
+import { execa } from "execa";
+import { expect, it } from "bun:test";
+import type { RepositoryPolicy } from "../../src/domain/contracts.js";
+import { digestCanonical } from "../../src/domain/identity.js";
+import { finalizeExecution } from "../../src/commands/finalize-execution.js";
+import { prepareExecution, type LocalExecutionRuntime } from "../../src/commands/prepare-execution.js";
+import { sha256Bytes } from "../../src/security/content.js";
+
+async function executionFixture(): Promise<{
+  runtime: LocalExecutionRuntime;
+  payloadB64: string;
+  issueNumber: number;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "opc-execution-command-"));
+  const githubWorkspace = join(root, "github-workspace");
+  const repository = join(githubWorkspace, "target-source");
+  const runnerTemp = join(root, "runner-temp");
+  await mkdir(githubWorkspace);
+  await mkdir(runnerTemp);
+  await execa("git", ["init", repository]);
+  await execa("git", ["-C", repository, "config", "user.email", "opc@example.invalid"]);
+  await execa("git", ["-C", repository, "config", "user.name", "OPC Test"]);
+  await mkdir(join(repository, "src"));
+  await writeFile(join(repository, "src/base.ts"), "export const base = true;\n");
+  await execa("git", ["-C", repository, "add", "."]);
+  await execa("git", ["-C", repository, "commit", "-m", "base"]);
+  const baseSha = (await execa("git", ["-C", repository, "rev-parse", "HEAD"])).stdout;
+
+  const hostRoot = join(root, "host");
+  const codexHome = join(hostRoot, "codex-home");
+  await mkdir(hostRoot, { mode: 0o700 });
+  await mkdir(codexHome, { mode: 0o700 });
+  const wrapper = join(hostRoot, "network-deny");
+  const binary = join(hostRoot, "codex");
+  const requirements = join(hostRoot, "requirements.toml");
+  const executorProfile = join(hostRoot, "executor.toml");
+  const reviewerProfile = join(hostRoot, "reviewer.toml");
+  await writeFile(wrapper, "#!/bin/sh\nexec \"$@\"\n");
+  await writeFile(binary, "codex");
+  await writeFile(requirements, "requirements");
+  await writeFile(executorProfile, "executor");
+  await writeFile(reviewerProfile, "reviewer");
+  await writeFile(join(codexHome, "auth.json"), "secret");
+  await chmod(wrapper, 0o755);
+  await chmod(binary, 0o755);
+  for (const path of [requirements, executorProfile, reviewerProfile, join(codexHome, "auth.json")]) {
+    await chmod(path, 0o600);
+  }
+  const digest = async (path: string): Promise<string> => sha256Bytes(await Bun.file(path).bytes());
+  const manifestPath = join(hostRoot, "runner.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      runner_user: userInfo().username,
+      codex: { path: binary, version: "0.144.4", sha256: await digest(binary), home: codexHome },
+      auth: { credentials_store: "file" },
+      requirements: { path: requirements, sha256: await digest(requirements) },
+      profiles: {
+        "opc-executor": { path: executorProfile, sha256: await digest(executorProfile) },
+        "opc-reviewer": { path: reviewerProfile, sha256: await digest(reviewerProfile) },
+      },
+      network_deny: { command: wrapper, sha256: await digest(wrapper) },
+    }),
+  );
+  await chmod(manifestPath, 0o600);
+
+  const policy: RepositoryPolicy = {
+    version: 1,
+    enabled: true,
+    approvers: ["roy"],
+    runner: { labels: ["self-hosted", "macOS", "ARM64", "opc"] },
+    limits: { timeout_minutes: 1, max_attempts: 1, evidence_bundle_mb: 1 },
+    paths: { writable: ["src/**"], forbidden: [".github/**"] },
+    commands: {
+      bootstrap: "bun -e \"process.stdout.write('bootstrap')\"",
+      evidence: [{ id: "unit", run: "bun -e \"process.stdout.write('ok')\"" }],
+    },
+    network: { bootstrap: { mode: "deny", allow_domains: [] }, agent: { mode: "deny" } },
+    environment_allowlist: [],
+  };
+  const contract = {
+    kind: "Work" as const,
+    contract_version: 1 as const,
+    work_id: "opc-work-1",
+    base_sha: baseSha,
+    policy_sha: digestCanonical(policy),
+    goal: "Add one file",
+    in_scope: ["src/**"],
+    out_of_scope: [],
+    acceptance: [{ id: "AC-1", statement: "evidence passes", evidence: "unit" }],
+    limits: { timeout_minutes: 1, attempts: 1 },
+  };
+  const issueNumber = 7;
+  const payloadB64 = Buffer.from(
+    JSON.stringify({
+      issueNumber,
+      rootIssueNumber: issueNumber,
+      attempt: 1,
+      contract,
+      policy,
+      approvalDigest: digestCanonical(contract),
+      defaultBranch: "main",
+    }),
+  ).toString("base64url");
+  return {
+    issueNumber,
+    payloadB64,
+    runtime: {
+      runnerTemp,
+      githubWorkspace,
+      actionPath: process.cwd(),
+      runId: "10",
+      runnerManifestPath: manifestPath,
+      expectedRunnerUser: userInfo().username,
+      sourceEnvironment: process.env,
+    },
+  };
+}
+
+it("prepares, finalizes, and removes an isolated execution workspace", async () => {
+  const fixture = await executionFixture();
+  const prepared = await prepareExecution(
+    { issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
+    fixture.runtime,
+  );
+  await writeFile(join(prepared.workspace, "src/added.ts"), "export const added = true;\n");
+  const outputFile = join(fixture.runtime.runnerTemp, "opc-executor-output.json");
+  await writeFile(outputFile, JSON.stringify({ status: "completed", summary: "done", risks: [] }));
+
+  const finalized = await finalizeExecution(
+    {
+      issueNumber: fixture.issueNumber,
+      payloadB64: fixture.payloadB64,
+      inputFile: outputFile,
+    },
+    fixture.runtime,
+  );
+
+  expect(finalized.bundleReady).toBe(true);
+  expect(await readFile(join(finalized.bundleDirectory, "manifest.json"), "utf8")).toContain(
+    '"kind":"CandidateResult"',
+  );
+  const removed = await readFile(join(prepared.workspace, "src/added.ts"), "utf8").catch(
+    (caught: unknown) => caught,
+  );
+  expect(removed).toBeInstanceOf(Error);
+});

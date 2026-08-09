@@ -1,7 +1,17 @@
 import { DomainError } from "../domain/errors.js";
 import { failureCategories, type FailureCategory } from "../domain/recovery.js";
 
-export const actionCommands = ["validate", "claim", "reconcile", "recover", "publish"] as const;
+export const actionCommands = [
+  "validate",
+  "claim",
+  "reconcile",
+  "recover",
+  "publish",
+  "heartbeat",
+  "verify-codex-runner",
+  "prepare-execution",
+  "finalize-execution",
+] as const;
 
 export type ActionCommand = (typeof actionCommands)[number];
 
@@ -22,6 +32,10 @@ export interface ActionInputs {
   readonly issueNumber?: number;
   readonly workflowRef?: string;
   readonly failure?: RecoveryFailurePayload;
+  readonly payloadB64?: string;
+  readonly inputFile?: string;
+  readonly codexVersion?: string;
+  readonly permissionProfile?: "opc-executor" | "opc-reviewer";
 }
 
 function isActionCommand(value: unknown): value is ActionCommand {
@@ -139,6 +153,33 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     throw new DomainError("INVALID_ISSUE_NUMBER", "recover requires issue-number");
   }
 
+  const payloadCommands: readonly ActionCommand[] = [
+    "heartbeat",
+    "prepare-execution",
+    "finalize-execution",
+  ];
+  const payloadB64 = raw.payloadB64;
+  if (
+    payloadCommands.includes(raw.command) &&
+    (issueNumber === undefined || !payloadB64 || payloadB64.length > 2_000_000)
+  ) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires issue and payload`);
+  }
+  const inputFile = raw.inputFile;
+  if (raw.command === "finalize-execution" && !inputFile) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "finalize-execution requires input-file");
+  }
+  const codexVersion = raw.codexVersion;
+  const permissionProfile = raw.permissionProfile;
+  if (
+    raw.command === "verify-codex-runner" &&
+    (!codexVersion ||
+      !/^\d+\.\d+\.\d+$/.test(codexVersion) ||
+      (permissionProfile !== "opc-executor" && permissionProfile !== "opc-reviewer"))
+  ) {
+    throw new DomainError("INVALID_CODEX_RUNNER", "version and profile are required");
+  }
+
   const failure =
     raw.command === "recover"
       ? parseFailurePayload(raw.failurePayloadB64, owner, repo)
@@ -151,5 +192,11 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     ...(issueNumber === undefined ? {} : { issueNumber }),
     ...(raw.workflowRef ? { workflowRef: raw.workflowRef } : {}),
     ...(failure ? { failure } : {}),
+    ...(payloadB64 ? { payloadB64 } : {}),
+    ...(inputFile ? { inputFile } : {}),
+    ...(codexVersion ? { codexVersion } : {}),
+    ...(permissionProfile === "opc-executor" || permissionProfile === "opc-reviewer"
+      ? { permissionProfile }
+      : {}),
   };
 }

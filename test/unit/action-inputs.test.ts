@@ -23,6 +23,42 @@ it("accepts a claim command for one repository", () => {
   });
 });
 
+it("accepts local execution commands only with their bounded inputs", () => {
+  expect(
+    parseActionInputs({
+      command: "prepare-execution",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+    }),
+  ).toMatchObject({
+    command: "prepare-execution",
+    issueNumber: 7,
+    payloadB64: "abc",
+  });
+  expect(
+    parseActionInputs({
+      command: "finalize-execution",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      inputFile: "/tmp/result.json",
+    }),
+  ).toMatchObject({ command: "finalize-execution", inputFile: "/tmp/result.json" });
+  expect(
+    parseActionInputs({
+      command: "verify-codex-runner",
+      repository: "acme/app",
+      codexVersion: "0.144.4",
+      permissionProfile: "opc-executor",
+    }),
+  ).toMatchObject({
+    command: "verify-codex-runner",
+    codexVersion: "0.144.4",
+    permissionProfile: "opc-executor",
+  });
+});
+
 it("accepts and validates a narrow recover failure payload", () => {
   expect(
     parseActionInputs({
@@ -49,6 +85,15 @@ it.each([
   [{ command: "claim", repository: "acme/app", issueNumber: "0" }, "INVALID_ISSUE_NUMBER"],
   [{ command: "claim", repository: "acme/app", issueNumber: "1.5" }, "INVALID_ISSUE_NUMBER"],
   [{ command: "recover", repository: "acme/app" }, "MISSING_WORKFLOW_REF"],
+  [{ command: "prepare-execution", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
+  [
+    { command: "finalize-execution", repository: "acme/app", issueNumber: "7", payloadB64: "abc" },
+    "INVALID_EXECUTION_INPUT",
+  ],
+  [
+    { command: "verify-codex-runner", repository: "acme/app", codexVersion: "0.144.4" },
+    "INVALID_CODEX_RUNNER",
+  ],
   [
     { command: "recover", repository: "acme/app", workflowRef: "main" },
     "INVALID_ISSUE_NUMBER",

@@ -1,8 +1,18 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 import type { Octokit } from "@octokit/rest";
+import { userInfo } from "node:os";
+import { execa } from "execa";
 import { createGitHubClient } from "../adapters/github/client.js";
 import { runActionCommand } from "../commands/action-command.js";
+import { finalizeExecution } from "../commands/finalize-execution.js";
+import { runActionHeartbeat } from "../commands/heartbeat.js";
+import { prepareExecution, type LocalExecutionRuntime } from "../commands/prepare-execution.js";
+import {
+  productionRunnerManifestPath,
+  productionRunnerUser,
+  verifyCodexRunner,
+} from "../commands/verify-codex-runner.js";
 import { DomainError } from "../domain/errors.js";
 import { parseActionInputs } from "./inputs.js";
 import { toActionOutputs } from "./outputs.js";
@@ -12,6 +22,9 @@ export interface ActionRuntime {
   getWorkflowRef(): string;
   getInput(name: string): string;
   getRunId(): string;
+  getActionPath?(): string;
+  getRunnerTemp?(): string;
+  getWorkspace?(): string;
   createGitHubClient?(token: string): Octokit;
   setOutput(name: string, value: string): void;
   setFailed(message: string): void;
@@ -22,6 +35,9 @@ const githubActionsRuntime: ActionRuntime = {
   getWorkflowRef: () => process.env.GITHUB_WORKFLOW_REF ?? "",
   getInput: (name) => core.getInput(name),
   getRunId: () => String(github.context.runId),
+  getActionPath: () => process.env.GITHUB_ACTION_PATH ?? "",
+  getRunnerTemp: () => process.env.RUNNER_TEMP ?? "",
+  getWorkspace: () => process.env.GITHUB_WORKSPACE ?? "",
   setOutput: (name, value) => {
     core.setOutput(name, value);
   },
@@ -43,28 +59,142 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     const issueNumber = runtime.getInput("issue-number");
     const workflowRef = runtime.getInput("workflow-ref");
     const failurePayloadB64 = runtime.getInput("failure-payload-b64");
+    const payloadB64 = runtime.getInput("payload-b64");
+    const inputFile = runtime.getInput("input-file");
+    const codexVersion = runtime.getInput("codex-version");
+    const permissionProfile = runtime.getInput("permission-profile");
     const inputs = parseActionInputs({
       command: runtime.getInput("command"),
       repository: runtime.getInput("repository"),
       ...(issueNumber ? { issueNumber } : {}),
       ...(workflowRef ? { workflowRef } : {}),
       ...(failurePayloadB64 ? { failurePayloadB64 } : {}),
+      ...(payloadB64 ? { payloadB64 } : {}),
+      ...(inputFile ? { inputFile } : {}),
+      ...(codexVersion ? { codexVersion } : {}),
+      ...(permissionProfile ? { permissionProfile } : {}),
     });
     const token = runtime.getInput("github-token");
     const octokit = token
       ? (runtime.createGitHubClient?.(token) ?? createGitHubClient(token))
       : undefined;
-    const result = await runActionCommand(
-      inputs,
-      octokit,
-      {
-        runId: runtime.getRunId(),
-        controlOwner: controlOwnerFromActionRepository(runtime.getActionRepository()),
+    const runId = runtime.getRunId();
+    const controlOwner = controlOwnerFromActionRepository(runtime.getActionRepository());
+    if (inputs.command !== "validate" && inputs.owner !== controlOwner) {
+      throw new DomainError("UNTRUSTED_REPOSITORY", `${inputs.owner}/${inputs.repo}`);
+    }
+    const runnerTemp = runtime.getRunnerTemp?.() ?? "";
+    const localRuntime = (): LocalExecutionRuntime => {
+      const githubWorkspace = runtime.getWorkspace?.() ?? "";
+      const actionPath = runtime.getActionPath?.() ?? "";
+      if (!runnerTemp || !githubWorkspace || !actionPath) {
+        throw new DomainError("INVALID_EXECUTION_INPUT", "missing runner paths");
+      }
+      const info = userInfo();
+      return {
+        runnerTemp,
+        githubWorkspace,
+        actionPath,
+        runId,
+        runnerManifestPath: productionRunnerManifestPath,
+        expectedRunnerUser: productionRunnerUser,
+        sourceEnvironment: process.env,
+        currentUser: () => ({ username: info.username, uid: info.uid }),
+      };
+    };
+    let result: unknown;
+    let outputs: Readonly<Record<string, string>> = {};
+    if (
+      inputs.command === "verify-codex-runner" ||
+      inputs.command === "prepare-execution" ||
+      inputs.command === "finalize-execution"
+    ) {
+      if (octokit) throw new DomainError("UNEXPECTED_GITHUB_CLIENT", inputs.command);
+      if (inputs.command === "verify-codex-runner") {
+        const version = inputs.codexVersion;
+        const profile = inputs.permissionProfile;
+        if (!version || !profile) throw new DomainError("INVALID_CODEX_RUNNER", "missing input");
+        const info = userInfo();
+        const verified = await verifyCodexRunner(
+          { codexVersion: version, permissionProfile: profile },
+          {
+            manifestPath: productionRunnerManifestPath,
+            expectedRunnerUser: productionRunnerUser,
+            currentUser: () => ({ username: info.username, uid: info.uid }),
+            execute: async (command, args, environment) => {
+              const execution = await execa(command, [...args], {
+                env: environment,
+                extendEnv: false,
+                reject: false,
+              });
+              return {
+                exitCode: execution.exitCode ?? -1,
+                stdout: execution.stdout,
+                stderr: execution.stderr,
+              };
+            },
+          },
+        );
+        result = verified;
+        outputs = { "codex-bin": verified.codexBin };
+      } else if (inputs.command === "prepare-execution") {
+        if (inputs.issueNumber === undefined || !inputs.payloadB64) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing prepare input");
+        }
+        const prepared = await prepareExecution(
+          { issueNumber: inputs.issueNumber, payloadB64: inputs.payloadB64 },
+          localRuntime(),
+        );
+        result = prepared;
+        outputs = {
+          workspace: prepared.workspace,
+          "prompt-file": prepared.promptFile,
+          "executor-schema-file": prepared.executorSchemaFile,
+          "review-schema-file": prepared.reviewSchemaFile,
+        };
+      } else {
+        if (inputs.issueNumber === undefined || !inputs.payloadB64 || !inputs.inputFile) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing finalize input");
+        }
+        const finalized = await finalizeExecution(
+          {
+            issueNumber: inputs.issueNumber,
+            payloadB64: inputs.payloadB64,
+            inputFile: inputs.inputFile,
+          },
+          localRuntime(),
+        );
+        result = finalized;
+        outputs = {
+          "bundle-ready": "true",
+          "bundle-directory": finalized.bundleDirectory,
+        };
+      }
+    } else if (inputs.command === "heartbeat") {
+      if (!octokit) throw new DomainError("MISSING_GITHUB_TOKEN", "heartbeat requires token");
+      if (inputs.issueNumber === undefined || !inputs.payloadB64 || !runnerTemp) {
+        throw new DomainError("INVALID_HEARTBEAT_INPUT", "missing Action input");
+      }
+      result = await runActionHeartbeat({
+        owner: inputs.owner,
+        repo: inputs.repo,
+        runId,
+        issueNumber: inputs.issueNumber,
+        payloadB64: inputs.payloadB64,
+        octokit,
+        runnerTemp,
+      });
+    } else {
+      const controlResult = await runActionCommand(inputs, octokit, {
+        runId,
+        controlOwner,
         callerWorkflowRef: runtime.getWorkflowRef(),
-      },
-    );
+      });
+      result = controlResult;
+      outputs = toActionOutputs(controlResult);
+    }
     runtime.setOutput("result-json", JSON.stringify(result));
-    for (const [name, value] of Object.entries(toActionOutputs(result))) {
+    for (const [name, value] of Object.entries(outputs)) {
       runtime.setOutput(name, value);
     }
   } catch (error) {

@@ -54,8 +54,22 @@ function parseStrictYaml(text: string): unknown {
 
 export function parseMilestoneYaml(text: string): MilestoneContract {
   const value = parseStrictYaml(text);
+  return validateMilestoneContract(value);
+}
+
+export function validateMilestoneContract(value: unknown): MilestoneContract {
   if (!milestoneValidator(value)) {
     throw new DomainError("INVALID_CONTRACT", ajv.errorsText(milestoneValidator.errors));
+  }
+  return value;
+}
+
+export function validateRecoveryAddendum(value: unknown): RecoveryAddendum {
+  if (!recoveryAddendumValidator(value)) {
+    throw new DomainError(
+      "INVALID_CONTRACT",
+      ajv.errorsText(recoveryAddendumValidator.errors),
+    );
   }
   return value;
 }

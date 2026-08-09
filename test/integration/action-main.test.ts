@@ -117,6 +117,24 @@ it("reports a stable domain error for malformed scheduler input", async () => {
   expect(runtime.failures).toEqual(["INVALID_ACTION_COMMAND"]);
 });
 
+it("rejects a GitHub client on Mac-local execution commands", async () => {
+  const runtime = new TestActionRuntime(
+    {
+      command: "verify-codex-runner",
+      repository: "acme/app",
+      "codex-version": "0.144.4",
+      "permission-profile": "opc-executor",
+      "github-token": "read-token",
+    },
+    new Octokit(),
+  );
+
+  await main(runtime);
+
+  expect(runtime.outputs.size).toBe(0);
+  expect(runtime.failures).toEqual(["UNEXPECTED_GITHUB_CLIENT"]);
+});
+
 it("rejects a target outside the control Action owner", async () => {
   const runtime = new TestActionRuntime(
     { command: "claim", repository: "mallory/app" },

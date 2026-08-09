@@ -1,4 +1,4 @@
-import { mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { execa } from "execa";
 import { DomainError } from "../../domain/errors.js";
@@ -45,6 +45,24 @@ export async function createExecutionWorkspace(input: {
 
 export async function removeExecutionWorkspace(workspace: ExecutionWorkspace): Promise<void> {
   assertChild(workspace.root, workspace.path);
+  const exists = await lstat(workspace.path).then(
+    () => true,
+    (error: unknown) => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return false;
+      }
+      throw error;
+    },
+  );
+  if (!exists) {
+    await execa("git", ["-C", workspace.repository, "worktree", "prune"], { reject: true });
+    return;
+  }
   await execa(
     "git",
     ["-C", workspace.repository, "worktree", "remove", "--force", workspace.path],

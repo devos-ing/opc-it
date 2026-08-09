@@ -1,4 +1,5 @@
 import { DefaultArtifactClient } from "@actions/artifact";
+import type { Octokit } from "@octokit/rest";
 import { createGitHubClient } from "../adapters/github/client.js";
 import {
   ArtifactHeartbeatUploader,
@@ -158,4 +159,70 @@ export async function runHeartbeat(argv: readonly string[]): Promise<string> {
     },
   );
   return JSON.stringify(result);
+}
+
+function parseHeartbeatPayload(
+  encoded: string,
+  expectedRunId: string,
+  expectedIssueNumber: number,
+): { runId: string; issueNumber: number; attempt: number; watchJobs: string[] } {
+  let value: unknown;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.toString("base64url") !== encoded) throw new Error("non-canonical");
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new DomainError("INVALID_HEARTBEAT_INPUT", "payload JSON");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DomainError("INVALID_HEARTBEAT_INPUT", "payload shape");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).sort().join("\0") !== "attempt\0issueNumber\0runId\0watchJobs" ||
+    record.runId !== expectedRunId ||
+    record.issueNumber !== expectedIssueNumber ||
+    !Number.isInteger(record.attempt) ||
+    !Array.isArray(record.watchJobs) ||
+    !record.watchJobs.every((name) => typeof name === "string")
+  ) {
+    throw new DomainError("INVALID_HEARTBEAT_INPUT", "payload identity");
+  }
+  return {
+    runId: record.runId,
+    issueNumber: record.issueNumber,
+    attempt: record.attempt as number,
+    watchJobs: record.watchJobs,
+  };
+}
+
+export async function runActionHeartbeat(input: {
+  owner: string;
+  repo: string;
+  runId: string;
+  issueNumber: number;
+  payloadB64: string;
+  octokit: Octokit;
+  runnerTemp: string;
+}): Promise<{ status: "stopped"; polls: number }> {
+  const payload = parseHeartbeatPayload(input.payloadB64, input.runId, input.issueNumber);
+  const uploader = new ArtifactHeartbeatUploader(new DefaultArtifactClient(), input.runnerTemp);
+  return monitorHeartbeat(
+    { owner: input.owner, repo: input.repo, ...payload },
+    {
+      listJobs: async () => {
+        const response = await input.octokit.rest.actions.listJobsForWorkflowRun({
+          owner: input.owner,
+          repo: input.repo,
+          run_id: Number(input.runId),
+          per_page: 100,
+        });
+        return response.data.jobs.map((job) => ({ name: job.name, status: job.status }));
+      },
+      upload: (name, body) => uploader.upload(name, body),
+      now: () => new Date(),
+      sleep,
+      intervalMs: 300_000,
+    },
+  );
 }

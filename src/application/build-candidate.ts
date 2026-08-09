@@ -31,6 +31,7 @@ export interface BuildCandidateInput {
   environment: Readonly<Record<string, string>>;
   durationSeconds: number;
   secrets?: readonly string[];
+  commandPrefix?: { readonly command: string; readonly args: readonly string[] };
 }
 
 export interface BuiltCandidate {
@@ -98,8 +99,13 @@ export async function buildCandidate(input: BuildCandidateInput): Promise<BuiltC
       throw new DomainError("UNSAFE_REPOSITORY_PATH", evidence.id);
     }
     const command = parseApprovedCommand(evidence.run);
+    const executable = input.commandPrefix?.command ?? command.command;
+    const args = input.commandPrefix
+      ? [...input.commandPrefix.args, command.command, ...command.args]
+      : command.args;
     const result = await runBounded({
-      ...command,
+      command: executable,
+      args,
       cwd: input.workspace,
       env: input.environment,
       timeoutMs,

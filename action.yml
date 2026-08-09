@@ -2,7 +2,7 @@ name: OPC Orchestration Core
 description: Run one scheduler-independent OPC control command
 inputs:
   command:
-    description: validate, claim, reconcile, recover, or publish
+    description: validated OPC control or local execution command
     required: true
   repository:
     description: owner/name of the caller repository
@@ -15,6 +15,18 @@ inputs:
     required: false
   failure-payload-b64:
     description: base64url-encoded bounded failure evidence for recover
+    required: false
+  payload-b64:
+    description: base64url-encoded immutable execution or heartbeat envelope
+    required: false
+  input-file:
+    description: absolute runner-temp path to structured model output
+    required: false
+  codex-version:
+    description: exact host-installed Codex CLI version
+    required: false
+  permission-profile:
+    description: host-owned opc-executor or opc-reviewer profile
     required: false
   github-token:
     description: repository-scoped GitHub Actions token
@@ -34,6 +46,20 @@ outputs:
     description: base64url-encoded immutable execution envelope
   heartbeat-payload-b64:
     description: base64url-encoded heartbeat watch inputs
+  codex-bin:
+    description: verified absolute Codex CLI path
+  workspace:
+    description: isolated execution worktree
+  prompt-file:
+    description: mode-0600 immutable prompt path
+  executor-schema-file:
+    description: commit-pinned executor JSON schema path
+  review-schema-file:
+    description: commit-pinned result-review JSON schema path
+  bundle-ready:
+    description: true only when a Candidate Result bundle is complete
+  bundle-directory:
+    description: verified Candidate Result bundle directory
 runs:
   using: node24
   main: dist/action/index.cjs
