@@ -6,6 +6,10 @@ import {
   verifyBundle,
   type BundleEntry,
 } from "../adapters/local/evidence-bundle.js";
+import {
+  assertReviewableCandidate,
+  type ReviewedCandidateBundle,
+} from "../application/review-candidate.js";
 import { checkChangedPaths } from "../security/paths.js";
 import { sha256Bytes } from "../security/content.js";
 import { DomainError } from "../domain/errors.js";
@@ -13,7 +17,6 @@ import type { Sha256 } from "../domain/identity.js";
 import type { MilestoneContract, ResultManifest } from "../domain/contracts.js";
 import { validateResultManifest } from "../domain/validation.js";
 import { buildReviewerPrompt } from "../prompts/reviewer.js";
-import type { ReviewedCandidateBundle } from "./decide-result.js";
 import { parseExecutionEnvelopePayload } from "./prepare-execution.js";
 
 export interface ReviewRuntime {
@@ -181,6 +184,7 @@ export async function prepareReview(
   runtime: ReviewRuntime,
 ): Promise<PreparedReview> {
   const candidate = await loadCandidateForReview(input, runtime);
+  assertReviewableCandidate(candidate.bundle);
   const root = join(runtime.runnerTemp, "opc-review");
   const promptFile = join(root, "reviewer-prompt.txt");
   await mkdir(root, { recursive: true, mode: 0o700 });

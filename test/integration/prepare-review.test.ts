@@ -13,7 +13,7 @@ import { digestCanonical } from "../../src/domain/identity.js";
 import { prepareReview } from "../../src/commands/prepare-review.js";
 import { sha256Bytes } from "../../src/security/content.js";
 
-async function candidateFixture(): Promise<{
+async function candidateFixture(evidenceStatus: "pass" | "fail" = "pass"): Promise<{
   runnerTemp: string;
   directory: string;
   artifactSha256: `sha256:${string}`;
@@ -74,7 +74,12 @@ async function candidateFixture(): Promise<{
       },
     ],
     evidence: [
-      { id: "unit", status: "pass", exit_code: 0, log_sha256: sha256Bytes(log) },
+      {
+        id: "unit",
+        status: evidenceStatus,
+        exit_code: evidenceStatus === "pass" ? 0 : 1,
+        log_sha256: sha256Bytes(log),
+      },
     ],
     duration_seconds: 10,
   };
@@ -129,4 +134,24 @@ it("rejects a bundle entry changed after the executor recorded its digest", asyn
     { runnerTemp: fixture.runnerTemp, actionPath: process.cwd() },
   ).catch((caught: unknown) => caught);
   expect(error).toMatchObject({ code: "BUNDLE_ENTRY_DIGEST_MISMATCH" });
+});
+
+it("does not prepare a reviewer session when deterministic evidence failed", async () => {
+  const fixture = await candidateFixture("fail");
+
+  const error = await prepareReview(
+    {
+      issueNumber: 7,
+      payloadB64: fixture.payloadB64,
+      inputDirectory: fixture.directory,
+      artifactSha256: fixture.artifactSha256,
+    },
+    { runnerTemp: fixture.runnerTemp, actionPath: process.cwd() },
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "EVIDENCE_FAILED" });
+  const prompt = await readFile(join(fixture.runnerTemp, "opc-review/reviewer-prompt.txt"), "utf8").catch(
+    (caught: unknown) => caught,
+  );
+  expect(prompt).toBeInstanceOf(Error);
 });
