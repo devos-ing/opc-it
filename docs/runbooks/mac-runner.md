@@ -8,8 +8,9 @@
 
 ```bash
 rtk id opc-runner
+rtk id -u opc-runner
 rtk stat -f '%Su %Sp' /Users/opc-runner
-rtk launchctl print gui/$(id -u opc-runner)
+rtk launchctl print gui/<opc-runner-uid>
 rtk git --version
 rtk node --version
 rtk bun --version
@@ -52,17 +53,21 @@ rtk stat -f '%Su %Sp %N' /Users/opc-runner/.codex/auth.json
     "home": "/Users/opc-runner/.codex"
   },
   "auth": { "credentials_store": "file" },
+  "config": {
+    "path": "/Users/opc-runner/.codex/config.toml",
+    "sha256": "sha256:<64 hex>"
+  },
   "requirements": {
-    "path": "/absolute/host-owned/requirements.toml",
+    "path": "/Users/opc-runner/.codex/requirements.toml",
     "sha256": "sha256:<64 hex>"
   },
   "profiles": {
     "opc-executor": {
-      "path": "/absolute/host-owned/opc-executor.config.toml",
+      "path": "/Users/opc-runner/.codex/opc-executor.config.toml",
       "sha256": "sha256:<64 hex>"
     },
     "opc-reviewer": {
-      "path": "/absolute/host-owned/opc-reviewer.config.toml",
+      "path": "/Users/opc-runner/.codex/opc-reviewer.config.toml",
       "sha256": "sha256:<64 hex>"
     }
   },
@@ -79,7 +84,9 @@ rtk stat -f '%Su %Sp %N' /Users/opc-runner/.codex/auth.json
 - `cli_auth_credentials_store = "file"`；managed requirements 只允许 `opc-executor` 与 `opc-reviewer`。
 - executor 只可写当前 worktree 与 job temp；reviewer 为只读。两个 profile 都禁止模型生成的本地工具读取 persistent Codex home，并禁止 workload 网络。
 - `network_deny.command` 必须是 OS 强制执行的 wrapper，owner/mode/digest 与 manifest 相同；不能用提示词或普通环境变量代替网络隔离。
-- 每个 job 都由 `verify-codex-runner` 重新检查当前用户、owner、mode、版本、非 credential 文件 digest，以及 ChatGPT 登录状态；验证过程只检查 `auth.json` 元数据。
+- wrapper 的固定接口是 `--workspace <worktree> --temp <job-temp> --deny <codex-home> --deny <manifest-dir> -- <command> ...`；bootstrap 和 Evidence command 只能经该接口执行。
+- 每个 job 都由 `verify-codex-runner` 重新检查当前用户、owner、mode、版本、实际 `$CODEX_HOME` 下的 config/profile 路径、非 credential 文件 digest，以及 ChatGPT 登录状态；验证过程只检查 `auth.json` 元数据。
+- `run-codex` 在启动模型前，使用同一 config profile 与 managed permission profile 执行四个 OS sandbox probe：读取/写入 `auth.json` 与 runner manifest 都必须被拒绝。随后 Codex 固定 `permission_profile="opc-executor|opc-reviewer"`、approval policy `never`、忽略 repository exec rules；任一 probe 可访问受保护路径即 fail closed。
 
 ## 3. Bun cache 与 fail-closed bootstrap
 
@@ -104,6 +111,6 @@ rtk gh api repos/0xroylee/opc-m3-sandbox/actions/permissions/workflow
 
 ## 5. 停机与恢复
 
-模拟 offline 时先把 `OPC_ENABLED=false`，停止专用 LaunchAgent/runner service，等待 30 分钟 lease 过期并让 schedule reconcile。预期当前 attempt 不被消耗、Work 回到 `opc:ready`；持续基础设施 outage 达 24 小时后进入 Terminal Blocker。恢复服务后先重跑本文件全部检查，再重新启用 repository variable。
+模拟 offline 时停止专用 LaunchAgent/runner service，但保持 `OPC_ENABLED=true`，让 schedule reconcile 仍可运行。纯 `queued` Mac job 不产生 heartbeat；30 分钟 lease 过期后，reconciler 先把 Work 放回 `opc:ready`，再取消旧 workflow run，当前 attempt 不被消耗。持续基础设施 outage 达 24 小时后进入 Terminal Blocker。完成该证据后设 `OPC_ENABLED=false`，恢复服务、重跑本文件全部检查，再重新启用 repository variable。
 
 不要删除 runner 目录、auth 或 artifacts。Deregister 与删除 sandbox 都是独立的破坏性操作，只能在 evidence 已归档且 owner 明确批准后执行。

@@ -5,8 +5,8 @@
 ## 固定版本与停止条件
 
 - Control Repository：`0xroylee/OPC`（private）
-- Action SHA：`9c71c4afc248fbe757b50322521cf17d53ffa720`
-- Reusable Workflow SHA：`ea20bd71b2279d8d282da467a3bd8d34148b9f4a`
+- Action SHA：`143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2`
+- Reusable Workflow SHA：`c0c7dbbb6e6dc8905208fd2da5f1ae9ef2c8b648`
 - Sandbox：`0xroylee/opc-m3-sandbox`（private、非 fork、无外部 collaborator）
 - Bun：`1.3.8`
 - Codex CLI：`0.144.4`
@@ -52,18 +52,19 @@ rtk gh variable set OPC_ENABLED --body false --repo 0xroylee/opc-m3-sandbox
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m3-sandbox \
   --control-owner 0xroylee \
-  --control-ref ea20bd71b2279d8d282da467a3bd8d34148b9f4a \
+  --control-ref c0c7dbbb6e6dc8905208fd2da5f1ae9ef2c8b648 \
   --approver 0xroylee \
   --output .opc/m3-sandbox-preview
 ```
 
 将生成的 `.github/workflows/opc.yml`、Issue template 与 `.codex-pipeline.yml` 作为一次人工审查的 sandbox setup commit。核对：
 
-- caller 只触发 `issues.labeled`、schedule 与手动 dispatch；concurrency 对 repository 串行化且不取消进行中的 run；
+- caller 只触发 `issues.labeled`、schedule 与手动 dispatch，且没有会阻塞 cron 的 workflow-level concurrency；reusable workflow 只用 `opc-control-${repository}` 串行 claim/reconcile，随后由 active-claim lease 保证单一执行；
 - reusable workflow 固定到上面的 40 位 Workflow SHA；所有 OPC Action refs 固定到 Action SHA；
 - GitHub-hosted control/heartbeat 仅有必要的 Issue/Actions 权限；Mac executor/reviewer 都只有 `contents: read`；
 - checkout 使用批准 base SHA、`persist-credentials: false`；local Action commands 不接收 `github-token`；
 - 没有 provider secret、publisher、Contents write、commit、branch、Pull Request 或 merge step。
+- Target caller 不能传 model、effort、profile 或 Codex version；固定 Action 内部将 executor 锁定为 `gpt-5.6-luna/high`，reviewer 锁定为 `gpt-5.6-sol/xhigh`。
 
 完成 setup 与 runner 检查后才启用：
 
@@ -100,13 +101,13 @@ rtk gh workflow run opc.yml \
 
 | Case | 可控输入 | 必须观察到的结果 |
 |---|---|---|
-| success | 单文件、`src/**` 内、可由固定 unit evidence 验证的小改动 | Candidate bundle + pass review；attempt 1 completed；停在 verified result |
+| success | 单文件、`src/**` 内、可由固定 unit evidence 验证的小改动 | Candidate bundle + pass review；Issue 按 `claimed → running → reviewing → result-ready` 持久化；attempt 1 completed |
 | executor failure | 批准一个由 executor 结构化返回 `failed` 的 sandbox-only impossible fixture | failure record；review 未启动；消耗一个 attempt；Recovery 遵守批准预算 |
 | Evidence failure | 使用人工审查的 sandbox policy，让固定 evidence command 对该 base 确定退出非零 | bundle 保留；review 未启动；消耗一个 attempt；log 已脱敏 |
 | review mismatch | 使用 acceptance 与候选内容确定不一致的批准 fixture | bundle 保留；review 为 fail；消耗一个 attempt；不能进入 verified |
 | duplicate trigger | success Work 在第一次 claim 后立即重复手动 dispatch | 只有一个 claim / execution；第二次为 active-claim no-op |
 | timeout | 使用批准 timeout 下限和确定超时的 sandbox fixture | bounded failure；worktree 清理；消耗一个 attempt；无遗留 Codex 进程 |
-| simulated offline recovery | claim 后停止 runner service，等待 lease expiry 与 schedule reconcile | 未开始的 attempt 消耗为零；回到 ready；恢复后仍用同一 approval/base |
+| simulated offline recovery | claim 后停止 runner service，保持 `OPC_ENABLED=true`，等待 lease expiry 与 schedule reconcile | `queued` 不产生 heartbeat；未开始的 attempt 消耗为零；回到 ready；旧 run 被取消；恢复后仍用同一 approval/base |
 
 若某个负向 fixture 没有确定地产生目标故障，记录为未完成，不得把手工编辑 Issue label、artifact 或 review JSON 当作通过证据。
 
@@ -127,9 +128,11 @@ rtk gh api repos/0xroylee/opc-m3-sandbox/branches
 
 - `bundle-index.json` 的 outer digest、manifest `artifact_sha256`、每个 changed content/evidence log digest；
 - Result Manifest、Result Review、criterion-to-evidence 映射与 heartbeat 首条/5 分钟节拍/最终 stopped 时间线；
+- 只有 `in_progress` executor/reviewer 可以产生 running heartbeat；普通 workflow `updated_at` 与纯 queued 状态都不能续租；
 - executor 与 reviewer 是两个 fresh ephemeral session；reviewer 只下载 Candidate bundle；
 - 日志和 artifacts 不含 `GITHUB_TOKEN`、Actions runtime token、API key、Codex home、`auth.json`、ChatGPT credential、环境 dump、executor conversation 或 rollout/session 文件；
 - GitHub permission summary 保持 Contents read-only；没有 OPC commit、delivery branch、Pull Request 或 repository write。
+- 成功 run 的 transition comments 最终为 `result-ready`；execution/evidence/review 失败由 `complete-run` 从可信 Jobs API 状态分类，并只占用一个批准的 Recovery attempt。旧的 caller-supplied `recover` payload 必须被拒绝。
 
 Branch 取证要区分 sandbox setup branch 与 OPC 新建分支；M3 预期 OPC 新建分支为零。PR 列表为空。
 
