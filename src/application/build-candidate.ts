@@ -13,6 +13,7 @@ import type {
   RepositoryPolicy,
   ResultManifest,
 } from "../domain/contracts.js";
+import { remainingExecutionMilliseconds } from "../domain/deadline.js";
 import { DomainError } from "../domain/errors.js";
 import { parseApprovedCommand } from "../domain/execution.js";
 import type { Sha256 } from "../domain/identity.js";
@@ -30,6 +31,8 @@ export interface BuildCandidateInput {
   context: unknown;
   environment: Readonly<Record<string, string>>;
   durationSeconds: number;
+  deadlineEpochMs: number;
+  now?: () => number;
   secrets?: readonly string[];
   commandPrefix?: { readonly command: string; readonly args: readonly string[] };
 }
@@ -92,8 +95,7 @@ export async function buildCandidate(input: BuildCandidateInput): Promise<BuiltC
   const maximumBytes = input.policy.limits.evidence_bundle_mb * 1024 * 1024;
   const evidenceManifest: ResultManifest["evidence"] = [];
   const evidenceEntries: BundleEntry[] = [];
-  const timeoutMs =
-    Math.min(input.contract.limits.timeout_minutes, input.policy.limits.timeout_minutes) * 60_000;
+  const now = input.now ?? Date.now;
   for (const evidence of input.policy.commands.evidence) {
     if (!/^[A-Za-z0-9._-]+$/.test(evidence.id)) {
       throw new DomainError("UNSAFE_REPOSITORY_PATH", evidence.id);
@@ -108,10 +110,13 @@ export async function buildCandidate(input: BuildCandidateInput): Promise<BuiltC
       args,
       cwd: input.workspace,
       env: input.environment,
-      timeoutMs,
+      timeoutMs: remainingExecutionMilliseconds(input.deadlineEpochMs, now()),
       outputLimitBytes: Math.min(maximumBytes, 1024 * 1024),
       ...(input.secrets === undefined ? {} : { secrets: input.secrets }),
     });
+    if (result.status === "timeout") {
+      throw new DomainError("EXECUTION_TIMEOUT", `evidence:${evidence.id}`);
+    }
     const log = Buffer.from(
       result.stderr.length === 0
         ? result.stdout

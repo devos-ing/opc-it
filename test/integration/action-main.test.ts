@@ -165,6 +165,19 @@ it("rejects the removed caller-supplied recover command", async () => {
   expect(runtime.failures).toEqual(["INVALID_ACTION_COMMAND"]);
 });
 
+it("reports only a fixed workflow-owned failure category", async () => {
+  const runtime = new TestActionRuntime({
+    command: "report-run-failure",
+    repository: "acme/app",
+    "reported-outcome": "execution",
+  });
+
+  await main(runtime);
+
+  expect(runtime.outputs.size).toBe(0);
+  expect(runtime.failures).toEqual(["REPORTED_RUN_FAILURE"]);
+});
+
 it.each(["claim", "reconcile"] as const)(
   "%s reaches the Octokit claim path and publishes immutable outputs",
   async (command) => {

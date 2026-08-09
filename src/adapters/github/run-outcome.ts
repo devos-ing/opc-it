@@ -27,7 +27,7 @@ export type ObservedRunOutcome =
 
 function trustedJob(
   jobs: readonly WorkflowJobObservation[],
-  name: "execute" | "review",
+  name: "execute" | "review" | "heartbeat",
 ): WorkflowJobObservation {
   const matches = jobs.filter(
     (job) => job.name === name || job.name.endsWith(` / ${name}`),
@@ -58,6 +58,31 @@ function infrastructureConclusion(conclusion: string): boolean {
   return ["cancelled", "timed_out", "action_required", "stale"].includes(conclusion);
 }
 
+export const trustedFailureStepNames = {
+  bootstrap: "Prepare workspace and run network-denied bootstrap",
+  candidate: "Build Candidate Result",
+  executorFailure: "Record Executor Failure",
+  executorIncident: "Record Executor Run Incident",
+  reviewPreparation: "Verify bundle and prepare review input",
+  reviewFailure: "Record Review Failure",
+  reviewerIncident: "Record Reviewer Run Incident",
+  evidenceGate: "Apply deterministic Evidence Gate",
+} as const;
+
+const executionCategories = new Map<string, FailureCategory>([
+  [trustedFailureStepNames.bootstrap, "execution"],
+  [trustedFailureStepNames.candidate, "evidence"],
+  [trustedFailureStepNames.executorFailure, "execution"],
+  [trustedFailureStepNames.executorIncident, "infrastructure"],
+]);
+
+const reviewCategories = new Map<string, FailureCategory>([
+  [trustedFailureStepNames.reviewPreparation, "evidence"],
+  [trustedFailureStepNames.reviewFailure, "review"],
+  [trustedFailureStepNames.reviewerIncident, "infrastructure"],
+  [trustedFailureStepNames.evidenceGate, "review"],
+]);
+
 function executionFailure(job: WorkflowJobObservation): ObservedRunOutcome {
   if (!job.startedAt) {
     return {
@@ -70,12 +95,7 @@ function executionFailure(job: WorkflowJobObservation): ObservedRunOutcome {
   }
   const step = failedStep(job);
   const name = step?.name ?? "execute";
-  const category: FailureCategory =
-    name === "Build Candidate Result"
-      ? "evidence"
-      : name === "Execute approved milestone"
-        ? "execution"
-        : "infrastructure";
+  const category = executionCategories.get(name) ?? "infrastructure";
   return {
     kind: "failure",
     phase: "execution",
@@ -91,15 +111,8 @@ function reviewFailure(job: WorkflowJobObservation): ObservedRunOutcome {
   let category: FailureCategory;
   if (!job.startedAt || infrastructureConclusion(job.conclusion ?? "")) {
     category = "infrastructure";
-  } else if (name === "Verify bundle and prepare review input") {
-    category = "evidence";
-  } else if (
-    name === "Review candidate independently" ||
-    name === "Apply deterministic Evidence Gate"
-  ) {
-    category = "review";
   } else {
-    category = "infrastructure";
+    category = reviewCategories.get(name) ?? "infrastructure";
   }
   return {
     kind: "failure",
@@ -115,6 +128,16 @@ export function classifyWorkflowRun(
 ): ObservedRunOutcome {
   const execute = trustedJob(jobs, "execute");
   const review = trustedJob(jobs, "review");
+  const heartbeat = trustedJob(jobs, "heartbeat");
+  if (heartbeat.conclusion !== "success") {
+    return {
+      kind: "failure",
+      phase: "before-start",
+      category: "infrastructure",
+      checkId: "heartbeat",
+      message: `heartbeat:${String(heartbeat.conclusion)}`,
+    };
+  }
   if (execute.conclusion !== "success") return executionFailure(execute);
   if (review.conclusion !== "success") return reviewFailure(review);
   return { kind: "verified" };

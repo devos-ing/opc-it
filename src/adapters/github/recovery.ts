@@ -53,7 +53,6 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
       owner: this.owner,
       repo: this.repo,
       state: "open",
-      labels: "opc:recovery",
       per_page: 100,
     });
     for (const issue of issues) {

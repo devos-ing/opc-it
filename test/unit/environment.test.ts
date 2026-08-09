@@ -13,8 +13,21 @@ it("passes only fixed runtime values and allowlisted variables", () => {
       OPENAI_API_KEY: "openai-secret",
       CODEX_API_KEY: "codex-secret",
       CODEX_HOME: "/host/auth",
+      ACTIONS_RUNTIME_TOKEN: "actions-secret",
+      GITHUB_ACTIONS: "true",
+      SAFE_TOKEN_COUNT: "3",
     },
-    ["CI", "NODE_ENV", "GITHUB_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME"],
+    [
+      "CI",
+      "NODE_ENV",
+      "GITHUB_TOKEN",
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "CODEX_HOME",
+      "ACTIONS_RUNTIME_TOKEN",
+      "GITHUB_ACTIONS",
+      "SAFE_TOKEN_COUNT",
+    ],
   );
 
   expect(Object.keys(environment).sort()).toEqual(["CI", "HOME", "NODE_ENV", "PATH", "TMPDIR"]);

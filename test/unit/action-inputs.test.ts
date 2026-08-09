@@ -16,6 +16,7 @@ it("accepts local execution commands only with their bounded inputs", () => {
       repository: "acme/app",
       issueNumber: "7",
       payloadB64: "abc",
+      enabled: "true",
     }),
   ).toMatchObject({ command: "complete-run", issueNumber: 7, payloadB64: "abc" });
   expect(
@@ -41,12 +42,12 @@ it("accepts local execution commands only with their bounded inputs", () => {
       promptFile: "/tmp/prompt.md",
       outputFile: "/tmp/result.json",
       schemaFile: "/opt/action/schema.json",
-      timeoutSeconds: "60",
+      deadlineEpochMs: "1060000",
     }),
   ).toMatchObject({
     command: "run-codex",
     permissionProfile: "opc-executor",
-    timeoutSeconds: 60,
+    deadlineEpochMs: 1_060_000,
   });
   expect(
     parseActionInputs({
@@ -55,8 +56,22 @@ it("accepts local execution commands only with their bounded inputs", () => {
       issueNumber: "7",
       payloadB64: "abc",
       inputFile: "/tmp/result.json",
+      codexOutcome: "completed",
+      deadlineEpochMs: "1060000",
     }),
-  ).toMatchObject({ command: "finalize-execution", inputFile: "/tmp/result.json" });
+  ).toMatchObject({
+    command: "finalize-execution",
+    inputFile: "/tmp/result.json",
+    codexOutcome: "completed",
+    deadlineEpochMs: 1_060_000,
+  });
+  expect(
+    parseActionInputs({
+      command: "report-run-failure",
+      repository: "acme/app",
+      reportedOutcome: "execution",
+    }),
+  ).toMatchObject({ command: "report-run-failure", reportedOutcome: "execution" });
   expect(
     parseActionInputs({
       command: "verify-codex-runner",
@@ -102,6 +117,16 @@ it.each([
   ],
   [
     {
+      command: "complete-run",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      enabled: "false",
+    },
+    "POLICY_DISABLED",
+  ],
+  [
+    {
       command: "run-codex",
       repository: "acme/app",
       permissionProfile: "opc-executor",
@@ -109,12 +134,16 @@ it.each([
       promptFile: "/tmp/prompt.md",
       outputFile: "/tmp/result.json",
       schemaFile: "/opt/action/schema.json",
-      timeoutSeconds: "5401",
+      deadlineEpochMs: "0",
     },
     "INVALID_EXECUTION_INPUT",
   ],
   [
     { command: "finalize-execution", repository: "acme/app", issueNumber: "7", payloadB64: "abc" },
+    "INVALID_EXECUTION_INPUT",
+  ],
+  [
+    { command: "report-run-failure", repository: "acme/app", reportedOutcome: "garbage" },
     "INVALID_EXECUTION_INPUT",
   ],
   [

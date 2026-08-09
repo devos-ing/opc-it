@@ -4,6 +4,7 @@ import type {
   CommandRequest,
   CommandResult,
 } from "../adapters/local/process-runner.js";
+import { remainingExecutionMilliseconds } from "../domain/deadline.js";
 import { DomainError } from "../domain/errors.js";
 
 type PermissionProfile = "opc-executor" | "opc-reviewer";
@@ -17,14 +18,20 @@ const releaseRoutes = {
   readonly maximumSeconds: number;
 }>;
 
-export interface RunCodexInput {
-  readonly permissionProfile: PermissionProfile;
+interface RunCodexFiles {
   readonly workspace: string;
   readonly promptFile: string;
   readonly outputFile: string;
   readonly schemaFile: string;
-  readonly timeoutSeconds: number;
 }
+
+export type RunCodexInput = RunCodexFiles &
+  (
+    | { readonly permissionProfile: "opc-executor"; readonly deadlineEpochMs: number }
+    | { readonly permissionProfile: "opc-reviewer"; readonly timeoutSeconds: 900 }
+  );
+
+export type CodexRunOutcome = "completed" | "work-failure" | "run-incident";
 
 export interface RunCodexRuntime {
   readonly runnerTemp: string;
@@ -37,6 +44,7 @@ export interface RunCodexDependencies {
     profile: PermissionProfile,
   ) => Promise<{ codexBin: string; codexHome: string; runnerManifestPath: string }>;
   readonly run: (request: CommandRequest) => Promise<CommandResult>;
+  readonly now?: () => number;
 }
 
 function assertContained(root: string, candidate: string, name: string): void {
@@ -50,15 +58,26 @@ export async function runPinnedCodex(
   input: RunCodexInput,
   runtime: RunCodexRuntime,
   dependencies: RunCodexDependencies,
-): Promise<{ durationMs: number }> {
+): Promise<{ outcome: CodexRunOutcome; durationMs: number }> {
   const route = releaseRoutes[input.permissionProfile];
-  if (
-    !Number.isInteger(input.timeoutSeconds) ||
-    input.timeoutSeconds < 1 ||
-    input.timeoutSeconds > route.maximumSeconds ||
-    (input.permissionProfile === "opc-reviewer" && input.timeoutSeconds !== 900)
-  ) {
-    throw new DomainError("INVALID_EXECUTION_INPUT", "Codex timeout");
+  const now = dependencies.now ?? Date.now;
+  const timeoutForRun = (): number => {
+    if (input.permissionProfile === "opc-reviewer") {
+      return input.timeoutSeconds * 1_000;
+    }
+    const remaining = remainingExecutionMilliseconds(input.deadlineEpochMs, now());
+    if (remaining > route.maximumSeconds * 1_000) {
+      throw new DomainError("INVALID_EXECUTION_INPUT", "Codex deadline");
+    }
+    return remaining;
+  };
+  try {
+    timeoutForRun();
+  } catch (error) {
+    if (error instanceof DomainError && error.code === "EXECUTION_TIMEOUT") {
+      return { outcome: "work-failure", durationMs: 0 };
+    }
+    throw error;
   }
   const runnerTemp = await realpath(runtime.runnerTemp);
   const actionPath = await realpath(runtime.actionPath);
@@ -117,6 +136,15 @@ export async function runPinnedCodex(
       }
     }
   }
+  let timeoutMs: number;
+  try {
+    timeoutMs = timeoutForRun();
+  } catch (error) {
+    if (error instanceof DomainError && error.code === "EXECUTION_TIMEOUT") {
+      return { outcome: "work-failure", durationMs: 0 };
+    }
+    throw error;
+  }
   const result = await dependencies.run({
     command: verified.codexBin,
     args: [
@@ -144,15 +172,15 @@ export async function runPinnedCodex(
     ],
     cwd: workspace,
     env: environment,
-    timeoutMs: input.timeoutSeconds * 1_000,
+    timeoutMs,
     outputLimitBytes: 1024 * 1024,
     input: await readFile(promptFile, "utf8"),
   });
-  if (result.status === "timeout") {
-    throw new DomainError("EXECUTION_TIMEOUT", input.permissionProfile);
-  }
-  if (result.status !== "pass") {
-    throw new DomainError("CODEX_EXECUTION_FAILED", `${input.permissionProfile}:${result.status}`);
-  }
-  return { durationMs: result.durationMs };
+  const outcome: CodexRunOutcome =
+    result.status === "pass"
+      ? "completed"
+      : result.status === "timeout" || result.status === "output-limit"
+        ? "work-failure"
+        : "run-incident";
+  return { outcome, durationMs: result.durationMs };
 }

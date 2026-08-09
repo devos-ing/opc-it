@@ -31,6 +31,7 @@ export async function runBounded(request: CommandRequest): Promise<CommandResult
   const result = await execa(request.command, [...request.args], {
     cwd: request.cwd,
     env: request.env,
+    extendEnv: false,
     reject: false,
     timeout: request.timeoutMs,
     killSignal: "SIGKILL",

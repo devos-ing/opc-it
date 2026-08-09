@@ -170,6 +170,126 @@ it("recognizes an active slot only after a trusted claim transition", async () =
   expect(await store.hasActiveClaim()).toBe(true);
 });
 
+it("keeps a trusted active claim authoritative after an external relabel", async () => {
+  const relabeledIssue = {
+    number: 7,
+    labels: [{ name: "opc:ready" }, { name: "opc:attempt-1" }],
+  };
+  const claimBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "ready",
+    event: "claim",
+    metadata: { run_id: "123", claimed_at: "2026-08-08T00:02:00Z" },
+  })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues?state=open&per_page=100", [relabeledIssue]],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: claimBody,
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.hasActiveClaim()).toBe(true);
+});
+
+it("loads trusted transition state instead of a mutable state label", async () => {
+  const relabeledIssue = {
+    number: 7,
+    labels: [{ name: "opc:ready" }, { name: "opc:attempt-1" }],
+  };
+  const claimBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "ready",
+    event: "claim",
+    metadata: { run_id: "123", claimed_at: "2026-08-08T00:02:00Z" },
+  })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues/7", relabeledIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: claimBody,
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.loadIssueState(7)).toEqual({ state: "claimed", attempt: 1 });
+});
+
+it("repairs a mutable relabel while applying the trusted next transition", async () => {
+  const relabeledIssue = {
+    number: 7,
+    labels: [{ name: "opc:ready" }, { name: "opc:attempt-1" }],
+  };
+  const claimBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "ready",
+    event: "claim",
+    metadata: { run_id: "123", claimed_at: "2026-08-08T00:02:00Z" },
+  })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues/7", relabeledIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: claimBody,
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+        ],
+      ],
+      ["POST /repos/acme/app/issues/7/comments", {}],
+      ["PUT /repos/acme/app/issues/7/labels", {}],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(
+    await store.transition({
+      issueNumber: 7,
+      expected: "claimed",
+      event: "lease-expired",
+      metadata: {},
+    }),
+  ).toEqual({ previous: "claimed", current: "ready", changed: true });
+});
+
 it("does not revive an old claim when the latest trusted transition is ready", async () => {
   const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
   const activeLabelIssue = {

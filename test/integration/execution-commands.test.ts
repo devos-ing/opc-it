@@ -143,6 +143,7 @@ async function executionFixture(): Promise<{
       runnerManifestPath: manifestPath,
       expectedRunnerUser: userInfo().username,
       sourceEnvironment: process.env,
+      now: () => 1_000_000,
     },
   };
 }
@@ -153,6 +154,7 @@ it("prepares, finalizes, and removes an isolated execution workspace", async () 
     { enabled: true, issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
     fixture.runtime,
   );
+  expect(prepared.deadlineEpochMs).toBe(1_060_000);
   await writeFile(join(prepared.workspace, "src/added.ts"), "export const added = true;\n");
   const outputFile = join(fixture.runtime.runnerTemp, "opc-executor-output.json");
   await writeFile(outputFile, JSON.stringify({ status: "completed", summary: "done", risks: [] }));
@@ -162,11 +164,14 @@ it("prepares, finalizes, and removes an isolated execution workspace", async () 
       issueNumber: fixture.issueNumber,
       payloadB64: fixture.payloadB64,
       inputFile: outputFile,
+      codexOutcome: "completed",
+      deadlineEpochMs: prepared.deadlineEpochMs,
     },
     fixture.runtime,
   );
 
   expect(finalized.bundleReady).toBe(true);
+  if (!finalized.bundleReady) throw new Error("MISSING_CANDIDATE_BUNDLE");
   expect(await readFile(join(finalized.bundleDirectory, "manifest.json"), "utf8")).toContain(
     '"kind":"CandidateResult"',
   );
@@ -174,6 +179,35 @@ it("prepares, finalizes, and removes an isolated execution workspace", async () 
     (caught: unknown) => caught,
   );
   expect(removed).toBeInstanceOf(Error);
+});
+
+it("cleans up and reports a structured executor failure without calling it Evidence", async () => {
+  const fixture = await executionFixture();
+  const prepared = await prepareExecution(
+    { enabled: true, issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
+    fixture.runtime,
+  );
+  const outputFile = join(fixture.runtime.runnerTemp, "opc-executor-output.json");
+  await writeFile(
+    outputFile,
+    JSON.stringify({ status: "failed", summary: "could not implement", risks: [] }),
+  );
+
+  const finalized = await finalizeExecution(
+    {
+      issueNumber: fixture.issueNumber,
+      payloadB64: fixture.payloadB64,
+      inputFile: outputFile,
+      codexOutcome: "completed",
+      deadlineEpochMs: prepared.deadlineEpochMs,
+    },
+    fixture.runtime,
+  );
+
+  expect(finalized).toEqual({ bundleReady: false, outcome: "work-failure" });
+  expect(
+    await readFile(prepared.workspace, "utf8").catch((caught: unknown) => caught),
+  ).toBeInstanceOf(Error);
 });
 
 it("keeps repository-controlled commands outside the Codex credential boundary", async () => {

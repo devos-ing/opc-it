@@ -16,6 +16,7 @@ it("classifies a fully verified workflow", () => {
     classifyWorkflowRun([
       completed("execute", "success"),
       completed("review", "success"),
+      completed("heartbeat", "success"),
     ]),
   ).toEqual({ kind: "verified" });
 });
@@ -33,12 +34,12 @@ it.each([
   ],
   [
     "executor failure",
-    completed("execute", "failure", "Execute approved milestone"),
+    completed("execute", "failure", "Record Executor Failure"),
     {
       kind: "failure",
       phase: "execution",
       category: "execution",
-      checkId: "execute-approved-milestone",
+      checkId: "record-executor-failure",
     },
   ],
   [
@@ -53,7 +54,11 @@ it.each([
   ],
 ] as const)("classifies %s from trusted execute job state", (_name, execute, expected) => {
   expect(
-    classifyWorkflowRun([execute, completed("review", "skipped")]),
+    classifyWorkflowRun([
+      execute,
+      completed("review", "skipped"),
+      completed("heartbeat", "success"),
+    ]),
   ).toMatchObject(expected);
 });
 
@@ -62,6 +67,7 @@ it("classifies a deterministic review rejection as review failure", () => {
     classifyWorkflowRun([
       completed("execute", "success"),
       completed("review", "failure", "Apply deterministic Evidence Gate"),
+      completed("heartbeat", "success"),
     ]),
   ).toMatchObject({
     kind: "failure",
@@ -71,11 +77,62 @@ it("classifies a deterministic review rejection as review failure", () => {
   });
 });
 
+it.each([
+  [
+    "bootstrap",
+    completed("execute", "failure", "Prepare workspace and run network-denied bootstrap"),
+    { category: "execution", checkId: "prepare-workspace-and-run-network-denied-bootstrap" },
+  ],
+  [
+    "structured executor result",
+    completed("execute", "failure", "Record Executor Failure"),
+    { category: "execution", checkId: "record-executor-failure" },
+  ],
+  [
+    "executor service incident",
+    completed("execute", "failure", "Record Executor Run Incident"),
+    { category: "infrastructure", checkId: "record-executor-run-incident" },
+  ],
+] as const)("classifies %s with a stable workflow-owned step", (_name, execute, expected) => {
+  expect(
+    classifyWorkflowRun([execute, completed("review", "skipped"), completed("heartbeat", "success")]),
+  ).toMatchObject({ kind: "failure", phase: "execution", ...expected });
+});
+
+it("turns an untrusted heartbeat job into a run incident", () => {
+  expect(
+    classifyWorkflowRun([
+      completed("execute", "success"),
+      completed("review", "success"),
+      completed("heartbeat", "failure", "Watch executor and reviewer liveness"),
+    ]),
+  ).toMatchObject({
+    kind: "failure",
+    phase: "before-start",
+    category: "infrastructure",
+    checkId: "heartbeat",
+  });
+});
+
+it.each([
+  ["Record Review Failure", "review"],
+  ["Record Reviewer Run Incident", "infrastructure"],
+] as const)("classifies %s from the fixed reviewer workflow", (step, category) => {
+  expect(
+    classifyWorkflowRun([
+      completed("execute", "success"),
+      completed("review", "failure", step),
+      completed("heartbeat", "success"),
+    ]),
+  ).toMatchObject({ kind: "failure", phase: "review", category });
+});
+
 it("fails closed before both trusted jobs are terminal", () => {
   expect(() =>
     classifyWorkflowRun([
       { ...completed("execute", "success"), status: "in_progress", conclusion: null },
       completed("review", "success"),
+      completed("heartbeat", "success"),
     ]),
   ).toThrowError("RUN_COMPLETION_NOT_READY");
 });

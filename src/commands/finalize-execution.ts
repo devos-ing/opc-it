@@ -14,6 +14,7 @@ import {
   loadTrustedRunnerConfiguration,
   repositorySandboxPrefix,
 } from "./verify-codex-runner.js";
+import type { CodexRunOutcome } from "./run-codex.js";
 
 interface ExecutorOutput {
   status: "completed" | "failed";
@@ -45,9 +46,23 @@ function currentUser(runtime: LocalExecutionRuntime): { username: string; uid: n
 }
 
 export async function finalizeExecution(
-  input: { issueNumber: number; payloadB64: string; inputFile: string },
+  input: {
+    issueNumber: number;
+    payloadB64: string;
+    inputFile: string;
+    codexOutcome: CodexRunOutcome;
+    deadlineEpochMs: number;
+  },
   runtime: LocalExecutionRuntime,
-): Promise<{ bundleReady: true; bundleDirectory: string; artifactSha256: string }> {
+): Promise<
+  | { bundleReady: false; outcome: "work-failure" | "run-incident" }
+  | {
+      bundleReady: true;
+      outcome: "completed";
+      bundleDirectory: string;
+      artifactSha256: string;
+    }
+> {
   const envelope = parseExecutionEnvelopePayload(input.payloadB64, input.issueNumber);
   const paths = executionPaths(runtime, envelope.contract.work_id);
   const sourceRepository = await realpath(paths.sourceRepository);
@@ -57,6 +72,9 @@ export async function finalizeExecution(
     path: await realpath(paths.workspace),
   };
   try {
+    if (input.codexOutcome !== "completed") {
+      return { bundleReady: false, outcome: input.codexOutcome };
+    }
     if (resolve(input.inputFile) !== resolve(paths.outputFile)) {
       throw new DomainError("INVALID_EXECUTION_INPUT", "executor output path");
     }
@@ -72,7 +90,7 @@ export async function finalizeExecution(
     }
     const output = parseExecutorOutput(outputValue);
     if (output.status !== "completed") {
-      throw new DomainError("EXECUTOR_REPORTED_FAILURE", output.summary);
+      return { bundleReady: false, outcome: "work-failure" };
     }
     const runner = await loadTrustedRunnerConfiguration("opc-executor", {
       manifestPath: runtime.runnerManifestPath,
@@ -108,6 +126,8 @@ export async function finalizeExecution(
         envelope.policy.environment_allowlist,
       ),
       durationSeconds,
+      deadlineEpochMs: input.deadlineEpochMs,
+      ...(runtime.now ? { now: runtime.now } : {}),
       commandPrefix: {
         command: runner.networkDenyCommand,
         args: repositorySandboxPrefix(
@@ -120,9 +140,15 @@ export async function finalizeExecution(
     });
     return {
       bundleReady: true,
+      outcome: "completed",
       bundleDirectory: result.bundle.directory,
       artifactSha256: result.bundle.artifactSha256,
     };
+  } catch (error) {
+    if (error instanceof DomainError && error.code === "EXECUTION_TIMEOUT") {
+      return { bundleReady: false, outcome: "work-failure" };
+    }
+    throw error;
   } finally {
     await removeExecutionWorkspace(workspace);
   }

@@ -15,7 +15,6 @@ import {
   type WorkState,
 } from "../../domain/state.js";
 import { GitHubStateStore } from "./state-store.js";
-import { workStateFromLabels } from "./issues.js";
 import {
   trustedTransitionRecords,
   type TransitionRecord,
@@ -84,14 +83,6 @@ function stateAfterRecord(record: TransitionRecord | undefined): WorkState | und
   }
 }
 
-function issueLabels(
-  labels: readonly (string | { readonly name?: string | null })[],
-): string[] {
-  return labels
-    .map((label) => (typeof label === "string" ? label : label.name))
-    .filter((label): label is string => Boolean(label));
-}
-
 const activeExecutionStates = new Set<WorkState>(["claimed", "running", "reviewing"]);
 
 function hasHttpStatus(error: unknown): error is { readonly status: number } {
@@ -117,20 +108,9 @@ export class GitHubReconciler implements ReconcilePort {
       state: "open",
       per_page: 100,
     });
-    const activeIssues = issues.flatMap((issue) => {
-      try {
-        const state = workStateFromLabels(issueLabels(issue.labels));
-        return activeExecutionStates.has(state)
-          ? [{ number: issue.number, state: state as ActiveClaim["state"] }]
-          : [];
-      } catch (error) {
-        if (error instanceof DomainError) return [];
-        throw error;
-      }
-    });
     const claims = await Promise.all(
-      activeIssues.map((issue) =>
-        this.loadActiveClaim(issue.number, issue.state).catch((error: unknown) => {
+      issues.map((issue) =>
+        this.loadActiveClaim(issue.number).catch((error: unknown) => {
           if (error instanceof DomainError) return undefined;
           throw error;
         }),
@@ -158,8 +138,7 @@ export class GitHubReconciler implements ReconcilePort {
 
   private async loadActiveClaim(
     issueNumber: number,
-    state: ActiveClaim["state"],
-  ): Promise<ActiveClaim> {
+  ): Promise<ActiveClaim | undefined> {
     const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
       owner: this.owner,
       repo: this.repo,
@@ -167,9 +146,9 @@ export class GitHubReconciler implements ReconcilePort {
       per_page: 100,
     });
     const records = trustedTransitionRecords(comments);
-    if (stateAfterRecord(records.at(-1)) !== state) {
-      throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
-    }
+    const recordedState = stateAfterRecord(records.at(-1));
+    if (!recordedState || !activeExecutionStates.has(recordedState)) return undefined;
+    const state = recordedState as ActiveClaim["state"];
     const claimIndex = records.findLastIndex((record) => record.event === "claim");
     const metadata = claimMetadata(records[claimIndex]);
     if (!metadata || !/^\d+$/.test(metadata.runId)) {

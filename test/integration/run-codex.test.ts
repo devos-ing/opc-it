@@ -43,25 +43,36 @@ const passed = (overrides: Partial<CommandResult> = {}): CommandResult => ({
 });
 
 it.each([
-  ["opc-executor", "gpt-5.6-luna", "high", 60],
-  ["opc-reviewer", "gpt-5.6-sol", "xhigh", 900],
+  ["opc-executor", "gpt-5.6-luna", "high", 60_000],
+  ["opc-reviewer", "gpt-5.6-sol", "xhigh", 900_000],
 ] as const)("binds %s to the verified home, model, effort, and timeout", async (
   profile,
   model,
   effort,
-  timeoutSeconds,
+  timeoutMs,
 ) => {
   const fixture = await invocationFixture(profile);
   const requests: CommandRequest[] = [];
+  const input =
+    profile === "opc-executor"
+      ? {
+          permissionProfile: profile,
+          workspace: fixture.workspace,
+          promptFile: fixture.promptFile,
+          outputFile: fixture.outputFile,
+          schemaFile: fixture.schemaFile,
+          deadlineEpochMs: 1_060_000,
+        }
+      : {
+          permissionProfile: profile,
+          workspace: fixture.workspace,
+          promptFile: fixture.promptFile,
+          outputFile: fixture.outputFile,
+          schemaFile: fixture.schemaFile,
+          timeoutSeconds: 900 as const,
+        };
   const result = await runPinnedCodex(
-    {
-      permissionProfile: profile,
-      workspace: fixture.workspace,
-      promptFile: fixture.promptFile,
-      outputFile: fixture.outputFile,
-      schemaFile: fixture.schemaFile,
-      timeoutSeconds,
-    },
+    input,
     {
       runnerTemp: fixture.runnerTemp,
       actionPath: fixture.actionPath,
@@ -80,10 +91,11 @@ it.each([
         requests.push(captured);
         return Promise.resolve(captured.args[0] === "sandbox" ? passed({ status: "fail", exitCode: 1 }) : passed());
       },
+      now: () => 1_000_000,
     },
   );
 
-  expect(result).toEqual({ durationMs: 25 });
+  expect(result).toEqual({ outcome: "completed", durationMs: 25 });
   expect(requests).toHaveLength(5);
   const request = requests.at(-1);
   if (request === undefined) throw new Error("MISSING_CODEX_REQUEST");
@@ -95,7 +107,7 @@ it.each([
   ]);
   expect(requests.slice(0, 4).every((probe) => probe.args.includes(profile))).toBe(true);
   expect(request.command).toBe("/host/codex");
-  expect(request.timeoutMs).toBe(timeoutSeconds * 1_000);
+  expect(request.timeoutMs).toBe(timeoutMs);
   expect(request.input).toBe("approved prompt");
   expect(request.env).toEqual({
     CODEX_HOME: fixture.codexHome,
@@ -112,16 +124,16 @@ it.each([
   expect(request.args).toContain("never");
 });
 
-it("returns a stable failure when Codex exceeds the approved executor deadline", async () => {
+it("returns a typed work failure when Codex exceeds the approved executor deadline", async () => {
   const fixture = await invocationFixture("opc-executor");
-  const error = await runPinnedCodex(
+  const result = await runPinnedCodex(
     {
       permissionProfile: "opc-executor",
       workspace: fixture.workspace,
       promptFile: fixture.promptFile,
       outputFile: fixture.outputFile,
       schemaFile: fixture.schemaFile,
-      timeoutSeconds: 60,
+      deadlineEpochMs: 1_060_000,
     },
     { runnerTemp: fixture.runnerTemp, actionPath: fixture.actionPath, sourceEnvironment: {} },
     {
@@ -137,10 +149,43 @@ it("returns a stable failure when Codex exceeds the approved executor deadline",
             ? passed({ status: "fail", exitCode: 1 })
             : passed({ status: "timeout", exitCode: null }),
         ),
+      now: () => 1_000_000,
     },
-  ).catch((caught: unknown) => caught);
+  );
 
-  expect(error).toMatchObject({ code: "EXECUTION_TIMEOUT" });
+  expect(result).toEqual({ outcome: "work-failure", durationMs: 25 });
+});
+
+it("returns a typed run incident for a Codex service failure", async () => {
+  const fixture = await invocationFixture("opc-executor");
+  const result = await runPinnedCodex(
+    {
+      permissionProfile: "opc-executor",
+      workspace: fixture.workspace,
+      promptFile: fixture.promptFile,
+      outputFile: fixture.outputFile,
+      schemaFile: fixture.schemaFile,
+      deadlineEpochMs: 1_060_000,
+    },
+    { runnerTemp: fixture.runnerTemp, actionPath: fixture.actionPath, sourceEnvironment: {} },
+    {
+      verify: () =>
+        Promise.resolve({
+          codexBin: "/host/codex",
+          codexHome: fixture.codexHome,
+          runnerManifestPath: fixture.runnerManifestPath,
+        }),
+      run: (request) =>
+        Promise.resolve(
+          request.args[0] === "sandbox"
+            ? passed({ status: "fail", exitCode: 1 })
+            : passed({ status: "fail", exitCode: 1 }),
+        ),
+      now: () => 1_000_000,
+    },
+  );
+
+  expect(result).toEqual({ outcome: "run-incident", durationMs: 25 });
 });
 
 it("fails closed when the active permission profile can read persistent auth", async () => {
@@ -152,7 +197,7 @@ it("fails closed when the active permission profile can read persistent auth", a
       promptFile: fixture.promptFile,
       outputFile: fixture.outputFile,
       schemaFile: fixture.schemaFile,
-      timeoutSeconds: 60,
+      deadlineEpochMs: 1_060_000,
     },
     { runnerTemp: fixture.runnerTemp, actionPath: fixture.actionPath, sourceEnvironment: {} },
     {
@@ -163,6 +208,7 @@ it("fails closed when the active permission profile can read persistent auth", a
           runnerManifestPath: fixture.runnerManifestPath,
         }),
       run: () => Promise.resolve(passed()),
+      now: () => 1_000_000,
     },
   ).catch((caught: unknown) => caught);
 

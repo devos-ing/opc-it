@@ -145,6 +145,8 @@ it("builds a schema-valid candidate only after path checks and evidence", async 
     context: { repository: "acme/private" },
     environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
     durationSeconds: 1,
+    deadlineEpochMs: 1_060_000,
+    now: () => 1_000_000,
   });
 
   expect(
@@ -172,7 +174,36 @@ it("rejects a forbidden changed path before evidence execution", async () => {
     context: {},
     environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
     durationSeconds: 1,
+    deadlineEpochMs: 1_060_000,
+    now: () => 1_000_000,
   }).catch((caught: unknown) => caught);
 
   expect(error).toMatchObject({ code: "PATH_POLICY_FAILED" });
+});
+
+it("shares one absolute deadline across every Evidence command", async () => {
+  const fixture = await createChangeFixture();
+  const temporary = await mkdtemp(join(tmpdir(), "opc-deadline-candidate-"));
+  const repositoryPolicy = policy();
+  repositoryPolicy.commands.evidence.push({
+    id: "second",
+    run: "bun -e \"process.stdout.write('must-not-run')\"",
+  });
+  let observations = 0;
+
+  const error = await buildCandidate({
+    workspace: fixture.path,
+    bundleDirectory: join(temporary, "bundle"),
+    contract: contract(fixture.baseSha),
+    policy: repositoryPolicy,
+    approvalDigest: `sha256:${"b".repeat(64)}`,
+    attempt: 1,
+    context: {},
+    environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    durationSeconds: 1,
+    deadlineEpochMs: 1_060_000,
+    now: () => (observations++ === 0 ? 1_000_000 : 1_060_000),
+  }).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "EXECUTION_TIMEOUT" });
 });

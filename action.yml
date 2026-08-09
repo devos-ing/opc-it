@@ -38,7 +38,16 @@ inputs:
     description: commit-pinned JSON schema inside this Action
     required: false
   timeout-seconds:
-    description: approved host-enforced execution deadline
+    description: fixed reviewer timeout in seconds
+    required: false
+  deadline-epoch-ms:
+    description: absolute approved executor wall-clock deadline
+    required: false
+  codex-outcome:
+    description: trusted run-codex outcome passed to final cleanup
+    required: false
+  reported-outcome:
+    description: fixed workflow-owned failure category to report
     required: false
   permission-profile:
     description: host-owned opc-executor or opc-reviewer profile
@@ -73,8 +82,12 @@ outputs:
     description: commit-pinned executor JSON schema path
   review-schema-file:
     description: commit-pinned result-review JSON schema path
-  timeout-seconds:
-    description: approved executor deadline in seconds
+  deadline-epoch-ms:
+    description: absolute approved executor wall-clock deadline
+  codex-outcome:
+    description: completed work-failure or run-incident
+  finalize-outcome:
+    description: completed work-failure or run-incident after cleanup
   bundle-ready:
     description: true only when a Candidate Result bundle is complete
   bundle-directory:

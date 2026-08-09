@@ -87,6 +87,11 @@ it("persists a verified production run through all M3 states", async () => {
     },
     {
       method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
+    {
+      method: "GET",
       path: "/repos/acme/app/actions/runs/123/jobs?per_page=100",
       response: {
         jobs: [
@@ -104,6 +109,14 @@ it("persists a verified production run through all M3 states", async () => {
             conclusion: "success",
             started_at: "2026-08-10T10:10:00Z",
             runner_id: 10,
+            steps: [],
+          },
+          {
+            name: "opc / heartbeat",
+            status: "completed",
+            conclusion: "success",
+            started_at: "2026-08-10T10:00:00Z",
+            runner_id: 20,
             steps: [],
           },
         ],
@@ -126,6 +139,7 @@ it("persists a verified production run through all M3 states", async () => {
       repository: "acme/app",
       issueNumber: "7",
       payloadB64,
+      enabled: "true",
     }),
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
     {
@@ -159,6 +173,11 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
     },
     {
       method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
+    {
+      method: "GET",
       path: "/repos/acme/app/actions/runs/123/jobs?per_page=100",
       response: {
         jobs: [
@@ -170,7 +189,7 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
             runner_id: 10,
             steps: [
               {
-                name: "Execute approved milestone",
+                name: "Record Executor Failure",
                 status: "completed",
                 conclusion: "failure",
               },
@@ -184,6 +203,14 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
             runner_id: null,
             steps: [],
           },
+          {
+            name: "opc / heartbeat",
+            status: "completed",
+            conclusion: "success",
+            started_at: "2026-08-10T10:00:00Z",
+            runner_id: 20,
+            steps: [],
+          },
         ],
       },
     },
@@ -195,7 +222,7 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     {
       method: "GET",
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
+      path: "/repos/acme/app/issues?state=open&per_page=100",
       response: [],
     },
     { method: "POST", path: "/repos/acme/app/issues", response: { number: 42 } },
@@ -212,6 +239,7 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
       repository: "acme/app",
       issueNumber: "7",
       payloadB64,
+      enabled: "true",
     }),
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
     {

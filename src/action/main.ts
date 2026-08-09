@@ -11,7 +11,7 @@ import { decideResult } from "../commands/decide-result.js";
 import { runActionHeartbeat } from "../commands/heartbeat.js";
 import { prepareExecution, type LocalExecutionRuntime } from "../commands/prepare-execution.js";
 import { prepareReview } from "../commands/prepare-review.js";
-import { runPinnedCodex } from "../commands/run-codex.js";
+import { runPinnedCodex, type RunCodexInput } from "../commands/run-codex.js";
 import {
   productionRunnerManifestPath,
   productionRunnerUser,
@@ -72,6 +72,9 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     const outputFile = runtime.getInput("output-file");
     const schemaFile = runtime.getInput("schema-file");
     const timeoutSeconds = runtime.getInput("timeout-seconds");
+    const deadlineEpochMs = runtime.getInput("deadline-epoch-ms");
+    const codexOutcome = runtime.getInput("codex-outcome");
+    const reportedOutcome = runtime.getInput("reported-outcome");
     const inputs = parseActionInputs({
       command: runtime.getInput("command"),
       repository: runtime.getInput("repository"),
@@ -87,6 +90,9 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       ...(outputFile ? { outputFile } : {}),
       ...(schemaFile ? { schemaFile } : {}),
       ...(timeoutSeconds ? { timeoutSeconds } : {}),
+      ...(deadlineEpochMs ? { deadlineEpochMs } : {}),
+      ...(codexOutcome ? { codexOutcome } : {}),
+      ...(reportedOutcome ? { reportedOutcome } : {}),
     });
     const token = runtime.getInput("github-token");
     const octokit = token
@@ -150,10 +156,13 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       inputs.command === "finalize-execution" ||
       inputs.command === "prepare-review" ||
       inputs.command === "decide-result" ||
-      inputs.command === "run-codex"
+      inputs.command === "run-codex" ||
+      inputs.command === "report-run-failure"
     ) {
       if (octokit) throw new DomainError("UNEXPECTED_GITHUB_CLIENT", inputs.command);
-      if (inputs.command === "verify-codex-runner") {
+      if (inputs.command === "report-run-failure") {
+        throw new DomainError("REPORTED_RUN_FAILURE", inputs.reportedOutcome ?? "missing");
+      } else if (inputs.command === "verify-codex-runner") {
         const version = inputs.codexVersion;
         const profile = inputs.permissionProfile;
         if (!version || !profile) throw new DomainError("INVALID_CODEX_RUNNER", "missing input");
@@ -174,10 +183,16 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
           "prompt-file": prepared.promptFile,
           "executor-schema-file": prepared.executorSchemaFile,
           "review-schema-file": prepared.reviewSchemaFile,
-          "timeout-seconds": String(prepared.timeoutSeconds),
+          "deadline-epoch-ms": String(prepared.deadlineEpochMs),
         };
       } else if (inputs.command === "finalize-execution") {
-        if (inputs.issueNumber === undefined || !inputs.payloadB64 || !inputs.inputFile) {
+        if (
+          inputs.issueNumber === undefined ||
+          !inputs.payloadB64 ||
+          !inputs.inputFile ||
+          !inputs.codexOutcome ||
+          inputs.deadlineEpochMs === undefined
+        ) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing finalize input");
         }
         const finalized = await finalizeExecution(
@@ -185,15 +200,20 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
             issueNumber: inputs.issueNumber,
             payloadB64: inputs.payloadB64,
             inputFile: inputs.inputFile,
+            codexOutcome: inputs.codexOutcome,
+            deadlineEpochMs: inputs.deadlineEpochMs,
           },
           localRuntime(),
         );
         result = finalized;
-        outputs = {
-          "bundle-ready": "true",
-          "bundle-directory": finalized.bundleDirectory,
-          "artifact-sha256": finalized.artifactSha256,
-        };
+        outputs = finalized.bundleReady
+          ? {
+              "finalize-outcome": finalized.outcome,
+              "bundle-ready": "true",
+              "bundle-directory": finalized.bundleDirectory,
+              "artifact-sha256": finalized.artifactSha256,
+            }
+          : { "finalize-outcome": finalized.outcome, "bundle-ready": "false" };
       } else if (inputs.command === "prepare-review") {
         if (
           inputs.issueNumber === undefined ||
@@ -254,7 +274,9 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
           !inputs.promptFile ||
           !inputs.outputFile ||
           !inputs.schemaFile ||
-          inputs.timeoutSeconds === undefined
+          (profile === "opc-executor"
+            ? inputs.deadlineEpochMs === undefined
+            : inputs.timeoutSeconds !== 900)
         ) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing run-codex input");
         }
@@ -262,18 +284,33 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
         if (!runnerTemp || !actionPath) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing runner paths");
         }
-        result = await runPinnedCodex(
-          {
-            permissionProfile: profile,
+        const codexFiles = {
             workspace: inputs.workspace,
             promptFile: inputs.promptFile,
             outputFile: inputs.outputFile,
             schemaFile: inputs.schemaFile,
-            timeoutSeconds: inputs.timeoutSeconds,
-          },
+        };
+        let codexInput: RunCodexInput;
+        if (profile === "opc-executor") {
+          const deadline = inputs.deadlineEpochMs;
+          if (deadline === undefined) {
+            throw new DomainError("INVALID_EXECUTION_INPUT", "missing executor deadline");
+          }
+          codexInput = { ...codexFiles, permissionProfile: profile, deadlineEpochMs: deadline };
+        } else {
+          const timeout = inputs.timeoutSeconds;
+          if (timeout !== 900) {
+            throw new DomainError("INVALID_EXECUTION_INPUT", "invalid reviewer timeout");
+          }
+          codexInput = { ...codexFiles, permissionProfile: profile, timeoutSeconds: timeout };
+        }
+        const codexResult = await runPinnedCodex(
+          codexInput,
           { runnerTemp, actionPath, sourceEnvironment: process.env },
           { verify: verifyLocalRunner, run: runBounded },
         );
+        result = codexResult;
+        outputs = { "codex-outcome": codexResult.outcome };
       }
     } else if (inputs.command === "heartbeat") {
       if (!octokit) throw new DomainError("MISSING_GITHUB_TOKEN", "heartbeat requires token");

@@ -8,6 +8,10 @@ import { runBounded } from "../adapters/local/process-runner.js";
 import type { ExecutionEnvelope } from "../application/claim-work.js";
 import { assertMilestoneWithinPolicy } from "../domain/policy.js";
 import { DomainError } from "../domain/errors.js";
+import {
+  createExecutionDeadline,
+  remainingExecutionMilliseconds,
+} from "../domain/deadline.js";
 import { parseApprovedCommand } from "../domain/execution.js";
 import { digestCanonical } from "../domain/identity.js";
 import {
@@ -31,6 +35,7 @@ export interface LocalExecutionRuntime {
   readonly expectedRunnerUser: string;
   readonly sourceEnvironment: NodeJS.ProcessEnv;
   readonly currentUser?: () => { username: string; uid: number };
+  readonly now?: () => number;
 }
 
 export interface PreparedExecution {
@@ -38,7 +43,7 @@ export interface PreparedExecution {
   promptFile: string;
   executorSchemaFile: string;
   reviewSchemaFile: string;
-  timeoutSeconds: number;
+  deadlineEpochMs: number;
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -183,6 +188,13 @@ export async function prepareExecution(
 ): Promise<PreparedExecution> {
   if (!input.enabled) throw new DomainError("POLICY_DISABLED", "execution kill switch");
   const envelope = parseExecutionEnvelopePayload(input.payloadB64, input.issueNumber);
+  const now = runtime.now ?? Date.now;
+  const timeoutSeconds =
+    Math.min(
+      envelope.contract.limits.timeout_minutes,
+      envelope.policy.limits.timeout_minutes,
+    ) * 60;
+  const deadlineEpochMs = createExecutionDeadline(now(), timeoutSeconds);
   assertNetworkPolicyEnforceable(envelope.policy.network.bootstrap);
   const paths = executionPaths(runtime, envelope.contract.work_id);
   const sourceRepository = await realpath(paths.sourceRepository);
@@ -245,7 +257,7 @@ export async function prepareExecution(
         ],
         cwd: workspace.path,
         env: environment,
-        timeoutMs: 10_000,
+        timeoutMs: Math.min(10_000, remainingExecutionMilliseconds(deadlineEpochMs, now())),
         outputLimitBytes: 1_024,
       });
       if (probe.status !== "fail") {
@@ -257,7 +269,7 @@ export async function prepareExecution(
       args: [...sandboxPrefix, "bun", "--version"],
       cwd: workspace.path,
       env: environment,
-      timeoutMs: 10_000,
+      timeoutMs: Math.min(10_000, remainingExecutionMilliseconds(deadlineEpochMs, now())),
       outputLimitBytes: 1_024,
     });
     if (bunVersion.status !== "pass" || bunVersion.stdout.trim() !== "1.3.8") {
@@ -268,11 +280,7 @@ export async function prepareExecution(
       args: [...sandboxPrefix, bootstrap.command, ...bootstrap.args],
       cwd: workspace.path,
       env: environment,
-      timeoutMs:
-        Math.min(
-          envelope.contract.limits.timeout_minutes,
-          envelope.policy.limits.timeout_minutes,
-        ) * 60_000,
+      timeoutMs: remainingExecutionMilliseconds(deadlineEpochMs, now()),
       outputLimitBytes: 1024 * 1024,
     });
     if (result.status !== "pass") {
@@ -295,11 +303,7 @@ export async function prepareExecution(
       promptFile: paths.promptFile,
       executorSchemaFile: await schemaPath(runtime.actionPath, "executor-output.schema.json"),
       reviewSchemaFile: await schemaPath(runtime.actionPath, "result-review.schema.json"),
-      timeoutSeconds:
-        Math.min(
-          envelope.contract.limits.timeout_minutes,
-          envelope.policy.limits.timeout_minutes,
-        ) * 60,
+      deadlineEpochMs,
     };
   } catch (error) {
     const { removeExecutionWorkspace } = await import("../adapters/local/workspace.js");

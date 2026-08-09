@@ -116,6 +116,42 @@ it("does not treat queued Mac jobs as runner liveness", async () => {
   expect(uploads).toEqual([]);
 });
 
+it("keeps watching through the full legal execute and review window", async () => {
+  let poll = 0;
+  const result = await monitorHeartbeat(
+    {
+      owner: "acme",
+      repo: "private",
+      runId: "10",
+      issueNumber: 7,
+      attempt: 1,
+      watchJobs: ["execute", "review"],
+    },
+    {
+      listJobs: () => {
+        poll += 1;
+        return Promise.resolve(
+          poll < 23
+            ? [
+                { name: "execute", status: "in_progress" },
+                { name: "review", status: "queued" },
+              ]
+            : [
+                { name: "execute", status: "completed" },
+                { name: "review", status: "completed" },
+              ],
+        );
+      },
+      upload: () => Promise.resolve(),
+      now: () => new Date("2026-08-08T10:00:00Z"),
+      sleep: async () => {},
+      intervalMs: 300_000,
+    },
+  );
+
+  expect(result).toEqual({ status: "stopped", polls: 23 });
+});
+
 it("writes one-line heartbeat JSON only under runner temp before upload", async () => {
   const runnerTemp = await mkdtemp(join(tmpdir(), "opc-heartbeat-uploader-"));
   const calls: { name: string; files: string[]; root: string }[] = [];

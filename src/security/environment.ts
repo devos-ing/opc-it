@@ -8,6 +8,14 @@ const forbiddenCredentialVariables = new Set([
   "CODEX_HOME",
 ]);
 
+function isForbiddenCredentialVariable(key: string): boolean {
+  return (
+    forbiddenCredentialVariables.has(key) ||
+    /^(?:ACTIONS|GITHUB|OPENAI|CODEX)_/.test(key) ||
+    /(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|API_KEY)/.test(key)
+  );
+}
+
 export function buildChildEnvironment(
   source: NodeJS.ProcessEnv,
   allowlist: readonly string[],
@@ -18,7 +26,7 @@ export function buildChildEnvironment(
     TMPDIR: source.TMPDIR ?? tmpdir(),
   };
   for (const key of allowlist) {
-    if (forbiddenCredentialVariables.has(key)) continue;
+    if (isForbiddenCredentialVariable(key)) continue;
     const value = source[key];
     if (value !== undefined) environment[key] = value;
   }

@@ -85,6 +85,19 @@ export class GitHubStateStore implements ClaimPort {
     return this.issues.loadWorkIssue(issueNumber);
   }
 
+  private async loadTrustedState(issueNumber: number): Promise<WorkState | undefined> {
+    const comments = await this.octokit.paginate(
+      this.octokit.rest.issues.listComments,
+      {
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: issueNumber,
+        per_page: 100,
+      },
+    );
+    return stateAfterTransition(trustedTransitionRecords(comments).at(-1));
+  }
+
   async loadIssueState(issueNumber: number): Promise<{
     readonly state: WorkState;
     readonly attempt: 1 | 2 | 3;
@@ -96,7 +109,7 @@ export class GitHubStateStore implements ClaimPort {
     });
     const labels = issueLabels(issue.labels);
     return {
-      state: workStateFromLabels(labels),
+      state: (await this.loadTrustedState(issueNumber)) ?? workStateFromLabels(labels),
       attempt: attemptFromLabels(labels),
     };
   }
@@ -130,31 +143,10 @@ export class GitHubStateStore implements ClaimPort {
       state: "open",
       per_page: 100,
     });
-    const activeIssues = issues.flatMap((issue) => {
-      try {
-        const state = workStateFromLabels(issueLabels(issue.labels));
-        return activeStates.has(state) ? [{ number: issue.number, state }] : [];
-      } catch (error) {
-        if (error instanceof DomainError) return [];
-        throw error;
-      }
-    });
     const recordedStates = await Promise.all(
-      activeIssues.map(async (issue) => {
-        const comments = await this.octokit.paginate(
-          this.octokit.rest.issues.listComments,
-          {
-            owner: this.owner,
-            repo: this.repo,
-            issue_number: issue.number,
-            per_page: 100,
-          },
-        );
-        const records = trustedTransitionRecords(comments);
-        return { current: issue.state, recorded: stateAfterTransition(records.at(-1)) };
-      }),
+      issues.map((issue) => this.loadTrustedState(issue.number)),
     );
-    return recordedStates.some((state) => state.current === state.recorded);
+    return recordedStates.some((state) => state !== undefined && activeStates.has(state));
   }
 
   async listEligibleWork(): Promise<readonly WorkIssueRecord[]> {
@@ -219,7 +211,11 @@ export class GitHubStateStore implements ClaimPort {
       issue_number: command.issueNumber,
     });
     const labels = issueLabels(issue.labels);
-    const previous = workStateFromLabels(labels);
+    const labelState = workStateFromLabels(labels);
+    const previous =
+      labelState === command.expected
+        ? labelState
+        : ((await this.loadTrustedState(command.issueNumber)) ?? labelState);
     if (previous !== command.expected) {
       return { previous, current: previous, changed: false };
     }

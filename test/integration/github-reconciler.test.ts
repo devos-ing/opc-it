@@ -232,6 +232,38 @@ it("ignores a relabeled claim after a later trusted transition ended it", async 
   expect(api.isDone()).toBe(true);
 });
 
+it("reconciles a trusted claim even when its mutable label was changed", async () => {
+  const api = createGitHubApi([
+    {
+      path: "/repos/acme/app/issues?state=open&per_page=100",
+      response: [{ number: 7, labels: [{ name: "opc:ready" }] }],
+    },
+    {
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment("github-actions[bot]", "123", "2026-08-08T09:00:00Z")],
+    },
+    {
+      path: "/repos/acme/app/actions/runs/123",
+      response: { conclusion: null },
+    },
+    {
+      path: "/repos/acme/app/actions/runs/123/artifacts?per_page=100",
+      response: { artifacts: [] },
+    },
+  ]);
+  const reconciler = new GitHubReconciler(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    "acme",
+  );
+
+  expect(await reconciler.listActiveClaims()).toMatchObject([
+    { issueNumber: 7, runId: "123", state: "claimed" },
+  ]);
+  expect(api.isDone()).toBe(true);
+});
+
 it("cancels the stale workflow run after its state is released", async () => {
   const api = createGitHubApi([
     {

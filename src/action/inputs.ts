@@ -14,6 +14,7 @@ export const actionCommands = [
   "prepare-review",
   "decide-result",
   "run-codex",
+  "report-run-failure",
 ] as const;
 
 export type ActionCommand = (typeof actionCommands)[number];
@@ -34,6 +35,9 @@ export interface ActionInputs {
   readonly outputFile?: string;
   readonly schemaFile?: string;
   readonly timeoutSeconds?: number;
+  readonly deadlineEpochMs?: number;
+  readonly codexOutcome?: "completed" | "work-failure" | "run-incident";
+  readonly reportedOutcome?: "execution" | "review" | "infrastructure";
 }
 
 function isActionCommand(value: unknown): value is ActionCommand {
@@ -72,6 +76,16 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires issue and payload`);
   }
   const inputFile = raw.inputFile;
+  const codexOutcome =
+    raw.codexOutcome === "completed" ||
+    raw.codexOutcome === "work-failure" ||
+    raw.codexOutcome === "run-incident"
+      ? raw.codexOutcome
+      : undefined;
+  const deadlineEpochMs =
+    raw.deadlineEpochMs === undefined ? undefined : Number(raw.deadlineEpochMs);
+  const validDeadline =
+    deadlineEpochMs !== undefined && Number.isSafeInteger(deadlineEpochMs) && deadlineEpochMs > 0;
   if (
     (raw.command === "finalize-execution" ||
       raw.command === "prepare-review" ||
@@ -79,6 +93,9 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     !inputFile
   ) {
     throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires input-file`);
+  }
+  if (raw.command === "finalize-execution" && (!codexOutcome || !validDeadline)) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "finalize-execution outcome and deadline");
   }
   const artifactSha256 = raw.artifactSha256;
   if (
@@ -99,18 +116,13 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
   }
   const enabled = raw.enabled === undefined ? undefined : raw.enabled === "true";
   if (
-    raw.command === "prepare-execution" &&
+    (raw.command === "prepare-execution" || raw.command === "complete-run") &&
     (raw.enabled !== "true" || enabled !== true)
   ) {
     throw new DomainError("POLICY_DISABLED", "execution kill switch");
   }
   const timeoutSeconds =
     raw.timeoutSeconds === undefined ? undefined : Number(raw.timeoutSeconds);
-  const validCodexTimeout =
-    timeoutSeconds !== undefined &&
-    Number.isInteger(timeoutSeconds) &&
-    timeoutSeconds >= 1 &&
-    timeoutSeconds <= 5_400;
   if (
     raw.command === "run-codex" &&
     ((permissionProfile !== "opc-executor" && permissionProfile !== "opc-reviewer") ||
@@ -118,9 +130,20 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
       !raw.promptFile ||
       !raw.outputFile ||
       !raw.schemaFile ||
-      !validCodexTimeout)
+      (permissionProfile === "opc-executor" && (!validDeadline || timeoutSeconds !== undefined)) ||
+      (permissionProfile === "opc-reviewer" &&
+        (timeoutSeconds !== 900 || deadlineEpochMs !== undefined)))
   ) {
     throw new DomainError("INVALID_EXECUTION_INPUT", "run-codex inputs");
+  }
+  const reportedOutcome =
+    raw.reportedOutcome === "execution" ||
+    raw.reportedOutcome === "review" ||
+    raw.reportedOutcome === "infrastructure"
+      ? raw.reportedOutcome
+      : undefined;
+  if (raw.command === "report-run-failure" && !reportedOutcome) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "report-run-failure outcome");
   }
 
   return {
@@ -143,5 +166,8 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     ...(raw.outputFile ? { outputFile: raw.outputFile } : {}),
     ...(raw.schemaFile ? { schemaFile: raw.schemaFile } : {}),
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+    ...(deadlineEpochMs === undefined ? {} : { deadlineEpochMs }),
+    ...(codexOutcome === undefined ? {} : { codexOutcome }),
+    ...(reportedOutcome === undefined ? {} : { reportedOutcome }),
   };
 }
