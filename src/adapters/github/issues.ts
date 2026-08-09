@@ -22,6 +22,26 @@ const stateLabels = new Map<string, WorkState>([
   ["opc:delivered", "delivered"],
 ]);
 
+export function workStateFromLabels(labels: readonly string[]): WorkState {
+  const states = labels.flatMap((label) => {
+    const state = stateLabels.get(label);
+    return state ? [state] : [];
+  });
+  const state = states[0];
+  if (states.length !== 1 || state === undefined) {
+    throw new DomainError("CONTRADICTORY_STATE_LABELS", labels.join(","));
+  }
+  return state;
+}
+
+export function isWorkStateLabel(label: string): boolean {
+  return stateLabels.has(label);
+}
+
+export function labelForWorkState(state: WorkState): string {
+  return `opc:${state}`;
+}
+
 function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
   if (labels.includes("opc:attempt-3")) return 3;
   if (labels.includes("opc:attempt-2")) return 2;
@@ -149,14 +169,7 @@ export class GitHubIssues {
     const labels = issue.labels
       .map((label) => (typeof label === "string" ? label : label.name))
       .filter((label): label is string => Boolean(label));
-    const states = labels.flatMap((label) => {
-      const state = stateLabels.get(label);
-      return state ? [state] : [];
-    });
-    const state = states[0];
-    if (states.length !== 1 || state === undefined) {
-      throw new DomainError("CONTRADICTORY_STATE_LABELS", labels.join(","));
-    }
+    const state = workStateFromLabels(labels);
 
     const contract = parseIssueContractYaml(extractContractBlock(body));
     const rootIssueNumber = await this.rootIssueNumber(contract, number);
