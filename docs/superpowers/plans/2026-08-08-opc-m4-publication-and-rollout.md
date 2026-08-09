@@ -6,7 +6,7 @@
 
 **Architecture:** A GitHub-hosted publisher downloads the reviewed artifact, rechecks all approval and drift conditions, verifies every hash and path, and writes blobs/tree/commit/ref through the Git Data API. It never checks out or executes Target Repository code. Separate lifecycle handling observes Delivery Pull Request closure, while deterministic template rendering and staged runbooks constrain onboarding to one private repository at a time.
 
-**Tech Stack:** Node.js 24, TypeScript, Vitest, Octokit Git Data and Pull Requests APIs, Nock, GitHub reusable workflows, GitHub repository variables, and private sandbox repositories.
+**Tech Stack:** Bun 1.3, TypeScript, Bun test, Octokit Git Data and Pull Requests APIs, Nock, the node24-compatible bundled OPC Action, GitHub reusable workflows, GitHub repository variables, and private sandbox repositories.
 
 ---
 
@@ -24,7 +24,7 @@
 
 ```ts
 // test/integration/verify-publication.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { verifyPublication } from "../../src/application/verify-publication.js";
 import { addSymlinkMode, addTraversalPath, changeApprovalDigest, changeBaseSha, changeReviewToFail, mutatedInput, tamperBundleIndex, tamperChangedFile, validInput } from "../fixtures/publication-fixtures.js";
 
@@ -141,8 +141,8 @@ Extend the Action command union with `publish` and `complete-run`, build and com
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/verify-publication.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/verify-publication.test.ts
+rtk bun run typecheck
 ```
 
 Expected: the valid fixture returns one immutable entry; every mutation fails before any GitHub adapter is called.
@@ -167,7 +167,7 @@ rtk git commit -m "feat: verify reviewed artifacts before publishing"
 // test/integration/publisher.test.ts
 import nock from "nock";
 import { Octokit } from "@octokit/rest";
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { GitHubPublisher } from "../../src/adapters/github/publisher.js";
 import { validVerifiedPublication } from "../fixtures/publisher.js";
 
@@ -239,8 +239,8 @@ Test `sha: null` for deletions, mode `100755` preservation, blob failure before 
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/publisher.test.ts test/contract/publisher-boundary.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/publisher.test.ts test/contract/publisher-boundary.test.ts
+rtk bun run typecheck
 ```
 
 Expected: the API sequence and negative cases pass; the dependency test proves no repository-controlled command can run in publisher code.
@@ -261,7 +261,7 @@ rtk git commit -m "feat: publish verified files through Git data APIs"
 
 ```ts
 // test/integration/publication-preconditions.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { checkPublicationPreconditions } from "../../src/application/publication-preconditions.js";
 
 const expected = { baseSha: "a".repeat(40), policySha: `sha256:${"b".repeat(64)}`, approvalDigest: `sha256:${"c".repeat(64)}` };
@@ -307,8 +307,8 @@ export async function loadRepositorySnapshot(input: { octokit: Octokit; owner: s
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/publication-preconditions.test.ts test/integration/publisher.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/publication-preconditions.test.ts test/integration/publisher.test.ts
+rtk bun run typecheck
 ```
 
 Expected: every drift and replay case makes zero unexpected GitHub write calls.
@@ -386,7 +386,7 @@ Extend `action.yml` with the four typed completion inputs shown above. They are 
 
 ```ts
 // test/acceptance/recovery-chain.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { completeRun } from "../../src/commands/complete-run.js";
 import { failedAttempt, fakeControlPort, infrastructureIncident, ownerCancellation } from "../fixtures/control-port.js";
 
@@ -423,14 +423,14 @@ export function ownerCancellation(attempt: 1 | 2 | 3): CompletedRun { return { k
 Run:
 
 ```bash
-rtk pnpm vitest run test/acceptance/recovery-chain.test.ts test/integration/publisher.test.ts
-rtk pnpm typecheck
-rtk pnpm build
+rtk bun test test/acceptance/recovery-chain.test.ts test/integration/publisher.test.ts
+rtk bun run typecheck
+rtk bun run build
 rtk git add action.yml src/action src/commands/publish.ts src/commands/complete-run.ts test/contract/publication-workflow.test.ts test/acceptance/recovery-chain.test.ts test/fixtures/control-port.ts dist
 rtk git commit -m "feat: package verified publication and recovery"
 rtk git rev-parse HEAD
-rtk node scripts/render-control.mjs
-rtk pnpm vitest run test/contract/publication-workflow.test.ts test/contract/workflows.test.ts
+rtk bun scripts/render-control.ts
+rtk bun test test/contract/publication-workflow.test.ts test/contract/workflows.test.ts
 rtk git add .github/workflows/reusable-opc.yml templates/control/reusable-opc.yml
 rtk git commit -m "feat: pin verified publication workflow"
 ```
@@ -452,7 +452,7 @@ Expected: both commits succeed; the rendered workflow is permission-separated; r
 
 ```ts
 // test/integration/delivery-lifecycle.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { completeDelivery } from "../../src/application/complete-delivery.js";
 import { deliveryBody, fakeDeliveryPort } from "../fixtures/delivery-port.js";
 
@@ -517,8 +517,8 @@ The action reloads the Pull Request through GitHub API, verifies the head prefix
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/delivery-lifecycle.test.ts test/contract/workflows.test.ts
-rtk pnpm build
+rtk bun test test/integration/delivery-lifecycle.test.ts test/contract/workflows.test.ts
+rtk bun run build
 ```
 
 Expected: merged and unmerged cases pass; foreign PRs, edited markers, forks, and already-completed events are safe no-ops.
@@ -573,7 +573,7 @@ Validate `control_owner` and `approver_login` against GitHub login syntax, both 
 
 ```ts
 // test/acceptance/onboarding.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { renderTargetRepository } from "../../src/application/render-target.js";
 import { validTemplateValues } from "../fixtures/template-values.js";
 
@@ -617,9 +617,9 @@ At the start of this task, run `rtk git rev-parse HEAD` to record the Task 5 lif
 Run:
 
 ```bash
-rtk pnpm vitest run test/acceptance/onboarding.test.ts test/contract/workflows.test.ts
-rtk pnpm typecheck
-rtk pnpm build
+rtk bun test test/acceptance/onboarding.test.ts test/contract/workflows.test.ts
+rtk bun run typecheck
+rtk bun run build
 ```
 
 Expected: all assets are pinned to a 40-character Control Repository SHA; preview writes only its output directory; unsafe visibility, trust domain, policy, network, or token inputs fail closed.
@@ -672,10 +672,10 @@ Expected: only verified success writes a branch/PR; merge closes the Work chain;
 Run:
 
 ```bash
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 ```
 
 Expected: all commands exit `0`; every design acceptance row has a passing automated test and a linked sandbox run or a documented local-only proof.
@@ -703,7 +703,7 @@ rtk git commit -m "test: prove controlled unattended publishing"
 - same GitHub Trust Domain and non-fork visibility;
 - approver login and current default branch SHA;
 - canonical Repository Policy digest;
-- offline bootstrap cache proof and network enforcement result;
+- prewarmed Bun cache proof and OS-enforced network-denied bootstrap result;
 - Mac runner label and dedicated OS-account isolation proof;
 - local Codex CLI absolute path, exact version, binary digest, and `codex login status` proof showing ChatGPT mode without recording credential material;
 - host-owned Codex home owner/mode proof plus executor profile, reviewer profile, and managed-requirements digests; never record or hash `auth.json` contents;
@@ -733,7 +733,7 @@ Replace every `<measured-during-M3>` marker with the actual lowercase `sha256:<6
 
 - [ ] **Step 3: Add final CI release checks**
 
-`.github/workflows/ci.yml` runs typecheck, lint, all tests, reproducible build, generated-bundle diff, workflow contract tests, template-token scan, secret scan, and publisher dependency-boundary test on Node 24. The release job has `contents: read` only and uploads the acceptance report as an artifact.
+`.github/workflows/ci.yml` pins Bun `1.3.8` and runs typecheck, lint, all tests, reproducible build, generated-bundle diff, workflow contract tests, template-token scan, secret scan, and publisher dependency-boundary tests. It separately smoke-tests `dist/action/index.cjs` on GitHub's Node 24 host. The release job has `contents: read` only and uploads the acceptance report as an artifact.
 
 - [ ] **Step 4: Execute one owner-approved real milestone**
 
@@ -746,11 +746,11 @@ Expected: a successful run creates one ready Delivery Pull Request linked to the
 Run:
 
 ```bash
-rtk pnpm install --frozen-lockfile
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun install --frozen-lockfile
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 rtk git diff --exit-code -- dist
 ```
 

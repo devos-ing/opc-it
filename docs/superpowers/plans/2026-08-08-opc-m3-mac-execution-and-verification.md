@@ -6,7 +6,7 @@
 
 **Architecture:** The reusable workflow hands an immutable execution envelope to a self-hosted macOS runner. OPC creates a disposable worktree at the approved base, runs fixed bootstrap and evidence commands through a bounded process adapter, and directly invokes the pinned Codex CLI already installed on the Mac mini. The CLI reuses the dedicated runner user's host-side ChatGPT subscription login. The implementation route uses GPT-5.6 Luna at high effort, verifies every changed file, and uploads a hash-addressed bundle. A separate job downloads only the approved review inputs and starts a fresh, ephemeral, read-only GPT-5.6 Sol session at xhigh effort whose structured output is checked by the deterministic Evidence Gate.
 
-**Tech Stack:** Node.js 24, TypeScript, Vitest, `execa`, `shell-quote`, `@actions/artifact`, Git worktrees, GitHub reusable workflows, and a pinned local Codex CLI with host-managed ChatGPT authentication and permission profiles.
+**Tech Stack:** Bun 1.3, TypeScript, Bun test, `execa`, `shell-quote`, `@actions/artifact`, Git worktrees, GitHub reusable workflows, the node24-compatible bundled OPC Action, and a pinned local Codex CLI with host-managed ChatGPT authentication and permission profiles.
 
 ---
 
@@ -14,18 +14,18 @@
 
 **Files:**
 - Modify: `package.json`
-- Modify: `pnpm-lock.yaml`
+- Modify: `bun.lock`
 - Create: `src/adapters/local/workspace.ts`
 - Create: `test/integration/workspace.test.ts`
 - Modify: `src/domain/errors.ts`
 
 - [ ] **Step 1: Install the M3 local-execution dependencies**
 
-Run: `rtk pnpm add execa @actions/artifact shell-quote`
+Run: `rtk bun add execa @actions/artifact shell-quote`
 
-Run: `rtk pnpm add -D @types/shell-quote`
+Run: `rtk bun add -d @types/shell-quote`
 
-Expected: both commands exit `0`; exact resolved versions are recorded in `pnpm-lock.yaml`.
+Expected: both commands exit `0`; exact resolved versions are recorded in `bun.lock`.
 
 - [ ] **Step 2: Write the worktree lifecycle test**
 
@@ -35,7 +35,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { createExecutionWorkspace, removeExecutionWorkspace } from "../../src/adapters/local/workspace.js";
 
 it("creates a detached worktree at the approved base and removes only that worktree", async () => {
@@ -65,7 +65,7 @@ it("refuses cleanup when the path is not a child of the configured worktree root
 
 - [ ] **Step 3: Run the focused test and verify it fails**
 
-Run: `rtk pnpm vitest run test/integration/workspace.test.ts`
+Run: `rtk bun test test/integration/workspace.test.ts`
 
 Expected: FAIL because `workspace.ts` does not exist.
 
@@ -111,14 +111,14 @@ The workflow must pass a job-local root such as `${RUNNER_TEMP}/opc-worktrees/${
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/workspace.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/workspace.test.ts
+rtk bun run typecheck
 ```
 
 Expected: both tests pass; `git worktree list` in the fixture repository contains only the main test checkout after cleanup.
 
 ```bash
-rtk git add src/adapters/local/workspace.ts src/domain/errors.ts test/integration/workspace.test.ts package.json pnpm-lock.yaml
+rtk git add src/adapters/local/workspace.ts src/domain/errors.ts test/integration/workspace.test.ts package.json bun.lock
 rtk git commit -m "feat: isolate Mac execution workspaces"
 ```
 
@@ -137,7 +137,7 @@ rtk git commit -m "feat: isolate Mac execution workspaces"
 
 ```ts
 // test/unit/environment.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { buildChildEnvironment, assertNetworkPolicyEnforceable } from "../../src/security/environment.js";
 
 it("passes only fixed runtime values and allowlisted variables", () => {
@@ -156,16 +156,16 @@ it("fails onboarding for a nonempty egress allowlist in v1", () => {
 
 ```ts
 // test/integration/process-runner.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { runBounded } from "../../src/adapters/local/process-runner.js";
 
 it("kills a command at its deadline", async () => {
-  const result = await runBounded({ command: "node", args: ["-e", "setTimeout(() => {}, 5000)"], cwd: process.cwd(), env: {}, timeoutMs: 50, outputLimitBytes: 1024 });
+  const result = await runBounded({ command: "bun", args: ["-e", "setTimeout(() => {}, 5000)"], cwd: process.cwd(), env: {}, timeoutMs: 50, outputLimitBytes: 1024 });
   expect(result).toMatchObject({ status: "timeout", exitCode: null });
 });
 
 it("truncates and marks output larger than the ceiling", async () => {
-  const result = await runBounded({ command: "node", args: ["-e", "process.stdout.write('x'.repeat(4096))"], cwd: process.cwd(), env: {}, timeoutMs: 1000, outputLimitBytes: 128 });
+  const result = await runBounded({ command: "bun", args: ["-e", "process.stdout.write('x'.repeat(4096))"], cwd: process.cwd(), env: {}, timeoutMs: 1000, outputLimitBytes: 128 });
   expect(result.status).toBe("output-limit");
   expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(128);
 });
@@ -173,7 +173,7 @@ it("truncates and marks output larger than the ceiling", async () => {
 
 ```ts
 // test/unit/redact.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { redact } from "../../src/security/redact.js";
 
 it("removes explicit, GitHub, OpenAI, and bearer credentials", () => {
@@ -288,14 +288,14 @@ The bootstrap and Evidence command callers use `parseApprovedCommand` and `runBo
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/environment.test.ts test/unit/redact.test.ts test/integration/process-runner.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/environment.test.ts test/unit/redact.test.ts test/integration/process-runner.test.ts
+rtk bun run typecheck
 ```
 
 Expected: secrets are absent, timeouts terminate, output is bounded, and nonempty network allowlists fail closed.
 
 ```bash
-rtk git add src/adapters/local/process-runner.ts src/security/environment.ts src/security/redact.ts src/domain/execution.ts test/unit/environment.test.ts test/unit/redact.test.ts test/integration/process-runner.test.ts package.json pnpm-lock.yaml
+rtk git add src/adapters/local/process-runner.ts src/security/environment.ts src/security/redact.ts src/domain/execution.ts test/unit/environment.test.ts test/unit/redact.test.ts test/integration/process-runner.test.ts package.json bun.lock
 rtk git commit -m "feat: bound repository-controlled commands"
 ```
 
@@ -312,7 +312,7 @@ rtk git commit -m "feat: bound repository-controlled commands"
 
 ```ts
 // test/unit/prompts.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { buildExecutorPrompt } from "../../src/prompts/executor.js";
 import { buildReviewerPrompt } from "../../src/prompts/reviewer.js";
 
@@ -369,8 +369,8 @@ export function buildReviewerPrompt(input: { contractJson: string; diff: string;
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/prompts.test.ts test/contract/results.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/prompts.test.ts test/contract/results.test.ts
+rtk bun run typecheck
 ```
 
 Expected: prompt snapshots are stable and both output schemas reject additional properties.
@@ -395,7 +395,7 @@ rtk git commit -m "feat: freeze executor and reviewer contexts"
 
 ```ts
 // test/integration/change-collector.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { collectChanges } from "../../src/adapters/local/change-collector.js";
 import { createChangeFixture, createModeFixture } from "../fixtures/git-repository.js";
 
@@ -508,8 +508,8 @@ The bundle contains `contract.json`, `policy.json`, `context.json`, `diff.patch`
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/change-collector.test.ts test/integration/evidence-bundle.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/change-collector.test.ts test/integration/evidence-bundle.test.ts
+rtk bun run typecheck
 ```
 
 Expected: all regular-file cases pass; path traversal, symlink, submodule, forbidden path, digest mismatch, and 100 MB overflow fixtures fail closed.
@@ -532,7 +532,7 @@ rtk git commit -m "feat: produce content-addressed candidate bundles"
 
 ```ts
 // test/unit/heartbeat.test.ts
-import { expect, it, vi } from "vitest";
+import { expect, it, vi } from "bun:test";
 import { Heartbeat } from "../../src/adapters/actions/heartbeat.js";
 
 it("uploads immediately and every five minutes until stopped", async () => {
@@ -540,9 +540,9 @@ it("uploads immediately and every five minutes until stopped", async () => {
   const uploaded: string[] = [];
   const heartbeat = new Heartbeat(async name => { uploaded.push(name); }, () => new Date("2026-08-08T10:00:00Z"), 300_000);
   await heartbeat.start({ runId: "10", issueNumber: 7, attempt: 1 });
-  await vi.advanceTimersByTimeAsync(600_000);
+  vi.advanceTimersByTime(600_000);
   await heartbeat.stop();
-  await vi.advanceTimersByTimeAsync(300_000);
+  vi.advanceTimersByTime(300_000);
   expect(uploaded).toEqual(["opc-heartbeat-10-000001", "opc-heartbeat-10-000002", "opc-heartbeat-10-000003"]);
   vi.useRealTimers();
 });
@@ -600,15 +600,15 @@ The read-only Actions token is used only by this isolated control job. The execu
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/heartbeat.test.ts test/contract/heartbeat-boundary.test.ts
-rtk pnpm typecheck
-rtk pnpm build
+rtk bun test test/unit/heartbeat.test.ts test/contract/heartbeat-boundary.test.ts
+rtk bun run typecheck
+rtk bun run build
 ```
 
 Expected: exactly three artifacts are emitted by the fake clock; an adapter contract test proves the heartbeat command can call only Actions read endpoints and artifact upload, never repository write endpoints.
 
 ```bash
-rtk git add src/adapters/actions/heartbeat.ts src/commands/heartbeat.ts src/cli/main.ts test/unit/heartbeat.test.ts test/contract/heartbeat-boundary.test.ts dist/cli.cjs package.json pnpm-lock.yaml
+rtk git add src/adapters/actions/heartbeat.ts src/commands/heartbeat.ts src/cli/main.ts test/unit/heartbeat.test.ts test/contract/heartbeat-boundary.test.ts dist/cli.js package.json bun.lock
 rtk git commit -m "feat: publish credential-free claim heartbeats"
 ```
 
@@ -681,7 +681,7 @@ execute:
         path: target-source
         persist-credentials: false
         fetch-depth: 0
-    - name: Prepare workspace and run offline bootstrap
+    - name: Prepare workspace and run network-denied bootstrap
       id: prepare
       uses: "{{control_owner}}/OPC@{{control_action_sha}}"
       with:
@@ -740,7 +740,7 @@ execute:
 
 Extend `action.yml` with optional `payload-b64`, `input-file`, `codex-version`, and `permission-profile` inputs plus `codex-bin`, `workspace`, `prompt-file`, `executor-schema-file`, `review-schema-file`, `bundle-ready`, and `bundle-directory` outputs. Extend `ActionCommand` with `verify-codex-runner`, `prepare-execution`, `finalize-execution`, and `heartbeat`. The schema outputs are absolute paths inside the downloaded, commit-pinned private OPC Action. Local commands reject any supplied GitHub client and GitHub commands reject a missing one.
 
-`prepare-execution` revalidates global/repository kill switches through values captured by the control job, verifies base and policy digests, creates the worktree, runs the offline bootstrap with no GitHub, API-key, or Codex-home credentials, and writes the prompt to a mode `0600` file. The private OPC Action receives no `github-token` in these local steps. `verify-codex-runner` inspects metadata and invokes `codex login status`, but emits only a validated binary path and non-sensitive pass/fail facts. `finalize-execution` removes the worktree after collecting the candidate; failure cleanup is idempotent.
+`prepare-execution` revalidates global/repository kill switches through values captured by the control job, verifies base and policy digests, creates the worktree, and runs `bun install --frozen-lockfile --ignore-scripts` with OS-enforced network deny and a prewarmed Bun cache. A cache miss fails closed. Bootstrap receives no GitHub, API-key, or Codex-home credentials, then writes the prompt to a mode `0600` file. The private OPC Action receives no `github-token` in these local steps. `verify-codex-runner` inspects metadata and invokes `codex login status`, but emits only a validated binary path and non-sensitive pass/fail facts. `finalize-execution` removes the worktree after collecting the candidate; failure cleanup is idempotent.
 
 Do not add any OpenAI/Codex entry to `workflow_call.secrets`. The rendered Target caller passes no model-provider secret. The Mac runner service already owns the persistent ChatGPT login outside the repository, and only the `codex` client can use it.
 
@@ -755,14 +755,14 @@ Build and commit the Action, record the new `control_action_sha`, render both `t
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/action-inputs.test.ts
-rtk pnpm typecheck
-rtk pnpm build
+rtk bun test test/unit/action-inputs.test.ts
+rtk bun run typecheck
+rtk bun run build
 rtk git add action.yml src/action/inputs.ts src/action/main.ts src/commands/verify-codex-runner.ts src/commands/prepare-execution.ts src/commands/finalize-execution.ts test/integration/codex-runner.test.ts test/contract/executor-workflow.test.ts dist
 rtk git commit -m "feat: package Mac execution commands"
 rtk git rev-parse HEAD
-rtk node scripts/render-control.mjs
-rtk pnpm vitest run test/contract/executor-workflow.test.ts test/contract/workflows.test.ts
+rtk bun scripts/render-control.ts
+rtk bun test test/contract/executor-workflow.test.ts test/contract/workflows.test.ts
 rtk git add .github/workflows/reusable-opc.yml templates/control/reusable-opc.yml
 rtk git commit -m "feat: pin the Mac executor workflow"
 ```
@@ -787,7 +787,7 @@ Expected: both commits succeed; workflow tests pass against the newly rendered A
 
 ```ts
 // test/acceptance/candidate-review.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { decideReviewedCandidate } from "../../src/commands/decide-result.js";
 import { failedEvidenceBundle, outsideScopeReview, reviewWithout, tamperedBundle, validBundle, validReview } from "../fixtures/candidate.js";
 
@@ -915,14 +915,14 @@ Add workflow tests that require a distinct job, a separate review workspace/prom
 Run:
 
 ```bash
-rtk pnpm vitest run test/acceptance/candidate-review.test.ts
-rtk pnpm typecheck
-rtk pnpm build
+rtk bun test test/acceptance/candidate-review.test.ts
+rtk bun run typecheck
+rtk bun run build
 rtk git add action.yml src/action src/commands/prepare-review.ts src/commands/decide-result.ts test/contract/reviewer-workflow.test.ts test/acceptance/candidate-review.test.ts test/fixtures/candidate.ts dist
 rtk git commit -m "feat: package independent result review"
 rtk git rev-parse HEAD
-rtk node scripts/render-control.mjs
-rtk pnpm vitest run test/contract/reviewer-workflow.test.ts test/contract/workflows.test.ts
+rtk bun scripts/render-control.ts
+rtk bun test test/contract/reviewer-workflow.test.ts test/contract/workflows.test.ts
 rtk git add .github/workflows/reusable-opc.yml templates/control/reusable-opc.yml
 rtk git commit -m "feat: pin the independent review workflow"
 ```
@@ -965,12 +965,12 @@ rtk stat -f '%Su %Sp' /Users/opc-runner
 rtk launchctl print gui/$(id -u opc-runner)
 rtk git --version
 rtk node --version
-rtk pnpm --version
+rtk bun --version
 rtk codex --version
 rtk codex login status
 ```
 
-Expected: the runner service executes as `opc-runner`, has no admin membership, no developer signing keys, no personal GitHub/SSH credentials, and a mode `0700` runner/worktree root. `codex --version` exactly matches the release manifest and `codex login status` reports ChatGPT authentication. The host-owned Codex home is outside runner/worktree roots; its directory is mode `0700`, credential/config files are mode `0600`, `cli_auth_credentials_store = "file"`, and managed requirements permit only `opc-executor` and `opc-reviewer`. The GitHub runner is registered only to the private sandbox with labels `self-hosted,macOS,ARM64,opc` and job concurrency one. Package caches are prewarmed interactively, then the dry run uses offline bootstrap.
+Expected: the runner service executes as `opc-runner`, has no admin membership, no developer signing keys, no personal GitHub/SSH credentials, and a mode `0700` runner/worktree root. Bun is exactly `1.3.8`; `node --version` is checked only because the self-hosted runner executes the bundled GitHub Action through GitHub's `node24` compatibility host, while project install, test, build, CLI, and worker execution remain on Bun. `codex --version` exactly matches the release manifest and `codex login status` reports ChatGPT authentication. The host-owned Codex home is outside runner/worktree roots; its directory is mode `0700`, credential/config files are mode `0600`, `cli_auth_credentials_store = "file"`, and managed requirements permit only `opc-executor` and `opc-reviewer`. The GitHub runner is registered only to the private sandbox with labels `self-hosted,macOS,ARM64,opc` and job concurrency one. Bun's cache is prewarmed interactively, then the dry run performs bootstrap under OS-enforced network deny; a cache miss fails closed.
 
 - [ ] **Step 3: Run the real private sandbox matrix**
 
@@ -983,10 +983,10 @@ Expected: success ends at verified Candidate Result; failure cases create the co
 Run:
 
 ```bash
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 ```
 
 Expected: every command exits `0`; the M3 sandbox evidence records Result Manifest hash, Evidence Bundle hash, Result Review, heartbeat timing, and zero repository writes.

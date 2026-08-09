@@ -6,7 +6,7 @@
 
 **Architecture:** GitHub Actions is the v1 scheduler and GitHub Issues are the durable state projection. A scheduler-independent TypeScript OPC CLI owns contracts and state transitions; GitHub-hosted control jobs claim, recover, and publish, while credential-limited Mac mini jobs execute and independently review Candidate Results.
 
-**Tech Stack:** Node.js 24, TypeScript 5, pnpm 10, Vitest, Ajv, `yaml`, `json-canonicalize`, `minimatch`, `shell-quote`, `execa`, `@actions/artifact`, Octokit, GitHub JavaScript Actions (`node24`), reusable GitHub workflows, and a pinned local Codex CLI on the Mac mini.
+**Tech Stack:** Bun 1.3, TypeScript 5, Bun test, Bun.build, Ajv, `yaml`, `json-canonicalize`, `minimatch`, `shell-quote`, `execa`, `@actions/artifact`, Octokit, GitHub JavaScript Actions (`node24` compatibility bundle only), reusable GitHub workflows, and a pinned local Codex CLI on the Mac mini.
 
 ---
 
@@ -43,12 +43,12 @@ Do not start M2 until M1 acceptance passes. Do not start M3 until the sandbox co
 ```text
 .
 ├── action.yml                         # Bundled OPC JavaScript Action entrypoint
-├── package.json                       # Node 24 package, scripts, CLI bin
-├── pnpm-lock.yaml                     # Reproducible dependency lock
+├── package.json                       # Bun package, scripts, CLI bin
+├── bun.lock                           # Reproducible dependency lock
 ├── tsconfig.json                      # Strict TypeScript configuration
-├── vitest.config.ts                   # Unit, contract, integration test config
 ├── scripts/
-│   └── build.mjs                      # Bundle action and CLI for Node 24
+│   ├── build.ts                       # Bun CLI plus node24 Action compatibility bundles
+│   └── render-control.ts              # Deterministic workflow template renderer
 ├── src/
 │   ├── action/main.ts                 # GitHub Action input/output adapter
 │   ├── cli/main.ts                    # Scheduler-independent CLI entrypoint
@@ -135,16 +135,16 @@ Later plans must reuse these names. If implementation proves an interface insuff
 Run all local commands through `rtk` in this repository:
 
 ```bash
-rtk pnpm install --frozen-lockfile
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun install --frozen-lockfile
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 ```
 
-Expected final result: every command exits `0`; Vitest reports no failed tests; `dist/action/index.cjs` and `dist/cli.cjs` are reproducibly generated.
+Expected final result: every command exits `0`; Bun test reports no failed tests; the Bun CLI at `dist/cli.js` and node24-compatible Action at `dist/action/index.cjs` are reproducibly generated.
 
-GitHub workflows themselves call `pnpm` directly because `rtk` is a local Codex workspace requirement, not a runtime dependency of Target Repositories.
+GitHub workflows call `bun` directly because `rtk` is a local Codex workspace requirement, not a runtime dependency of Target Repositories. Control and Target runners pin Bun `1.3.8`; only the bundled GitHub JavaScript Action executes under GitHub's `node24` host.
 
 ## Commit discipline
 

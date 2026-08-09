@@ -313,12 +313,12 @@ paths:
   forbidden: [.github/**, .env*, secrets/**]
 
 commands:
-  bootstrap: npm ci --offline --ignore-scripts
+  bootstrap: bun install --frozen-lockfile --ignore-scripts
   evidence:
     - id: unit-tests
-      run: npm test
+      run: bun test
     - id: build
-      run: npm run build
+      run: bun run build
 
 network:
   bootstrap:
@@ -329,6 +329,8 @@ network:
 
 environment_allowlist: [CI, NODE_ENV]
 ```
+
+Bun 本身不提供 `--offline` install flag。v1 通过预热 Bun cache 加 OS-enforced `network.bootstrap.mode: deny` 实现离线 bootstrap；cache miss 必须 fail closed，不能临时开放网络。
 
 Repository Policy 是权限上限。Milestone Contract 只能进一步收紧。缺失、无效或 `enabled: false` 的仓库不能进入队列。
 
@@ -648,6 +650,9 @@ planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 
 - [OpenAI Codex permissions](https://learn.chatgpt.com/docs/permissions)
 - [OpenAI Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 - [OpenAI model catalog](https://developers.openai.com/api/docs/models/all)
+- [Bun install CLI](https://bun.com/docs/cli/install)
+- [Bun test runner](https://bun.com/docs/cli/test)
+- [Bun bundler](https://bun.com/docs/bundler)
 - [GitHub Self-hosted runners reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 - [GitHub Adding self-hosted runners](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
 - [GitHub Reusing workflow configurations](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations)

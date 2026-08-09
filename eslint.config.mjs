@@ -3,7 +3,7 @@ import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
-  { ignores: [".getsuperpower/**", ".pnpm-store/**", "coverage/**", "dist/**", "schemas/**"] },
+  { ignores: [".getsuperpower/**", "coverage/**", "dist/**", "schemas/**"] },
   {
     files: ["**/*.ts"],
     extends: [js.configs.recommended, ...tseslint.configs.strictTypeChecked],
@@ -14,6 +14,5 @@ export default defineConfig(
   {
     files: ["**/*.mjs"],
     extends: [js.configs.recommended],
-    languageOptions: { globals: { process: "readonly" } },
   },
 );

@@ -4,9 +4,9 @@
 
 **Goal:** Connect the verified M1 domain core to a private GitHub sandbox so approved Work Issues can be discovered, atomically claimed, reconciled, and recovered without repository code execution.
 
-**Architecture:** A bundled Node 24 GitHub Action adapts Actions inputs to focused application use cases. Octokit adapters translate Issues, comments, labels, checks, and workflow dispatches into the M1 ports; repository-scoped workflow concurrency serializes claims, while domain guards remain authoritative.
+**Architecture:** Bun and TypeScript implement and test the control plane. Bun.build emits a bundled Node 24 compatibility artifact because GitHub JavaScript Actions require the `node24` host; that thin Action adapts inputs to focused application use cases. Octokit adapters translate Issues, comments, labels, checks, and workflow dispatches into the M1 ports; repository-scoped workflow concurrency serializes claims, while domain guards remain authoritative.
 
-**Tech Stack:** M1 stack plus `@actions/core`, `@actions/github`, `@octokit/rest`, `nock`, GitHub reusable workflows, and GitHub Issue forms.
+**Tech Stack:** M1 Bun/TypeScript stack plus `@actions/core`, `@actions/github`, `@octokit/rest`, `nock`, Bun.build's `node`/`cjs` output, GitHub reusable workflows, and GitHub Issue forms.
 
 ---
 
@@ -24,17 +24,17 @@
 Run:
 
 ```bash
-rtk pnpm add @actions/core@^1.11.0 @actions/github@^6.0.0 @octokit/rest@^22.0.0
-rtk pnpm add -D nock@^14.0.0
+rtk bun add @actions/core@^1.11.0 @actions/github@^6.0.0 @octokit/rest@^22.0.0
+rtk bun add -d nock@^14.0.0
 ```
 
-Expected: `package.json` and `pnpm-lock.yaml` change; install exits `0`.
+Expected: `package.json` and `bun.lock` change; install exits `0`.
 
 - [ ] **Step 2: Write failing Issue extraction tests**
 
 ```ts
 // test/unit/issue-parser.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { extractContractBlock } from "../../src/adapters/github/issue-parser.js";
 
 it("extracts exactly one opc-contract YAML block", () => {
@@ -105,14 +105,14 @@ export function extractContractBlock(body: string): string {
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/issue-parser.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/issue-parser.test.ts
+rtk bun run typecheck
 ```
 
 Expected: three tests pass.
 
 ```bash
-rtk git add package.json pnpm-lock.yaml src/application/ports.ts src/adapters/github/issue-parser.ts test/unit/issue-parser.test.ts test/fixtures/github/work-issue.md
+rtk git add package.json bun.lock src/application/ports.ts src/adapters/github/issue-parser.ts test/unit/issue-parser.test.ts test/fixtures/github/work-issue.md
 rtk git commit -m "feat: define GitHub control plane ports"
 ```
 
@@ -132,7 +132,7 @@ rtk git commit -m "feat: define GitHub control plane ports"
 ```ts
 // test/integration/github-issues.test.ts
 import nock from "nock";
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { Octokit } from "@octokit/rest";
 import { GitHubIssues } from "../../src/adapters/github/issues.js";
 
@@ -216,7 +216,7 @@ Define `issueFixture`, `approvalFixture`, `recoveryIssueFixture`, and `mockIssue
 // test/integration/queue-approved-plan.test.ts
 import nock from "nock";
 import { Octokit } from "@octokit/rest";
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { queueApprovedPlan } from "../../src/application/queue-approved-plan.js";
 import { GitHubPlanQueue } from "../../src/adapters/github/plan-queue.js";
 import { digestCanonical } from "../../src/domain/identity.js";
@@ -276,8 +276,8 @@ export async function queueApprovedPlan(input: QueueApprovedPlanInput, port: Pla
 Run:
 
 ```bash
-rtk pnpm vitest run test/integration/github-issues.test.ts test/integration/queue-approved-plan.test.ts
-rtk pnpm typecheck
+rtk bun test test/integration/github-issues.test.ts test/integration/queue-approved-plan.test.ts
+rtk bun run typecheck
 ```
 
 Expected: all success and hostile cases pass; `nock.isDone()` is true after each test.
@@ -300,7 +300,7 @@ rtk git commit -m "feat: load verified GitHub work issues"
 
 ```ts
 // test/unit/select-work.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { selectWork } from "../../src/application/select-work.js";
 
 const issue = (number: number, rootIssueNumber: number, attempt: number, createdAt: string) => ({ number, rootIssueNumber, attempt, createdAt, state: "ready" as const });
@@ -332,7 +332,7 @@ export function selectWork(items: readonly EligibleWork[]): EligibleWork | undef
 
 ```ts
 // test/integration/claim-work.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { claimNextWork } from "../../src/application/claim-work.js";
 
 it("returns one claim and one lost-race result for duplicate triggers", async () => {
@@ -380,7 +380,7 @@ export async function claimNextWork(port: GitHubPort, clock: Clock, input: { run
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `rtk pnpm vitest run test/unit/select-work.test.ts test/integration/claim-work.test.ts`
+Run: `rtk bun test test/unit/select-work.test.ts test/integration/claim-work.test.ts`
 
 Expected: recovery priority, FIFO, and duplicate-claim tests pass.
 
@@ -396,7 +396,8 @@ rtk git commit -m "feat: claim repository work atomically"
 - Create: `src/action/main.ts`
 - Create: `src/action/inputs.ts`
 - Create: `src/action/outputs.ts`
-- Modify: `scripts/build.mjs`
+- Modify: `package.json`
+- Create: `scripts/build.ts`
 - Create: `test/unit/action-inputs.test.ts`
 - Create: `test/integration/action-main.test.ts`
 
@@ -513,25 +514,48 @@ export function toActionOutputs(result: ActionCommandResult): Readonly<Record<st
 
 `runActionCommand` accepts the Octokit-compatible client interface returned above. The action checks out no Target Repository code and invokes no local process.
 
-- [ ] **Step 4: Extend the build**
+- [ ] **Step 4: Extend the Bun build**
 
-Add a second esbuild entry for `src/action/main.ts` with output `dist/action/index.cjs`, `platform: "node"`, `target: "node24"`, `format: "cjs"`, and `bundle: true`.
+Change the package `build` script to `bun run scripts/build.ts`, then create:
+
+```ts
+// scripts/build.ts
+const cli = await Bun.build({
+  entrypoints: ["src/cli/main.ts"],
+  outdir: "dist",
+  naming: "cli.js",
+  target: "bun",
+  format: "esm",
+});
+
+const action = await Bun.build({
+  entrypoints: ["src/action/main.ts"],
+  outdir: "dist/action",
+  naming: "index.cjs",
+  target: "node",
+  format: "cjs",
+});
+
+if (!cli.success || !action.success) throw new Error("OPC_BUILD_FAILED");
+```
+
+The project remains Bun-first. `target: "node"` exists only for the bundled artifact referenced by `action.yml` with `using: node24`; Target repositories never install dependencies to run that Action.
 
 - [ ] **Step 5: Verify the bundle and commit it**
 
 Run:
 
 ```bash
-rtk pnpm test
-rtk pnpm build
+rtk bun test
+rtk bun run build
 rtk node dist/action/index.cjs
 ```
 
 Expected: tests pass; build creates both bundles; direct invocation fails cleanly with a missing Actions input rather than a module error.
 
 ```bash
-rtk git add action.yml src/action scripts/build.mjs test/unit/action-inputs.test.ts test/integration/action-main.test.ts dist/action/index.cjs
-rtk git commit -m "feat: package OPC as a Node 24 action"
+rtk git add action.yml package.json src/action scripts/build.ts test/unit/action-inputs.test.ts test/integration/action-main.test.ts dist/action/index.cjs
+rtk git commit -m "feat: package OPC GitHub Action bundle"
 ```
 
 Record the resulting full commit SHA as the first `control_action_sha`. Private Target Repositories in the same Trust Domain consume this action through GitHub's private-action sharing mechanism; they never checkout the Control Repository with their repository token.
@@ -594,7 +618,7 @@ The adapter creates one unassigned Issue with `opc:recovery`, `opc:ready`, and t
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `rtk pnpm vitest run test/integration/reconcile.test.ts test/integration/recovery-issue.test.ts`
+Run: `rtk bun test test/integration/reconcile.test.ts test/integration/recovery-issue.test.ts`
 
 Expected: all time boundaries, dedupe, dispatch, owner-cancel, and 24-hour blocker cases pass.
 
@@ -608,7 +632,7 @@ rtk git commit -m "feat: reconcile claims and dispatch recovery"
 **Files:**
 - Create: `.github/workflows/reusable-opc.yml`
 - Create: `templates/control/reusable-opc.yml`
-- Create: `scripts/render-control.mjs`
+- Create: `scripts/render-control.ts`
 - Create: `templates/target/.github/workflows/opc.yml`
 - Create: `templates/target/.github/ISSUE_TEMPLATE/opc-work.yml`
 - Create: `templates/target/.codex-pipeline.yml`
@@ -696,8 +720,8 @@ Commit this YAML first as `templates/control/reusable-opc.yml`. At Task 6 start,
 
 This two-commit release avoids a self-referential SHA. The Target Repository downloads the pinned private Action and pinned reusable workflow through GitHub's same-owner/organization sharing mechanism; no cross-repository checkout, PAT, GitHub App, or long-lived credential is needed.
 
-```js
-// scripts/render-control.mjs
+```ts
+// scripts/render-control.ts
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
@@ -735,12 +759,12 @@ paths:
   writable: [src/**, tests/**, docs/**]
   forbidden: [.github/**, .env*, secrets/**]
 commands:
-  bootstrap: pnpm install --offline --ignore-scripts
+  bootstrap: bun install --frozen-lockfile --ignore-scripts
   evidence:
     - id: unit-tests
-      run: pnpm test
+      run: bun test
     - id: build
-      run: pnpm build
+      run: bun run build
 network:
   bootstrap: { mode: deny, allow_domains: [] }
   agent: { mode: deny }
@@ -774,13 +798,13 @@ The onboarding preview renders the owner login token, parses both YAML files, an
 Run:
 
 ```bash
-rtk pnpm build
-rtk git add scripts/render-control.mjs dist/action/index.cjs dist/cli.cjs
+rtk bun run build
+rtk git add scripts/render-control.ts dist/action/index.cjs dist/cli.js
 rtk git commit -m "build: bundle M2 control commands"
 rtk git rev-parse HEAD
-rtk node scripts/render-control.mjs
-rtk pnpm vitest run test/contract/workflows.test.ts
-rtk pnpm build
+rtk bun scripts/render-control.ts
+rtk bun test test/contract/workflows.test.ts
+rtk bun run build
 rtk git add .github/workflows/reusable-opc.yml templates/control/reusable-opc.yml templates/target test/contract/workflows.test.ts
 rtk git commit -m "feat: add pinned GitHub control workflows"
 ```
@@ -818,7 +842,7 @@ The CLI syntax is `opc onboard-preview --repository owner/name --control-owner o
 
 ```ts
 // test/acceptance/github-control-plane.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { runControlScenario } from "../fixtures/control-scenarios.js";
 
 it.each([
@@ -848,10 +872,10 @@ Expected: the Issue reaches `opc:claimed`, then the deliberately absent executio
 Run:
 
 ```bash
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 ```
 
 Expected: all commands exit `0`; sandbox evidence shows one claim per trigger set and no repository code execution.

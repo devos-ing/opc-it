@@ -6,18 +6,17 @@
 
 **Architecture:** Pure TypeScript domain modules implement strict contracts, RFC 8785 canonicalization, SHA-256 identities, state guards, path policy, failure classification, and recovery budgeting. The CLI depends only on local files and injected ports so every approved rule can be tested before any GitHub or OpenAI credential exists.
 
-**Tech Stack:** Node.js 24, TypeScript 5, pnpm 10, Vitest, TypeBox, Ajv, `yaml`, `json-canonicalize`, `minimatch`, ESLint, and esbuild.
+**Tech Stack:** Bun 1.3, TypeScript 5, Bun test, Bun.build, TypeBox, Ajv, `yaml`, `json-canonicalize`, `minimatch`, and ESLint.
 
 ---
 
-## Task 1: Bootstrap the strict Node 24 package
+## Task 1: Bootstrap the strict Bun and TypeScript package
 
 **Files:**
 - Create: `package.json`
+- Create: `bun.lock`
 - Create: `tsconfig.json`
 - Create: `eslint.config.mjs`
-- Create: `vitest.config.ts`
-- Create: `scripts/build.mjs`
 - Create: `src/cli/main.ts`
 - Create: `test/unit/cli-smoke.test.ts`
 - Create: `.gitignore`
@@ -30,14 +29,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
-  "bin": { "opc": "dist/cli.cjs" },
+  "engines": { "bun": ">=1.3.8" },
+  "bin": { "opc": "dist/cli.js" },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "bun build ./src/cli/main.ts --target=bun --outfile=./dist/cli.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "bun test",
+    "test:watch": "bun test --watch"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.0",
@@ -48,14 +47,12 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
-    "@types/node": "^24.0.0",
-    "esbuild": "^0.25.0",
+    "@types/bun": "^1.3.8",
     "eslint": "^9.0.0",
     "typescript": "^5.9.0",
-    "typescript-eslint": "^8.0.0",
-    "vitest": "^3.2.0"
+    "typescript-eslint": "^8.0.0"
   },
-  "packageManager": "pnpm@10.18.0"
+  "packageManager": "bun@1.3.8"
 }
 ```
 
@@ -66,62 +63,45 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "verbatimModuleSyntax": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }
 ```
 
 ```js
 // eslint.config.mjs
 import js from "@eslint/js";
+import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
-export default tseslint.config(
-  { ignores: ["dist/**", "schemas/**"] },
-  js.configs.recommended,
-  ...tseslint.configs.strictTypeChecked,
-  { languageOptions: { parserOptions: { projectService: true } } },
+export default defineConfig(
+  { ignores: [".getsuperpower/**", "coverage/**", "dist/**", "schemas/**"] },
+  {
+    files: ["**/*.ts"],
+    extends: [js.configs.recommended, ...tseslint.configs.strictTypeChecked],
+    languageOptions: { parserOptions: { projectService: true } },
+  },
+  { files: ["**/*.mjs"], extends: [js.configs.recommended] },
 );
-```
-
-```ts
-// vitest.config.ts
-import { defineConfig } from "vitest/config";
-
-export default defineConfig({
-  test: { environment: "node", coverage: { reporter: ["text", "json-summary"] } },
-});
-```
-
-```js
-// scripts/build.mjs
-import { build } from "esbuild";
-
-await build({
-  entryPoints: ["src/cli/main.ts"],
-  outfile: "dist/cli.cjs",
-  bundle: true,
-  platform: "node",
-  target: "node24",
-  format: "cjs",
-  banner: { js: "#!/usr/bin/env node" },
-});
 ```
 
 ```gitignore
 node_modules/
+dist/
 coverage/
 .env
 .env.*
 .opc/
+.getsuperpower/
 *.tgz
 ```
 
@@ -129,12 +109,13 @@ coverage/
 
 ```ts
 // test/unit/cli-smoke.test.ts
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { runCli } from "../../src/cli/main.js";
 
 describe("runCli", () => {
   it("returns usage error for an unknown command", async () => {
-    await expect(runCli(["unknown"])).resolves.toEqual({
+    const result = await runCli(["unknown"]);
+    expect(result).toEqual({
       exitCode: 2,
       message: "Unknown OPC command: unknown",
     });
@@ -147,8 +128,8 @@ describe("runCli", () => {
 Run:
 
 ```bash
-rtk pnpm install
-rtk pnpm vitest run test/unit/cli-smoke.test.ts
+rtk bun install
+rtk bun test test/unit/cli-smoke.test.ts
 ```
 
 Expected: FAIL because `src/cli/main.ts` does not exist.
@@ -156,22 +137,25 @@ Expected: FAIL because `src/cli/main.ts` does not exist.
 - [ ] **Step 5: Implement the minimal CLI entrypoint**
 
 ```ts
+#!/usr/bin/env bun
 // src/cli/main.ts
+
 export interface CliResult {
   readonly exitCode: number;
   readonly message: string;
 }
 
-export async function runCli(argv: readonly string[]): Promise<CliResult> {
+export function runCli(argv: readonly string[]): Promise<CliResult> {
   const command = argv[0] ?? "help";
-  if (command === "help") return { exitCode: 0, message: "Usage: opc <command>" };
-  return { exitCode: 2, message: `Unknown OPC command: ${command}` };
+  if (command === "help") return Promise.resolve({ exitCode: 0, message: "Usage: opc <command>" });
+  return Promise.resolve({ exitCode: 2, message: `Unknown OPC command: ${command}` });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const result = await runCli(process.argv.slice(2));
-  process.stdout.write(`${result.message}\n`);
-  process.exitCode = result.exitCode;
+if (import.meta.main) {
+  void runCli(process.argv.slice(2)).then((result) => {
+    process.stdout.write(`${result.message}\n`);
+    process.exitCode = result.exitCode;
+  });
 }
 ```
 
@@ -180,18 +164,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 Run:
 
 ```bash
-rtk pnpm test
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm build
+rtk bun test
+rtk bun run typecheck
+rtk bun run lint
+rtk bun run build
 ```
 
-Expected: all commands exit `0`; `dist/cli.cjs` exists.
+Expected: all commands exit `0`; `dist/cli.js` exists.
 
 - [ ] **Step 7: Commit the package scaffold**
 
 ```bash
-rtk git add package.json pnpm-lock.yaml tsconfig.json eslint.config.mjs vitest.config.ts scripts/build.mjs src/cli/main.ts test/unit/cli-smoke.test.ts .gitignore
+rtk git add package.json bun.lock tsconfig.json eslint.config.mjs src/cli/main.ts test/unit/cli-smoke.test.ts .gitignore
 rtk git commit -m "chore: scaffold OPC TypeScript CLI"
 ```
 
@@ -208,7 +192,7 @@ rtk git commit -m "chore: scaffold OPC TypeScript CLI"
 
 ```ts
 // test/contract/contracts.test.ts
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { parseMilestoneYaml, validateRepositoryPolicy } from "../../src/domain/validation.js";
 import { validMilestone, validPolicy } from "../fixtures/contracts.js";
 
@@ -238,7 +222,7 @@ describe("contract validation", () => {
 
 - [ ] **Step 2: Run the tests and verify missing module failures**
 
-Run: `rtk pnpm vitest run test/contract/contracts.test.ts`
+Run: `rtk bun test test/contract/contracts.test.ts`
 
 Expected: FAIL because `contracts.ts`, `validation.ts`, and fixtures do not exist.
 
@@ -358,7 +342,7 @@ export const validPolicy: RepositoryPolicy = {
   runner: { labels: ["self-hosted", "macOS", "ARM64", "opc"] },
   limits: { timeout_minutes: 90, max_attempts: 3, evidence_bundle_mb: 100 },
   paths: { writable: ["src/**", "tests/**"], forbidden: [".github/**", ".env*"] },
-  commands: { bootstrap: "pnpm install --offline --ignore-scripts", evidence: [{ id: "unit", run: "pnpm test" }] },
+  commands: { bootstrap: "bun install --frozen-lockfile --ignore-scripts", evidence: [{ id: "unit", run: "bun test" }] },
   network: { bootstrap: { mode: "deny", allow_domains: [] }, agent: { mode: "deny" } },
   environment_allowlist: ["CI", "NODE_ENV"],
 };
@@ -399,8 +383,8 @@ export const validMilestone = [
 Run:
 
 ```bash
-rtk pnpm vitest run test/contract/contracts.test.ts
-rtk pnpm typecheck
+rtk bun test test/contract/contracts.test.ts
+rtk bun run typecheck
 ```
 
 Expected: PASS with five contract tests.
@@ -424,7 +408,7 @@ rtk git commit -m "feat: validate OPC machine contracts"
 
 ```ts
 // test/unit/identity.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { digestCanonical } from "../../src/domain/identity.js";
 
 it("produces the same digest for different object key order", () => {
@@ -438,7 +422,7 @@ it("produces a prefixed lowercase sha256", () => {
 
 ```ts
 // test/unit/approval.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { verifyApproval } from "../../src/domain/approval.js";
 
 it("accepts one unedited allowlisted approval for the current digest", () => {
@@ -453,7 +437,7 @@ it.each(["actor", "digest", "edited"])("rejects invalid %s", reason => {
 
 - [ ] **Step 2: Run tests and confirm missing implementation failures**
 
-Run: `rtk pnpm vitest run test/unit/identity.test.ts test/unit/approval.test.ts`
+Run: `rtk bun test test/unit/identity.test.ts test/unit/approval.test.ts`
 
 Expected: FAIL with unresolved modules.
 
@@ -494,8 +478,8 @@ export function verifyApproval(record: ApprovalRecord, approvers: readonly strin
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/identity.test.ts test/unit/approval.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/identity.test.ts test/unit/approval.test.ts
+rtk bun run typecheck
 ```
 
 Expected: PASS.
@@ -517,7 +501,7 @@ rtk git commit -m "feat: bind approvals to canonical digests"
 
 ```ts
 // test/unit/policy.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { assertMilestoneWithinPolicy } from "../../src/domain/policy.js";
 import { validMilestoneObject, validPolicy } from "../fixtures/contracts.js";
 
@@ -532,7 +516,7 @@ it("rejects a milestone that raises timeout", () => {
 
 ```ts
 // test/unit/paths.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { checkChangedPaths } from "../../src/security/paths.js";
 
 it("accepts files inside writable globs", () => {
@@ -578,8 +562,8 @@ export function checkChangedPaths(paths: readonly string[], writable: readonly s
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/policy.test.ts test/unit/paths.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/policy.test.ts test/unit/paths.test.ts
+rtk bun run typecheck
 ```
 
 Expected: PASS with four tests.
@@ -599,7 +583,7 @@ rtk git commit -m "feat: enforce repository authority limits"
 
 ```ts
 // test/unit/state.test.ts
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { transition, type WorkState } from "../../src/domain/state.js";
 
 const valid: ReadonlyArray<[WorkState, string, WorkState]> = [
@@ -650,8 +634,8 @@ export function transition(from: WorkState, event: string): WorkState {
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/state.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/state.test.ts
+rtk bun run typecheck
 ```
 
 Expected: all table cases pass.
@@ -673,7 +657,7 @@ rtk git commit -m "feat: guard OPC work state transitions"
 
 ```ts
 // test/unit/recovery.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { decideRecovery } from "../../src/domain/recovery.js";
 
 it("does not consume budget for infrastructure incidents", () => {
@@ -722,7 +706,7 @@ export function errorFingerprint(input: { type: string; checkId: string; message
 
 ```ts
 // test/unit/fingerprint.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { errorFingerprint } from "../../src/domain/fingerprint.js";
 
 it("deduplicates timestamps, temp paths, and UUIDs", () => {
@@ -737,8 +721,8 @@ it("deduplicates timestamps, temp paths, and UUIDs", () => {
 Run:
 
 ```bash
-rtk pnpm vitest run test/unit/recovery.test.ts test/unit/fingerprint.test.ts
-rtk pnpm typecheck
+rtk bun test test/unit/recovery.test.ts test/unit/fingerprint.test.ts
+rtk bun run typecheck
 ```
 
 Expected: five tests pass.
@@ -760,7 +744,7 @@ rtk git commit -m "feat: bound and deduplicate recovery"
 
 ```ts
 // test/contract/results.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { decideCandidate } from "../../src/domain/result.js";
 
 const manifest = { approvalDigest: `sha256:${"a".repeat(64)}`, baseSha: "b".repeat(40), artifactDigest: `sha256:${"c".repeat(64)}`, changes: [{ path: "src/a.ts", mode: "100644", contentDigest: `sha256:${"d".repeat(64)}` }], evidence: [{ id: "unit", status: "pass" as const }] };
@@ -861,8 +845,8 @@ Extend `test/contract/results.test.ts` with unknown-property, mode `120000`, emp
 Run:
 
 ```bash
-rtk pnpm vitest run test/contract/results.test.ts test/contract/contracts.test.ts
-rtk pnpm typecheck
+rtk bun test test/contract/results.test.ts test/contract/contracts.test.ts
+rtk bun run typecheck
 ```
 
 Expected: PASS; invalid schema fixtures fail closed.
@@ -887,7 +871,7 @@ rtk git commit -m "feat: validate candidate results and reviews"
 
 ```ts
 // test/acceptance/local-simulation.test.ts
-import { expect, it } from "vitest";
+import { expect, it } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { simulate, type SimulationInput } from "../../src/application/simulate.js";
 
@@ -910,7 +894,7 @@ it("requeues infrastructure incidents without consuming attempts", async () => {
 
 - [ ] **Step 2: Run the acceptance tests and verify they fail**
 
-Run: `rtk pnpm vitest run test/acceptance/local-simulation.test.ts`
+Run: `rtk bun test test/acceptance/local-simulation.test.ts`
 
 Expected: FAIL because `simulate` and fixtures do not exist.
 
@@ -982,8 +966,8 @@ Create the three fixture files with these exact event arrays:
 Run:
 
 ```bash
-rtk pnpm build
-rtk node dist/cli.cjs simulate test/fixtures/simulation/success.json
+rtk bun run build
+rtk bun dist/cli.js simulate test/fixtures/simulation/success.json
 ```
 
 Expected JSON:
@@ -997,10 +981,10 @@ Expected JSON:
 Run:
 
 ```bash
-rtk pnpm typecheck
-rtk pnpm lint
-rtk pnpm test
-rtk pnpm build
+rtk bun run typecheck
+rtk bun run lint
+rtk bun test
+rtk bun run build
 ```
 
 Expected: all commands exit `0`; no network or GitHub credential is required.
@@ -1016,10 +1000,10 @@ rtk git commit -m "feat: simulate unattended delivery locally"
 
 Attach these outputs to the milestone result:
 
-- `rtk pnpm typecheck`
-- `rtk pnpm lint`
-- `rtk pnpm test`
-- `rtk pnpm build`
+- `rtk bun run typecheck`
+- `rtk bun run lint`
+- `rtk bun test`
+- `rtk bun run build`
 - all three `opc simulate` fixture outputs
 - `rtk git log --oneline` showing one commit per task
 
