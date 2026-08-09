@@ -41,8 +41,9 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   });
   expect(execute["runs-on"]).toEqual(["self-hosted", "macOS", "ARM64", "opc"]);
   expect(execute["timeout-minutes"]).toBe(95);
-  expect(execute.needs).toBe("dispatch-and-claim");
+  expect(execute.needs).toEqual(["dispatch-and-claim", "execute-gate"]);
   expect(execute.if).toContain("claimed == 'true'");
+  expect(execute.if).toContain("needs.execute-gate.result == 'success'");
   expect(record(execute.permissions, "execute.permissions")).toEqual({ contents: "read" });
 
   const deadline = steps[0];
@@ -98,7 +99,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     (match) => match[1],
   );
   expect(new Set(opcActionRefs).size).toBe(1);
-  expect(opcActionRefs).toHaveLength(17);
+  expect(opcActionRefs).toHaveLength(18);
 });
 
 it("keeps executor route selection outside the generated Target caller", async () => {

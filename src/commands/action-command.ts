@@ -136,6 +136,7 @@ export async function runActionCommand(
     return { command: "complete-run", completion };
   }
   if (inputs.command === "reconcile") {
+    await assertCurrentPolicyEnabled();
     const clock = context.clock ?? systemClock;
     const reconciliation = await reconcileRepository(
       new GitHubReconciler(octokit, inputs.owner, inputs.repo, context.controlOwner),
@@ -147,6 +148,7 @@ export async function runActionCommand(
         : undefined;
     return { command: "reconcile", reconciliation, claim };
   }
+  await assertCurrentPolicyEnabled();
   const result = await claimNextWork(store, context.clock ?? systemClock, {
     runId: context.runId,
   });

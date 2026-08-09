@@ -222,6 +222,25 @@ it.each(["claim", "reconcile"] as const)(
     },
   ];
   const api = createGitHubApi([
+    {
+      method: "GET",
+      path: "/repos/acme/app",
+      response: {
+        private: true,
+        fork: false,
+        owner: { login: "acme" },
+        default_branch: "main",
+      },
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/contents/.codex-pipeline.yml?ref=main",
+      response: {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(validPolicy)).toString("base64"),
+      },
+    },
     ...(command === "reconcile"
       ? [
           {
@@ -324,3 +343,36 @@ it.each(["claim", "reconcile"] as const)(
   expect(api.isDone()).toBe(true);
   },
 );
+
+it("stops scheduled reconciliation before any state transition when current Policy is disabled", async () => {
+  const api = createGitHubApi([
+    {
+      method: "GET",
+      path: "/repos/acme/app",
+      response: {
+        private: true,
+        fork: false,
+        owner: { login: "acme" },
+        default_branch: "main",
+      },
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/contents/.codex-pipeline.yml?ref=main",
+      response: {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify({ ...validPolicy, enabled: false })).toString("base64"),
+      },
+    },
+  ]);
+  const runtime = new TestActionRuntime(
+    { command: "reconcile", repository: "acme/app", "github-token": "test" },
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+  );
+
+  await main(runtime);
+
+  expect(runtime.failures).toEqual(["POLICY_DISABLED"]);
+  expect(api.isDone()).toBe(true);
+});

@@ -48,6 +48,21 @@ it("keeps the Target caller thin, serialized, and immutably pinned", async () =>
   assertTargetCallerPermissions(workflow);
 });
 
+it("keeps the canonical control template byte-for-byte aligned with the workflow", async () => {
+  const [source, template] = await Promise.all([
+    readFile(".github/workflows/reusable-opc.yml", "utf8"),
+    readFile("templates/control/reusable-opc.yml", "utf8"),
+  ]);
+  const actionSha = /0xroylee\/OPC@([0-9a-f]{40})/.exec(source)?.[1];
+  if (!actionSha) throw new Error("MISSING_ACTION_SHA");
+
+  expect(
+    template
+      .replaceAll("{{control_owner}}", "0xroylee")
+      .replaceAll("{{control_action_sha}}", actionSha),
+  ).toBe(source);
+});
+
 it("keeps the reusable control workflow permission-separated and Action-pinned", async () => {
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
   const workflow = parseStrictWorkflow(source, "reusable-opc.yml");
@@ -55,6 +70,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   const jobs = record(workflow.jobs, "jobs");
   const dispatchAndClaim = record(jobs["dispatch-and-claim"], "dispatch-and-claim");
   const heartbeat = record(jobs.heartbeat, "heartbeat");
+  const executeGate = record(jobs["execute-gate"], "execute-gate");
   const execute = record(jobs.execute, "execute");
   const reviewGate = record(jobs["review-gate"], "review-gate");
   const review = record(jobs.review, "review");
@@ -76,6 +92,10 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   expect(record(heartbeat.permissions, "heartbeat permissions")).toEqual({
     contents: "read",
     actions: "read",
+  });
+  expect(executeGate["runs-on"]).toBe("ubuntu-latest");
+  expect(record(executeGate.permissions, "execute-gate permissions")).toEqual({
+    contents: "read",
   });
   expect(record(execute.permissions, "execute permissions")).toEqual({ contents: "read" });
   expect(reviewGate["runs-on"]).toBe("ubuntu-latest");
@@ -101,6 +121,15 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     "review gate step",
   );
   expect(record(reviewGateStep.with, "review gate with")).toMatchObject({
+    command: "policy-gate",
+    "github-token": "${{ github.token }}",
+    enabled: "${{ vars.OPC_ENABLED }}",
+  });
+  const executeGateStep = record(
+    (executeGate.steps as Record<string, unknown>[])[0],
+    "execute gate step",
+  );
+  expect(record(executeGateStep.with, "execute gate with")).toMatchObject({
     command: "policy-gate",
     "github-token": "${{ github.token }}",
     enabled: "${{ vars.OPC_ENABLED }}",

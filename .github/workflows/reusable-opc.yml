@@ -54,9 +54,24 @@ jobs:
           payload-b64: ${{ needs.dispatch-and-claim.outputs.heartbeat_payload_b64 }}
           github-token: ${{ github.token }}
 
-  execute:
+  execute-gate:
     needs: dispatch-and-claim
-    if: needs.dispatch-and-claim.outputs.claimed == 'true'
+    if: needs.dispatch-and-claim.outputs.claimed == 'true' && vars.OPC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Recheck current Repository Policy before execute
+        uses: "0xroylee/OPC@e0c54d6350d0be14d0482fd1d1b535469455f95d"
+        with:
+          command: policy-gate
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          enabled: ${{ vars.OPC_ENABLED }}
+
+  execute:
+    needs: [dispatch-and-claim, execute-gate]
+    if: needs.dispatch-and-claim.outputs.claimed == 'true' && needs.execute-gate.result == 'success'
     runs-on: [self-hosted, macOS, ARM64, opc]
     timeout-minutes: 95
     permissions:
