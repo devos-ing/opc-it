@@ -290,6 +290,65 @@ it("repairs a mutable relabel while applying the trusted next transition", async
   ).toEqual({ previous: "claimed", current: "ready", changed: true });
 });
 
+it("does not revive a trusted terminal state after an external ready relabel", async () => {
+  const relabeledIssue = {
+    number: 7,
+    labels: [{ name: "opc:ready" }, { name: "opc:attempt-1" }],
+  };
+  const transitionBody = (expected: string, event: string) =>
+    `<!-- opc-transition ${JSON.stringify({ expected, event, metadata: {} })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues/7", relabeledIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("ready", "claim"),
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("claimed", "start"),
+            created_at: "2026-08-08T00:03:00Z",
+            updated_at: "2026-08-08T00:03:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("running", "candidate"),
+            created_at: "2026-08-08T00:04:00Z",
+            updated_at: "2026-08-08T00:04:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("reviewing", "verify"),
+            created_at: "2026-08-08T00:05:00Z",
+            updated_at: "2026-08-08T00:05:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(
+    await store.transition({
+      issueNumber: 7,
+      expected: "ready",
+      event: "claim",
+      metadata: { run_id: "999" },
+    }),
+  ).toEqual({ previous: "result-ready", current: "result-ready", changed: false });
+});
+
 it("does not revive an old claim when the latest trusted transition is ready", async () => {
   const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
   const activeLabelIssue = {

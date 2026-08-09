@@ -16,6 +16,7 @@ import { parseExecutionEnvelopePayload } from "./prepare-execution.js";
 export type ActionCommandResult =
   | { readonly command: "validate"; readonly valid: true }
   | ({ readonly command: "claim" } & ClaimResult)
+  | { readonly command: "policy-gate"; readonly authorized: true }
   | {
       readonly command: "reconcile";
       readonly reconciliation: RepositoryReconciliation;
@@ -58,6 +59,7 @@ export async function runActionCommand(
   if (
     inputs.command !== "claim" &&
     inputs.command !== "reconcile" &&
+    inputs.command !== "policy-gate" &&
     inputs.command !== "complete-run"
   ) {
     throw new DomainError("ACTION_COMMAND_NOT_IMPLEMENTED", inputs.command);
@@ -73,6 +75,14 @@ export async function runActionCommand(
     undefined,
     context.controlOwner,
   );
+  const assertCurrentPolicyEnabled = async (): Promise<void> => {
+    const policy = await store.loadCurrentRepositoryPolicy();
+    if (!policy.enabled) throw new DomainError("POLICY_DISABLED", "repository policy");
+  };
+  if (inputs.command === "policy-gate") {
+    await assertCurrentPolicyEnabled();
+    return { command: "policy-gate", authorized: true };
+  }
   if (inputs.command === "complete-run") {
     const issueNumber = inputs.issueNumber;
     if (issueNumber === undefined || !inputs.payloadB64) {
@@ -93,6 +103,7 @@ export async function runActionCommand(
     if (!(await store.ownsRun(issueNumber, context.runId))) {
       return { command: "complete-run", completion: { outcome: "stale" } };
     }
+    await assertCurrentPolicyEnabled();
     const { data } = await octokit.rest.actions.listJobsForWorkflowRun({
       owner: inputs.owner,
       repo: inputs.repo,

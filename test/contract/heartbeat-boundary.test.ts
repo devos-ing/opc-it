@@ -116,7 +116,7 @@ it("does not treat queued Mac jobs as runner liveness", async () => {
   expect(uploads).toEqual([]);
 });
 
-it("keeps watching through the full legal execute and review window", async () => {
+it("keeps watching through queue lease plus the full legal execute and review window", async () => {
   let poll = 0;
   const result = await monitorHeartbeat(
     {
@@ -131,7 +131,7 @@ it("keeps watching through the full legal execute and review window", async () =
       listJobs: () => {
         poll += 1;
         return Promise.resolve(
-          poll < 23
+          poll < 31
             ? [
                 { name: "execute", status: "in_progress" },
                 { name: "review", status: "queued" },
@@ -149,7 +149,7 @@ it("keeps watching through the full legal execute and review window", async () =
     },
   );
 
-  expect(result).toEqual({ status: "stopped", polls: 23 });
+  expect(result).toEqual({ status: "stopped", polls: 31 });
 });
 
 it("writes one-line heartbeat JSON only under runner temp before upload", async () => {

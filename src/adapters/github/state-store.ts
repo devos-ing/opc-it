@@ -191,6 +191,14 @@ export class GitHubStateStore implements ClaimPort {
     return parseRepositoryPolicyYaml(Buffer.from(data.content, "base64").toString("utf8"));
   }
 
+  async loadCurrentRepositoryPolicy() {
+    const { data: repository } = await this.octokit.rest.repos.get({
+      owner: this.owner,
+      repo: this.repo,
+    });
+    return this.loadRepositoryPolicy(repository.default_branch);
+  }
+
   async loadDefaultBranchSha(): Promise<string> {
     const { data: repository } = await this.octokit.rest.repos.get({
       owner: this.owner,
@@ -212,10 +220,7 @@ export class GitHubStateStore implements ClaimPort {
     });
     const labels = issueLabels(issue.labels);
     const labelState = workStateFromLabels(labels);
-    const previous =
-      labelState === command.expected
-        ? labelState
-        : ((await this.loadTrustedState(command.issueNumber)) ?? labelState);
+    const previous = (await this.loadTrustedState(command.issueNumber)) ?? labelState;
     if (previous !== command.expected) {
       return { previous, current: previous, changed: false };
     }

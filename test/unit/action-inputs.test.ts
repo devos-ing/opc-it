@@ -21,18 +21,36 @@ it("accepts local execution commands only with their bounded inputs", () => {
   ).toMatchObject({ command: "complete-run", issueNumber: 7, payloadB64: "abc" });
   expect(
     parseActionInputs({
+      command: "execution-deadline",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      enabled: "true",
+    }),
+  ).toMatchObject({ command: "execution-deadline", issueNumber: 7, enabled: true });
+  expect(
+    parseActionInputs({
       command: "prepare-execution",
       repository: "acme/app",
       issueNumber: "7",
       payloadB64: "abc",
       enabled: "true",
+      deadlineEpochMs: "1060000",
     }),
   ).toMatchObject({
     command: "prepare-execution",
     issueNumber: 7,
     payloadB64: "abc",
     enabled: true,
+    deadlineEpochMs: 1_060_000,
   });
+  expect(
+    parseActionInputs({
+      command: "policy-gate",
+      repository: "acme/app",
+      enabled: "true",
+    }),
+  ).toMatchObject({ command: "policy-gate", enabled: true });
   expect(
     parseActionInputs({
       command: "run-codex",
@@ -104,6 +122,7 @@ it.each([
   [{ command: "claim", repository: "acme/app", issueNumber: "0" }, "INVALID_ISSUE_NUMBER"],
   [{ command: "claim", repository: "acme/app", issueNumber: "1.5" }, "INVALID_ISSUE_NUMBER"],
   [{ command: "prepare-execution", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
+  [{ command: "execution-deadline", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
   [{ command: "complete-run", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
   [
     {
@@ -112,9 +131,21 @@ it.each([
       issueNumber: "7",
       payloadB64: "abc",
       enabled: "false",
+      deadlineEpochMs: "1060000",
     },
     "POLICY_DISABLED",
   ],
+  [
+    {
+      command: "prepare-execution",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      enabled: "true",
+    },
+    "INVALID_EXECUTION_INPUT",
+  ],
+  [{ command: "policy-gate", repository: "acme/app", enabled: "false" }, "POLICY_DISABLED"],
   [
     {
       command: "complete-run",

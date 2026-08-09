@@ -76,7 +76,7 @@ export async function monitorHeartbeat(
   const heartbeat = new Heartbeat(dependencies.upload, dependencies.now);
   heartbeat.start(input);
   try {
-    for (let polls = 1; polls <= 26; polls += 1) {
+    for (let polls = 1; polls <= 32; polls += 1) {
       let jobs: readonly WatchedJob[];
       try {
         jobs = await dependencies.listJobs();
@@ -91,7 +91,7 @@ export async function monitorHeartbeat(
       if (watched.some((job) => job.status === "in_progress")) {
         await heartbeat.pulse();
       }
-      if (polls === 26) break;
+      if (polls === 32) break;
       await dependencies.sleep(dependencies.intervalMs);
     }
     throw new DomainError("UNTRUSTED_HEARTBEAT_JOBS", "watched jobs exceeded heartbeat window");

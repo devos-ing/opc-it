@@ -3,7 +3,9 @@ import type { ClaimResult } from "../application/claim-work.js";
 
 function claimResult(result: ActionCommandResult): ClaimResult | undefined {
   if (
-    result.command === "validate" || result.command === "complete-run"
+    result.command === "validate" ||
+    result.command === "policy-gate" ||
+    result.command === "complete-run"
   ) {
     return undefined;
   }

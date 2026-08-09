@@ -56,6 +56,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   const dispatchAndClaim = record(jobs["dispatch-and-claim"], "dispatch-and-claim");
   const heartbeat = record(jobs.heartbeat, "heartbeat");
   const execute = record(jobs.execute, "execute");
+  const reviewGate = record(jobs["review-gate"], "review-gate");
   const review = record(jobs.review, "review");
   const conclude = record(jobs.conclude, "conclude");
 
@@ -77,6 +78,8 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     actions: "read",
   });
   expect(record(execute.permissions, "execute permissions")).toEqual({ contents: "read" });
+  expect(reviewGate["runs-on"]).toBe("ubuntu-latest");
+  expect(record(reviewGate.permissions, "review-gate permissions")).toEqual({ contents: "read" });
   expect(record(review.permissions, "review permissions")).toEqual({ contents: "read" });
   expect(record(conclude.permissions, "conclude permissions")).toEqual({
     contents: "read",
@@ -89,7 +92,19 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   });
   expect(conclude.needs).toEqual(["dispatch-and-claim", "heartbeat", "execute", "review"]);
   expect(conclude.if).toContain("always()");
+  expect(conclude.if).toContain("!cancelled()");
   expect(conclude.if).toContain("vars.OPC_ENABLED == 'true'");
+  expect(review.needs).toEqual(["dispatch-and-claim", "execute", "review-gate"]);
+  expect(review.if).toContain("needs.review-gate.result == 'success'");
+  const reviewGateStep = record(
+    (reviewGate.steps as Record<string, unknown>[])[0],
+    "review gate step",
+  );
+  expect(record(reviewGateStep.with, "review gate with")).toMatchObject({
+    command: "policy-gate",
+    "github-token": "${{ github.token }}",
+    enabled: "${{ vars.OPC_ENABLED }}",
+  });
   const concludeStep = record(
     (conclude.steps as Record<string, unknown>[])[0],
     "conclude step",

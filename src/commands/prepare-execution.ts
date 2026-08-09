@@ -183,7 +183,12 @@ function currentUser(runtime: LocalExecutionRuntime): { username: string; uid: n
 }
 
 export async function prepareExecution(
-  input: { issueNumber: number; payloadB64: string; enabled: boolean },
+  input: {
+    issueNumber: number;
+    payloadB64: string;
+    enabled: boolean;
+    deadlineEpochMs: number;
+  },
   runtime: LocalExecutionRuntime,
 ): Promise<PreparedExecution> {
   if (!input.enabled) throw new DomainError("POLICY_DISABLED", "execution kill switch");
@@ -194,7 +199,16 @@ export async function prepareExecution(
       envelope.contract.limits.timeout_minutes,
       envelope.policy.limits.timeout_minutes,
     ) * 60;
-  const deadlineEpochMs = createExecutionDeadline(now(), timeoutSeconds);
+  const validatedAt = now();
+  const maximumDeadline = createExecutionDeadline(validatedAt, timeoutSeconds);
+  if (
+    !Number.isSafeInteger(input.deadlineEpochMs) ||
+    input.deadlineEpochMs > maximumDeadline
+  ) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "execution deadline");
+  }
+  remainingExecutionMilliseconds(input.deadlineEpochMs, validatedAt);
+  const deadlineEpochMs = input.deadlineEpochMs;
   assertNetworkPolicyEnforceable(envelope.policy.network.bootstrap);
   const paths = executionPaths(runtime, envelope.contract.work_id);
   const sourceRepository = await realpath(paths.sourceRepository);

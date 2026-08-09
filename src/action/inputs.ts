@@ -5,11 +5,13 @@ export const actionCommands = [
   "validate",
   "claim",
   "reconcile",
+  "policy-gate",
   "complete-run",
   "publish",
   "heartbeat",
   "verify-codex-runner",
   "prepare-execution",
+  "execution-deadline",
   "finalize-execution",
   "prepare-review",
   "decide-result",
@@ -62,6 +64,7 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
 
   const payloadCommands: readonly ActionCommand[] = [
     "heartbeat",
+    "execution-deadline",
     "prepare-execution",
     "finalize-execution",
     "prepare-review",
@@ -116,10 +119,16 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
   }
   const enabled = raw.enabled === undefined ? undefined : raw.enabled === "true";
   if (
-    (raw.command === "prepare-execution" || raw.command === "complete-run") &&
+    (raw.command === "execution-deadline" ||
+      raw.command === "prepare-execution" ||
+      raw.command === "complete-run" ||
+      raw.command === "policy-gate") &&
     (raw.enabled !== "true" || enabled !== true)
   ) {
     throw new DomainError("POLICY_DISABLED", "execution kill switch");
+  }
+  if (raw.command === "prepare-execution" && !validDeadline) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "prepare-execution deadline");
   }
   const timeoutSeconds =
     raw.timeoutSeconds === undefined ? undefined : Number(raw.timeoutSeconds);

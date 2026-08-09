@@ -42,6 +42,8 @@ inputs:
     required: false
   deadline-epoch-ms:
     description: absolute approved executor wall-clock deadline
+  prepare-outcome:
+    description: completed work-failure or run-incident for execution preparation
     required: false
   codex-outcome:
     description: trusted run-codex outcome passed to final cleanup

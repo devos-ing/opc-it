@@ -11,6 +11,11 @@ const completed = (name: string, conclusion: string, failedStep?: string) => ({
     : [],
 });
 
+const withFailedSteps = (name: string, steps: readonly string[]) => ({
+  ...completed(name, "failure"),
+  steps: steps.map((step) => ({ name: step, status: "completed", conclusion: "failure" })),
+});
+
 it("classifies a fully verified workflow", () => {
   expect(
     classifyWorkflowRun([
@@ -80,8 +85,13 @@ it("classifies a deterministic review rejection as review failure", () => {
 it.each([
   [
     "bootstrap",
-    completed("execute", "failure", "Prepare workspace and run network-denied bootstrap"),
-    { category: "execution", checkId: "prepare-workspace-and-run-network-denied-bootstrap" },
+    withFailedSteps("execute", ["Prepare execution workspace", "Record Bootstrap Failure"]),
+    { category: "execution", checkId: "record-bootstrap-failure" },
+  ],
+  [
+    "executor preflight incident",
+    withFailedSteps("execute", ["Prepare execution workspace", "Record Prepare Run Incident"]),
+    { category: "infrastructure", checkId: "record-prepare-run-incident" },
   ],
   [
     "structured executor result",

@@ -178,6 +178,22 @@ it("reports only a fixed workflow-owned failure category", async () => {
   expect(runtime.failures).toEqual(["REPORTED_RUN_FAILURE"]);
 });
 
+it("publishes a typed infrastructure outcome when execution preparation cannot start", async () => {
+  const runtime = new TestActionRuntime({
+    command: "prepare-execution",
+    repository: "acme/app",
+    "issue-number": "7",
+    "payload-b64": "abc",
+    enabled: "true",
+    "deadline-epoch-ms": "1060000",
+  });
+
+  await main(runtime);
+
+  expect(runtime.outputs.get("prepare-outcome")).toBe("run-incident");
+  expect(runtime.failures).toEqual(["INVALID_EXECUTION_INPUT"]);
+});
+
 it.each(["claim", "reconcile"] as const)(
   "%s reaches the Octokit claim path and publishes immutable outputs",
   async (command) => {
@@ -272,6 +288,11 @@ it.each(["claim", "reconcile"] as const)(
       response: { commit: { sha: contract.base_sha } },
     },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: comments,
+    },
     {
       method: "POST",
       path: "/repos/acme/app/issues/7/comments",

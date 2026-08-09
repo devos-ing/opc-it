@@ -59,7 +59,8 @@ function infrastructureConclusion(conclusion: string): boolean {
 }
 
 export const trustedFailureStepNames = {
-  bootstrap: "Prepare workspace and run network-denied bootstrap",
+  bootstrap: "Record Bootstrap Failure",
+  prepareIncident: "Record Prepare Run Incident",
   candidate: "Build Candidate Result",
   executorFailure: "Record Executor Failure",
   executorIncident: "Record Executor Run Incident",
@@ -71,6 +72,7 @@ export const trustedFailureStepNames = {
 
 const executionCategories = new Map<string, FailureCategory>([
   [trustedFailureStepNames.bootstrap, "execution"],
+  [trustedFailureStepNames.prepareIncident, "infrastructure"],
   [trustedFailureStepNames.candidate, "evidence"],
   [trustedFailureStepNames.executorFailure, "execution"],
   [trustedFailureStepNames.executorIncident, "infrastructure"],
@@ -93,7 +95,10 @@ function executionFailure(job: WorkflowJobObservation): ObservedRunOutcome {
       message: `execute:${job.conclusion ?? "unknown"}`,
     };
   }
-  const step = failedStep(job);
+  const reportedStep = job.steps.find(
+    (step) => step.conclusion === "failure" && executionCategories.has(step.name),
+  );
+  const step = reportedStep ?? failedStep(job);
   const name = step?.name ?? "execute";
   const category = executionCategories.get(name) ?? "infrastructure";
   return {

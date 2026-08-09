@@ -59,6 +59,30 @@ const envelope = {
 };
 const payloadB64 = Buffer.from(JSON.stringify(envelope)).toString("base64url");
 
+function currentPolicyRoutes(policy = validPolicy): Route[] {
+  return [
+    {
+      method: "GET",
+      path: "/repos/acme/app",
+      response: {
+        private: true,
+        fork: false,
+        owner: { login: "acme" },
+        default_branch: "main",
+      },
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/contents/.codex-pipeline.yml?ref=main",
+      response: {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(policy)).toString("base64"),
+      },
+    },
+  ];
+}
+
 function issue(state: "claimed" | "running" | "reviewing") {
   return {
     number: 7,
@@ -77,6 +101,15 @@ const claimComment = {
   updated_at: "2026-08-10T10:00:00Z",
 };
 
+function trustedTransitionComment(expected: string, event: string) {
+  return {
+    user: { login: "github-actions[bot]" },
+    body: `<!-- opc-transition ${JSON.stringify({ expected, event, metadata: {} })} -->`,
+    created_at: "2026-08-10T10:01:00Z",
+    updated_at: "2026-08-10T10:01:00Z",
+  };
+}
+
 it("persists a verified production run through all M3 states", async () => {
   const routes: Route[] = [
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("claimed") },
@@ -90,6 +123,7 @@ it("persists a verified production run through all M3 states", async () => {
       path: "/repos/acme/app/issues/7/comments?per_page=100",
       response: [claimComment],
     },
+    ...currentPolicyRoutes(),
     {
       method: "GET",
       path: "/repos/acme/app/actions/runs/123/jobs?per_page=100",
@@ -123,12 +157,31 @@ it("persists a verified production run through all M3 states", async () => {
       },
     },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("claimed") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
     { method: "POST", path: "/repos/acme/app/issues/7/comments" },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("running") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment, trustedTransitionComment("claimed", "start")],
+    },
     { method: "POST", path: "/repos/acme/app/issues/7/comments" },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("reviewing") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [
+        claimComment,
+        trustedTransitionComment("claimed", "start"),
+        trustedTransitionComment("running", "candidate"),
+      ],
+    },
     { method: "POST", path: "/repos/acme/app/issues/7/comments" },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
   ];
@@ -176,6 +229,7 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
       path: "/repos/acme/app/issues/7/comments?per_page=100",
       response: [claimComment],
     },
+    ...currentPolicyRoutes(),
     {
       method: "GET",
       path: "/repos/acme/app/actions/runs/123/jobs?per_page=100",
@@ -215,9 +269,19 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
       },
     },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("claimed") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
     { method: "POST", path: "/repos/acme/app/issues/7/comments" },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     { method: "GET", path: "/repos/acme/app/issues/7", response: issue("running") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment, trustedTransitionComment("claimed", "start")],
+    },
     { method: "POST", path: "/repos/acme/app/issues/7/comments" },
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     {
@@ -256,5 +320,56 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
       recovery: { outcome: "created", issueNumber: 42, nextAttempt: 2 },
     },
   });
+  expect(api.isDone()).toBe(true);
+});
+
+it("blocks review when the current repository policy is disabled", async () => {
+  const api = createGitHubApi(currentPolicyRoutes({ ...validPolicy, enabled: false }));
+  const error = await runActionCommand(
+    parseActionInputs({ command: "policy-gate", repository: "acme/app", enabled: "true" }),
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    {
+      runId: "123",
+      controlOwner: "acme",
+      callerWorkflowRef: "acme/app/.github/workflows/opc.yml@refs/heads/main",
+    },
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "POLICY_DISABLED" });
+  expect(api.isDone()).toBe(true);
+});
+
+it("blocks completion and Recovery when the current repository policy is disabled", async () => {
+  const api = createGitHubApi([
+    { method: "GET", path: "/repos/acme/app/issues/7", response: issue("claimed") },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [claimComment],
+    },
+    ...currentPolicyRoutes({ ...validPolicy, enabled: false }),
+  ]);
+  const error = await runActionCommand(
+    parseActionInputs({
+      command: "complete-run",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64,
+      enabled: "true",
+    }),
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    {
+      runId: "123",
+      controlOwner: "acme",
+      callerWorkflowRef: "acme/app/.github/workflows/opc.yml@refs/heads/main",
+    },
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "POLICY_DISABLED" });
   expect(api.isDone()).toBe(true);
 });

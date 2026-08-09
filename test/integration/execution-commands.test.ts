@@ -7,6 +7,7 @@ import type { RepositoryPolicy } from "../../src/domain/contracts.js";
 import { digestCanonical } from "../../src/domain/identity.js";
 import { finalizeExecution } from "../../src/commands/finalize-execution.js";
 import { prepareExecution, type LocalExecutionRuntime } from "../../src/commands/prepare-execution.js";
+import { approvedExecutionDeadline } from "../../src/commands/execution-deadline.js";
 import { sha256Bytes } from "../../src/security/content.js";
 
 async function executionFixture(): Promise<{
@@ -150,8 +151,17 @@ async function executionFixture(): Promise<{
 
 it("prepares, finalizes, and removes an isolated execution workspace", async () => {
   const fixture = await executionFixture();
-  const prepared = await prepareExecution(
+  const deadlineEpochMs = approvedExecutionDeadline(
     { enabled: true, issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
+    () => 1_000_000,
+  );
+  const prepared = await prepareExecution(
+    {
+      enabled: true,
+      issueNumber: fixture.issueNumber,
+      payloadB64: fixture.payloadB64,
+      deadlineEpochMs,
+    },
     fixture.runtime,
   );
   expect(prepared.deadlineEpochMs).toBe(1_060_000);
@@ -183,8 +193,17 @@ it("prepares, finalizes, and removes an isolated execution workspace", async () 
 
 it("cleans up and reports a structured executor failure without calling it Evidence", async () => {
   const fixture = await executionFixture();
-  const prepared = await prepareExecution(
+  const deadlineEpochMs = approvedExecutionDeadline(
     { enabled: true, issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
+    () => 1_000_000,
+  );
+  const prepared = await prepareExecution(
+    {
+      enabled: true,
+      issueNumber: fixture.issueNumber,
+      payloadB64: fixture.payloadB64,
+      deadlineEpochMs,
+    },
     fixture.runtime,
   );
   const outputFile = join(fixture.runtime.runnerTemp, "opc-executor-output.json");
@@ -225,7 +244,12 @@ it("keeps repository-controlled commands outside the Codex credential boundary",
   const payloadB64 = Buffer.from(JSON.stringify(envelope)).toString("base64url");
 
   const error = await prepareExecution(
-    { enabled: true, issueNumber: fixture.issueNumber, payloadB64 },
+    {
+      enabled: true,
+      issueNumber: fixture.issueNumber,
+      payloadB64,
+      deadlineEpochMs: 1_060_000,
+    },
     fixture.runtime,
   ).catch((caught: unknown) => caught);
 

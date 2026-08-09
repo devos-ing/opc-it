@@ -31,7 +31,8 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   const steps = records(review.steps, "review.steps");
 
   expect(record(execute.outputs, "execute.outputs")).toHaveProperty("artifact_sha256");
-  expect(review.needs).toEqual(["dispatch-and-claim", "execute"]);
+  expect(review.needs).toEqual(["dispatch-and-claim", "execute", "review-gate"]);
+  expect(review.if).toContain("needs.review-gate.result == 'success'");
   expect(review.if).toContain("needs.execute.result == 'success'");
   expect(review.if).toContain("vars.OPC_ENABLED == 'true'");
   expect(review["runs-on"]).toEqual(["self-hosted", "macOS", "ARM64", "opc"]);

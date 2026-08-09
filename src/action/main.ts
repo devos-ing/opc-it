@@ -9,6 +9,7 @@ import { runActionCommand } from "../commands/action-command.js";
 import { finalizeExecution } from "../commands/finalize-execution.js";
 import { decideResult } from "../commands/decide-result.js";
 import { runActionHeartbeat } from "../commands/heartbeat.js";
+import { approvedExecutionDeadline } from "../commands/execution-deadline.js";
 import { prepareExecution, type LocalExecutionRuntime } from "../commands/prepare-execution.js";
 import { prepareReview } from "../commands/prepare-review.js";
 import { runPinnedCodex, type RunCodexInput } from "../commands/run-codex.js";
@@ -152,6 +153,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     let outputs: Readonly<Record<string, string>> = {};
     if (
       inputs.command === "verify-codex-runner" ||
+      inputs.command === "execution-deadline" ||
       inputs.command === "prepare-execution" ||
       inputs.command === "finalize-execution" ||
       inputs.command === "prepare-review" ||
@@ -169,21 +171,51 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
         const verified = await verifyLocalRunner(profile, version);
         result = verified;
         outputs = { "codex-bin": verified.codexBin, "codex-home": verified.codexHome };
-      } else if (inputs.command === "prepare-execution") {
+      } else if (inputs.command === "execution-deadline") {
         if (inputs.issueNumber === undefined || !inputs.payloadB64 || inputs.enabled !== true) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing deadline input");
+        }
+        const deadline = approvedExecutionDeadline({
+          issueNumber: inputs.issueNumber,
+          payloadB64: inputs.payloadB64,
+          enabled: inputs.enabled,
+        });
+        result = { deadlineEpochMs: deadline };
+        outputs = { "deadline-epoch-ms": String(deadline) };
+      } else if (inputs.command === "prepare-execution") {
+        if (
+          inputs.issueNumber === undefined ||
+          !inputs.payloadB64 ||
+          inputs.enabled !== true ||
+          inputs.deadlineEpochMs === undefined
+        ) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing prepare input");
         }
-        const prepared = await prepareExecution(
-          { issueNumber: inputs.issueNumber, payloadB64: inputs.payloadB64, enabled: inputs.enabled },
-          localRuntime(),
-        );
+        let prepared;
+        try {
+          prepared = await prepareExecution(
+            {
+              issueNumber: inputs.issueNumber,
+              payloadB64: inputs.payloadB64,
+              enabled: inputs.enabled,
+              deadlineEpochMs: inputs.deadlineEpochMs,
+            },
+            localRuntime(),
+          );
+        } catch (error) {
+          const workFailure =
+            error instanceof DomainError &&
+            (error.code === "BOOTSTRAP_FAILED" || error.code === "EXECUTION_TIMEOUT");
+          runtime.setOutput("prepare-outcome", workFailure ? "work-failure" : "run-incident");
+          throw error;
+        }
         result = prepared;
         outputs = {
+          "prepare-outcome": "completed",
           workspace: prepared.workspace,
           "prompt-file": prepared.promptFile,
           "executor-schema-file": prepared.executorSchemaFile,
           "review-schema-file": prepared.reviewSchemaFile,
-          "deadline-epoch-ms": String(prepared.deadlineEpochMs),
         };
       } else if (inputs.command === "finalize-execution") {
         if (

@@ -45,6 +45,14 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   expect(execute.if).toContain("claimed == 'true'");
   expect(record(execute.permissions, "execute.permissions")).toEqual({ contents: "read" });
 
+  const deadline = steps[0];
+  expect(deadline?.name).toBe("Establish approved execution deadline");
+  expect(record(deadline?.with, "deadline.with")).toMatchObject({
+    command: "execution-deadline",
+    "payload-b64": "${{ needs.dispatch-and-claim.outputs.envelope_b64 }}",
+    enabled: "${{ vars.OPC_ENABLED }}",
+  });
+
   const checkout = namedStep(steps, "Checkout target without persistent credentials");
   expect(checkout.uses).toBe("actions/checkout@v4");
   expect(record(checkout.with, "checkout.with")).toMatchObject({
@@ -53,7 +61,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     "fetch-depth": 0,
   });
 
-  const prepare = namedStep(steps, "Prepare workspace and run network-denied bootstrap");
+  const prepare = namedStep(steps, "Prepare execution workspace");
   const codex = namedStep(steps, "Execute approved milestone");
   const finalize = namedStep(steps, "Build Candidate Result");
   for (const step of [prepare, codex, finalize]) {
@@ -63,15 +71,18 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   expect(finalize.if).toContain("always()");
   expect(finalize.if).toContain("steps.prepare.outcome == 'success'");
   expect(record(prepare.with, "prepare.with").enabled).toBe("${{ vars.OPC_ENABLED }}");
+  expect(record(prepare.with, "prepare.with")["deadline-epoch-ms"]).toBe(
+    "${{ steps.deadline.outputs['deadline-epoch-ms'] }}",
+  );
   expect(record(codex.with, "codex.with")).toMatchObject({
     command: "run-codex",
     "permission-profile": "opc-executor",
-    "deadline-epoch-ms": "${{ steps.prepare.outputs['deadline-epoch-ms'] }}",
+    "deadline-epoch-ms": "${{ steps.deadline.outputs['deadline-epoch-ms'] }}",
   });
   expect(codex).not.toHaveProperty("run");
 
   expect(heartbeat["runs-on"]).toBe("ubuntu-latest");
-  expect(heartbeat["timeout-minutes"]).toBe(130);
+  expect(heartbeat["timeout-minutes"]).toBe(165);
   expect(record(heartbeat.permissions, "heartbeat.permissions")).toEqual({
     contents: "read",
     actions: "read",
@@ -87,7 +98,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     (match) => match[1],
   );
   expect(new Set(opcActionRefs).size).toBe(1);
-  expect(opcActionRefs).toHaveLength(13);
+  expect(opcActionRefs).toHaveLength(17);
 });
 
 it("keeps executor route selection outside the generated Target caller", async () => {
