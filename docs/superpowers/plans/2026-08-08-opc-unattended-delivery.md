@@ -6,7 +6,7 @@
 
 **Architecture:** GitHub Actions is the v1 scheduler and GitHub Issues are the durable state projection. A scheduler-independent TypeScript OPC CLI owns contracts and state transitions; GitHub-hosted control jobs claim, recover, and publish, while credential-limited Mac mini jobs execute and independently review Candidate Results.
 
-**Tech Stack:** Node.js 24, TypeScript 5, pnpm 10, Vitest, Ajv, `yaml`, `json-canonicalize`, `minimatch`, `shell-quote`, `execa`, `@actions/artifact`, Octokit, GitHub JavaScript Actions (`node24`), reusable GitHub workflows, and `openai/codex-action@v1`.
+**Tech Stack:** Node.js 24, TypeScript 5, pnpm 10, Vitest, Ajv, `yaml`, `json-canonicalize`, `minimatch`, `shell-quote`, `execa`, `@actions/artifact`, Octokit, GitHub JavaScript Actions (`node24`), reusable GitHub workflows, and a pinned local Codex CLI on the Mac mini.
 
 ---
 
@@ -17,7 +17,8 @@ Implementation must remain inside [the approved design](../specs/2026-08-08-opc-
 No implementation milestone may silently change these boundaries:
 
 - Private, allowlisted Target Repositories in one GitHub Trust Domain.
-- Codex Desktop is the Plan Approval surface; GitHub is the queue and result surface.
+- The local Codex CLI is the Plan Approval and execution surface; GitHub is the queue and result surface.
+- Executor and reviewer reuse only the dedicated runner user's ChatGPT subscription login; no API key or Codex GitHub Action is part of the runtime.
 - One active Work Claim per repository; Recovery Issues take FIFO priority.
 - Three total execution attempts.
 - Deterministic Evidence Gate plus a fresh, read-only Result Review.
@@ -162,7 +163,7 @@ At the end of each subplan:
 3. Compare behavior against the approved design rather than only checking test status.
 4. Stop for milestone result approval before continuing.
 
-M1 and M2 may be implemented without access to the Mac mini runner or an OpenAI API key. M3 requires a dedicated runner user and an OpenAI secret scoped only to the sandbox repository. M4 first receives write permission in a disposable private sandbox repository.
+M1 and M2 may be implemented without access to the Mac mini runner. M3 requires a dedicated runner user, a pinned local Codex CLI, and a successful host-side ChatGPT login preflight; it must not add an OpenAI API key. M4 first receives write permission in a disposable private sandbox repository.
 
 ## Final definition of done
 

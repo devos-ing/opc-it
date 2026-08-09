@@ -343,7 +343,7 @@ Assert the final reusable workflow has four permission-separated jobs:
 | `review` | Mac mini | none | no, read-only bundle |
 | `publish-or-recover` | `ubuntu-latest` | Contents, Pull Requests, Issues, Actions | no |
 
-The contract test fails if the publisher checks out the Target Repository, uses a `run` step outside the pinned OPC Control checkout, invokes a package manager, references the Mac worktree path, or receives `OPENAI_API_KEY`.
+The contract test fails if the publisher checks out the Target Repository, uses a `run` step outside the pinned OPC Control checkout, invokes a package manager, references the Mac worktree path, or receives `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_HOME`, `auth.json`, or any account credential.
 
 - [ ] **Step 2: Add the publisher/recovery job**
 
@@ -704,8 +704,10 @@ rtk git commit -m "test: prove controlled unattended publishing"
 - approver login and current default branch SHA;
 - canonical Repository Policy digest;
 - offline bootstrap cache proof and network enforcement result;
-- Mac runner label and account-isolation proof;
-- Control Repository commit SHA and bundled Action digest;
+- Mac runner label and dedicated OS-account isolation proof;
+- local Codex CLI absolute path, exact version, binary digest, and `codex login status` proof showing ChatGPT mode without recording credential material;
+- host-owned Codex home owner/mode proof plus executor profile, reviewer profile, and managed-requirements digests; never record or hash `auth.json` contents;
+- Control Repository commit SHA and bundled private OPC Action digest;
 - per-repository `OPC_ENABLED` state;
 - rollback owner and kill-switch drill result.
 
@@ -716,15 +718,18 @@ The runbook permits only one small, reversible milestone whose writable paths ex
 ```json
 {
   "version": 1,
-  "runtime": "codex-cli",
+  "runtime": "local-codex-cli",
+  "auth": "chatgpt-subscription",
   "codex_version": "0.144.4",
+  "codex_binary_sha256": "<measured-during-M3>",
+  "requirements_sha256": "<measured-during-M3>",
   "planner": { "model": "gpt-5.6-sol", "effort": "xhigh" },
-  "executor": { "model": "gpt-5.6-luna", "effort": "high" },
-  "reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" }
+  "executor": { "model": "gpt-5.6-luna", "effort": "high", "profile": "opc-executor", "profile_sha256": "<measured-during-M3>" },
+  "reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh", "profile": "opc-reviewer", "profile_sha256": "<measured-during-M3>" }
 }
 ```
 
-These are the concrete routing values approved for the first acceptance run: the locally verified Codex CLI is `0.144.4`; planning and independent review use the thinking route `gpt-5.6-sol` + `xhigh`; implementation uses `gpt-5.6-luna` + `high`. The planner runs through Codex CLI before Plan Approval. Unattended executor and reviewer jobs use the official `openai/codex-action`, which installs the pinned CLI and forwards model and effort to `codex exec`; OPC does not introduce a custom Responses API agent client. If any pinned value is unavailable when M3 begins, stop before execution, update M3 and M4 together with the replacement and its acceptance evidence, and obtain milestone approval. Compute and record this file's digest in `opc-v1-acceptance.md`. The release check rejects unpinned GitHub Action tags other than the explicitly approved `openai/codex-action@v1`, or Control Repository references that are not full commit SHAs.
+Replace every `<measured-during-M3>` marker with the actual lowercase `sha256:<64-hex>` measured and approved in M3; release CI rejects unresolved markers. These are the concrete routing values approved for the first acceptance run: the locally verified Codex CLI is `0.144.4`; planning and independent review use the thinking route `gpt-5.6-sol` + `xhigh`; implementation uses `gpt-5.6-luna` + `high`. The planner runs through the local Codex CLI before Plan Approval. Unattended executor and reviewer jobs directly call the same preinstalled CLI on the Mac mini and reuse the dedicated runner user's ChatGPT subscription login; they use no OpenAI API key and no Codex GitHub Action. OPC does not introduce a custom Responses API agent client. If any pinned value is unavailable when M3 begins, stop before execution, update M3 and M4 together with the replacement and its acceptance evidence, and obtain milestone approval. Compute and record this file's digest in `opc-v1-acceptance.md`. The release check rejects any `openai/codex-action` reference, any API-key secret path, any repository-controlled Codex home/profile/model setting, or Control Repository reference that is not a full commit SHA.
 
 - [ ] **Step 3: Add final CI release checks**
 

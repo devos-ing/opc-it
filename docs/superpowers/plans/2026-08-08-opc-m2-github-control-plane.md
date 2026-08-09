@@ -210,7 +210,7 @@ it.each([
 
 Define `issueFixture`, `approvalFixture`, `recoveryIssueFixture`, and `mockIssueAndComments` in the same test file as pure fixture builders with the valid Issue from Step 1 as their default value.
 
-- [ ] **Step 4: Add the Codex Desktop approval bridge**
+- [ ] **Step 4: Add the interactive Codex approval bridge**
 
 ```ts
 // test/integration/queue-approved-plan.test.ts
@@ -269,7 +269,7 @@ export async function queueApprovedPlan(input: QueueApprovedPlanInput, port: Pla
 }
 ```
 
-`opc queue-plan --repository acme/app --contract <path> --approved-digest sha256:...` is called only after the user approves the displayed Approval Digest in Codex Desktop. The command obtains a short-lived token from the user's current interactive `gh auth token` process, passes it only to this CLI process, and never writes it to disk. It creates the Issue in `needs-approval`, posts the approval as the authenticated allowlisted owner, and applies `ready` last so the label event cannot race ahead of the approval. A partial failure remains visible and non-runnable.
+`opc queue-plan --repository acme/app --contract <path> --approved-digest sha256:...` is called only after the user approves the displayed Approval Digest in an interactive Codex session backed by the local CLI. The command obtains a short-lived token from the user's current interactive `gh auth token` process, passes it only to this CLI process, and never writes it to disk. It creates the Issue in `needs-approval`, posts the approval as the authenticated allowlisted owner, and applies `ready` last so the label event cannot race ahead of the approval. A partial failure remains visible and non-runnable.
 
 - [ ] **Step 5: Verify and commit**
 

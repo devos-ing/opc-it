@@ -4,9 +4,9 @@
 
 **Goal:** Run one approved milestone on the dedicated Mac mini, produce a content-addressed Candidate Result, and independently review it without granting any repository write credential.
 
-**Architecture:** The reusable workflow hands an immutable execution envelope to a self-hosted macOS runner. OPC creates a disposable worktree at the approved base, runs fixed bootstrap and evidence commands through a bounded process adapter, and invokes a pinned Codex CLI through the official Codex Action. The implementation route uses GPT-5.6 Luna at high effort, verifies every changed file, and uploads a hash-addressed bundle. A separate job downloads only the approved review inputs and starts a fresh read-only GPT-5.6 Sol session at xhigh effort whose structured output is checked by the deterministic Evidence Gate.
+**Architecture:** The reusable workflow hands an immutable execution envelope to a self-hosted macOS runner. OPC creates a disposable worktree at the approved base, runs fixed bootstrap and evidence commands through a bounded process adapter, and directly invokes the pinned Codex CLI already installed on the Mac mini. The CLI reuses the dedicated runner user's host-side ChatGPT subscription login. The implementation route uses GPT-5.6 Luna at high effort, verifies every changed file, and uploads a hash-addressed bundle. A separate job downloads only the approved review inputs and starts a fresh, ephemeral, read-only GPT-5.6 Sol session at xhigh effort whose structured output is checked by the deterministic Evidence Gate.
 
-**Tech Stack:** Node.js 24, TypeScript, Vitest, `execa`, `shell-quote`, `@actions/artifact`, Git worktrees, GitHub reusable workflows, and `openai/codex-action@v1`.
+**Tech Stack:** Node.js 24, TypeScript, Vitest, `execa`, `shell-quote`, `@actions/artifact`, Git worktrees, GitHub reusable workflows, and a pinned local Codex CLI with host-managed ChatGPT authentication and permission profiles.
 
 ---
 
@@ -141,10 +141,12 @@ import { expect, it } from "vitest";
 import { buildChildEnvironment, assertNetworkPolicyEnforceable } from "../../src/security/environment.js";
 
 it("passes only fixed runtime values and allowlisted variables", () => {
-  const env = buildChildEnvironment({ CI: "true", NODE_ENV: "test", GITHUB_TOKEN: "secret", OPENAI_API_KEY: "secret" }, ["CI", "NODE_ENV"]);
+  const env = buildChildEnvironment({ CI: "true", NODE_ENV: "test", GITHUB_TOKEN: "secret", OPENAI_API_KEY: "secret", CODEX_API_KEY: "secret", CODEX_HOME: "/host/auth" }, ["CI", "NODE_ENV"]);
   expect(env).toEqual({ CI: "true", NODE_ENV: "test", PATH: expect.any(String), HOME: expect.any(String), TMPDIR: expect.any(String) });
   expect(env).not.toHaveProperty("GITHUB_TOKEN");
   expect(env).not.toHaveProperty("OPENAI_API_KEY");
+  expect(env).not.toHaveProperty("CODEX_API_KEY");
+  expect(env).not.toHaveProperty("CODEX_HOME");
 });
 
 it("fails onboarding for a nonempty egress allowlist in v1", () => {
@@ -205,6 +207,8 @@ export function buildChildEnvironment(source: NodeJS.ProcessEnv, allowlist: read
   result.TMPDIR ??= tmpdir();
   delete result.GITHUB_TOKEN;
   delete result.OPENAI_API_KEY;
+  delete result.CODEX_API_KEY;
+  delete result.CODEX_HOME;
   return result;
 }
 
@@ -315,7 +319,7 @@ import { buildReviewerPrompt } from "../../src/prompts/reviewer.js";
 it("executor receives the contract, narrowed policy, and no credential", () => {
   const prompt = buildExecutorPrompt({ contractJson: "{\"goal\":\"x\"}", policyJson: "{\"paths\":{}}", recoveryJson: null, contextJson: "{}" });
   expect(prompt).toContain("Do not commit, push, or create a pull request");
-  expect(prompt).not.toMatch(/GITHUB_TOKEN|OPENAI_API_KEY|ghp_/);
+  expect(prompt).not.toMatch(/GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY|CODEX_HOME|auth\.json|ghp_/);
 });
 
 it("reviewer receives evidence but never executor conversation", () => {
@@ -608,7 +612,7 @@ rtk git add src/adapters/actions/heartbeat.ts src/commands/heartbeat.ts src/cli/
 rtk git commit -m "feat: publish credential-free claim heartbeats"
 ```
 
-## Task 6: Add the Mac executor job with the official Codex Action
+## Task 6: Add the Mac executor job with the local Codex CLI
 
 **Files:**
 - Modify: `.github/workflows/reusable-opc.yml`
@@ -616,8 +620,10 @@ rtk git commit -m "feat: publish credential-free claim heartbeats"
 - Modify: `action.yml`
 - Modify: `src/action/inputs.ts`
 - Modify: `src/action/main.ts`
+- Create: `src/commands/verify-codex-runner.ts`
 - Create: `src/commands/prepare-execution.ts`
 - Create: `src/commands/finalize-execution.ts`
+- Create: `test/integration/codex-runner.test.ts`
 - Create: `test/contract/executor-workflow.test.ts`
 
 - [ ] **Step 1: Write workflow security contract tests**
@@ -627,12 +633,18 @@ Parse `.github/workflows/reusable-opc.yml` and assert the `execute` job:
 - runs only after a successful claim and only on policy-provided labels including `self-hosted`, `macOS`, `ARM64`, and `opc`;
 - has `contents: read` and no Issues, Pull Requests, Packages, Deployments, or Actions write permission;
 - checks out the exact `base_sha` with `persist-credentials: false`;
-- runs bootstrap before the OpenAI credential is passed;
+- runs bootstrap before Codex starts and never exposes the host Codex home to bootstrap or Evidence commands;
 - has a separate GitHub-hosted heartbeat job with Actions read only;
-- passes `OPENAI_API_KEY` only to the `openai/codex-action@v1` step;
-- uses `working-directory`, `output-file`, `output-schema-file`, `permission-profile: :workspace`, and `safety-strategy: drop-sudo`;
+- contains no `openai/codex-action`, `OPENAI_API_KEY`, `CODEX_API_KEY`, API-key secret, or repository-controlled `CODEX_HOME`;
+- fail-closed verifies the preinstalled Codex binary's absolute path, exact version and digest, the dedicated runner user, ChatGPT login mode, authentication owner/mode, and host-managed configuration digests;
+- directly runs `codex exec` with `--ephemeral`, `--strict-config`, `--profile opc-executor`, explicit model/effort, working directory, schema, prompt, and output file;
+- relies on the host-owned `opc-executor` permission profile, which limits writes to the current worktree and job temp, denies local tool network, and denies model-generated reads of the persistent Codex home;
 - always finalizes and cleans the disposable worktree;
 - has a 90-minute maximum timeout and a repository concurrency gate.
+
+The Mac runner service is configured once, outside all repositories, with a dedicated Codex home. The dedicated OS user runs `codex login`, selects ChatGPT subscription authentication, and stores the refreshable login in file-backed credentials using `cli_auth_credentials_store = "file"`. The directory is mode `0700`; `auth.json` and host config files are mode `0600`. Only one runner service and one serialized job stream may use that auth-file copy.
+
+The host also owns `opc-executor.config.toml`, `opc-reviewer.config.toml`, their permission-profile definitions, and managed `requirements.toml` that allows only those named profiles. Repository code cannot replace or widen them. Onboarding records the Codex binary and configuration digests, but never reads, hashes, uploads, logs, or artifacts `auth.json` contents. The Codex client may use its authenticated transport to OpenAI; the profile's network deny applies to model-generated local tools.
 
 - [ ] **Step 2: Add the exact executor workflow skeleton**
 
@@ -677,21 +689,35 @@ execute:
         repository: ${{ github.repository }}
         issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
         payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+    - name: Verify local Codex runner
+      id: codex-preflight
+      uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+      with:
+        command: verify-codex-runner
+        codex-version: ${{ inputs.codex_version }}
+        permission-profile: opc-executor
     - name: Execute approved milestone
       id: codex
-      uses: openai/codex-action@v1
-      with:
-        openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-        prompt-file: ${{ steps.prepare.outputs['prompt-file'] }}
-        output-file: ${{ runner.temp }}/opc-executor-output.json
-        output-schema-file: ${{ steps.prepare.outputs['executor-schema-file'] }}
-        working-directory: ${{ steps.prepare.outputs.workspace }}
-        sandbox: workspace-write
-        permission-profile: :workspace
-        safety-strategy: drop-sudo
-        codex-version: ${{ inputs.codex_version }}
-        model: ${{ inputs.executor_model }}
-        effort: ${{ inputs.executor_effort }}
+      shell: bash
+      env:
+        OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
+        OPC_PROMPT_FILE: ${{ steps.prepare.outputs['prompt-file'] }}
+        OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-executor-output.json
+        OPC_SCHEMA_FILE: ${{ steps.prepare.outputs['executor-schema-file'] }}
+        OPC_WORKSPACE: ${{ steps.prepare.outputs.workspace }}
+        OPC_MODEL: ${{ inputs.executor_model }}
+        OPC_EFFORT: ${{ inputs.executor_effort }}
+      run: |
+        "$OPC_CODEX_BIN" exec \
+          --ephemeral \
+          --strict-config \
+          --profile opc-executor \
+          --model "$OPC_MODEL" \
+          --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
+          --cd "$OPC_WORKSPACE" \
+          --output-schema "$OPC_SCHEMA_FILE" \
+          --output-last-message "$OPC_OUTPUT_FILE" \
+          - < "$OPC_PROMPT_FILE"
     - name: Build Candidate Result
       if: always()
       id: finalize
@@ -712,15 +738,15 @@ execute:
         retention-days: 30
 ```
 
-Extend `action.yml` with optional `payload-b64` and `input-file` inputs plus `workspace`, `prompt-file`, `executor-schema-file`, `review-schema-file`, `bundle-ready`, and `bundle-directory` outputs. Extend `ActionCommand` with `prepare-execution`, `finalize-execution`, and `heartbeat`. The schema outputs are absolute paths inside the downloaded, commit-pinned private Action. Local commands reject any supplied GitHub client and GitHub commands reject a missing one.
+Extend `action.yml` with optional `payload-b64`, `input-file`, `codex-version`, and `permission-profile` inputs plus `codex-bin`, `workspace`, `prompt-file`, `executor-schema-file`, `review-schema-file`, `bundle-ready`, and `bundle-directory` outputs. Extend `ActionCommand` with `verify-codex-runner`, `prepare-execution`, `finalize-execution`, and `heartbeat`. The schema outputs are absolute paths inside the downloaded, commit-pinned private OPC Action. Local commands reject any supplied GitHub client and GitHub commands reject a missing one.
 
-`prepare-execution` revalidates global/repository kill switches through values captured by the control job, verifies base and policy digests, creates the worktree, runs the offline bootstrap with no GitHub/OpenAI credentials, and writes the prompt to a mode `0600` file. The private Action receives no `github-token` in these local steps. `finalize-execution` removes the worktree after collecting the candidate; failure cleanup is idempotent.
+`prepare-execution` revalidates global/repository kill switches through values captured by the control job, verifies base and policy digests, creates the worktree, runs the offline bootstrap with no GitHub, API-key, or Codex-home credentials, and writes the prompt to a mode `0600` file. The private OPC Action receives no `github-token` in these local steps. `verify-codex-runner` inspects metadata and invokes `codex login status`, but emits only a validated binary path and non-sensitive pass/fail facts. `finalize-execution` removes the worktree after collecting the candidate; failure cleanup is idempotent.
 
-In this task, extend `workflow_call.secrets` with required `OPENAI_API_KEY` and update the rendered Target caller to pass `secrets.OPENAI_API_KEY`. No GitHub-hosted control or publisher step receives it; only the executor and reviewer Codex Action steps reference the secret.
+Do not add any OpenAI/Codex entry to `workflow_call.secrets`. The rendered Target caller passes no model-provider secret. The Mac runner service already owns the persistent ChatGPT login outside the repository, and only the `codex` client can use it.
 
 - [ ] **Step 3: Make model aliases explicit inputs pinned by Control Repository**
 
-Define `workflow_call` inputs `codex_version`, `executor_model`, and `executor_effort` as required strings. The M3 acceptance release uses `codex_version: "0.144.4"`, `executor_model: "gpt-5.6-luna"`, and `executor_effort: "high"`. Target repositories cannot choose them: the generated thin caller receives these constants from the approved Control Repository release manifest. Add a contract test that fails if the caller reads these values from Issue content or repository variables. The official Action is the hardened wrapper that installs this CLI version and forwards these values to `codex exec`; no custom Responses API agent client is introduced.
+Define `workflow_call` inputs `codex_version`, `executor_model`, and `executor_effort` as required strings. The M3 acceptance release uses `codex_version: "0.144.4"`, `executor_model: "gpt-5.6-luna"`, and `executor_effort: "high"`. Target repositories cannot choose them: the generated thin caller receives these constants from the approved Control Repository release manifest. Add a contract test that fails if the caller reads these values, the Codex binary, Codex home, or permission profile from Issue content or repository variables. The Mac runner bootstrap installs the exact CLI version out of band; every job verifies it before direct `codex exec`. No GitHub Action installs Codex, and no custom Responses API agent client is introduced.
 
 Build and commit the Action, record the new `control_action_sha`, render both `templates/control/reusable-opc.yml` and `.github/workflows/reusable-opc.yml` so every OPC `uses:` points to that SHA, then commit the workflow separately. This is the M3 two-commit private Action release; no step checkouts the Control Repository.
 
@@ -732,7 +758,7 @@ Run:
 rtk pnpm vitest run test/unit/action-inputs.test.ts
 rtk pnpm typecheck
 rtk pnpm build
-rtk git add action.yml src/action/inputs.ts src/action/main.ts src/commands/prepare-execution.ts src/commands/finalize-execution.ts test/contract/executor-workflow.test.ts dist
+rtk git add action.yml src/action/inputs.ts src/action/main.ts src/commands/verify-codex-runner.ts src/commands/prepare-execution.ts src/commands/finalize-execution.ts test/integration/codex-runner.test.ts test/contract/executor-workflow.test.ts dist
 rtk git commit -m "feat: package Mac execution commands"
 rtk git rev-parse HEAD
 rtk node scripts/render-control.mjs
@@ -827,20 +853,34 @@ review:
         repository: ${{ github.repository }}
         issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
         input-file: ${{ runner.temp }}/opc-review-input
-    - name: Review candidate independently
-      uses: openai/codex-action@v1
+    - name: Verify local Codex reviewer
+      id: codex-preflight
+      uses: "{{control_owner}}/OPC@{{control_action_sha}}"
       with:
-        openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-        prompt-file: ${{ steps.prepare-review.outputs['prompt-file'] }}
-        output-file: ${{ runner.temp }}/opc-result-review.json
-        output-schema-file: ${{ steps.prepare-review.outputs['review-schema-file'] }}
-        working-directory: ${{ runner.temp }}/opc-review-input
-        sandbox: read-only
-        permission-profile: :read-only
-        safety-strategy: drop-sudo
+        command: verify-codex-runner
         codex-version: ${{ inputs.codex_version }}
-        model: ${{ inputs.reviewer_model }}
-        effort: ${{ inputs.reviewer_effort }}
+        permission-profile: opc-reviewer
+    - name: Review candidate independently
+      shell: bash
+      env:
+        OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
+        OPC_PROMPT_FILE: ${{ steps.prepare-review.outputs['prompt-file'] }}
+        OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-result-review.json
+        OPC_SCHEMA_FILE: ${{ steps.prepare-review.outputs['review-schema-file'] }}
+        OPC_WORKSPACE: ${{ runner.temp }}/opc-review-input
+        OPC_MODEL: ${{ inputs.reviewer_model }}
+        OPC_EFFORT: ${{ inputs.reviewer_effort }}
+      run: |
+        "$OPC_CODEX_BIN" exec \
+          --ephemeral \
+          --strict-config \
+          --profile opc-reviewer \
+          --model "$OPC_MODEL" \
+          --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
+          --cd "$OPC_WORKSPACE" \
+          --output-schema "$OPC_SCHEMA_FILE" \
+          --output-last-message "$OPC_OUTPUT_FILE" \
+          - < "$OPC_PROMPT_FILE"
     - name: Apply deterministic Evidence Gate
       id: decision
       uses: "{{control_owner}}/OPC@{{control_action_sha}}"
@@ -860,7 +900,7 @@ review:
         retention-days: 30
 ```
 
-The reviewer job does not download executor stdout, Codex home, chat history, or hidden runner files. `prepare-review` verifies `bundle-index.json` and every entry digest before constructing the prompt. `decide-result` revalidates both JSON schemas, exact criterion set, evidence references, path scope, and bundle limit; it emits one of `verified`, `execution-failure`, `evidence-failure`, `review-failure`, or `run-incident`.
+The reviewer job does not download executor stdout, Codex rollout files, chat history, worktree, or hidden runner files. `prepare-review` verifies `bundle-index.json` and every entry digest before constructing the prompt. `decide-result` revalidates both JSON schemas, exact criterion set, evidence references, path scope, and bundle limit; it emits one of `verified`, `execution-failure`, `evidence-failure`, `review-failure`, or `run-incident`.
 
 Add `reviewer_model` and `reviewer_effort` as required reusable-workflow inputs fixed by the same release manifest. M3 uses the thinking route: `reviewer_model: "gpt-5.6-sol"` and `reviewer_effort: "xhigh"`.
 
@@ -868,7 +908,7 @@ Extend the private Action command union with `prepare-review` and `decide-result
 
 - [ ] **Step 3: Prove fresh-session and permission constraints**
 
-Add workflow tests that require a distinct job, no shared `CODEX_HOME`, `sandbox: read-only`, `permission-profile: :read-only`, `persist-credentials: false`, and an empty GitHub token on all local commands. Reject a workflow where the review step depends on executor output JSON rather than the Candidate Result bundle.
+Add workflow tests that require a distinct job, a separate review workspace/prompt/output, direct `codex exec --ephemeral --strict-config --profile opc-reviewer`, the host-managed read-only permission profile, `persist-credentials: false`, and an empty GitHub token on all local commands. The persistent host Codex home may be shared only for authentication and immutable config; the test must reject shared rollout/session/output paths or a review step that depends on executor output JSON rather than the Candidate Result bundle.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -927,15 +967,16 @@ rtk git --version
 rtk node --version
 rtk pnpm --version
 rtk codex --version
+rtk codex login status
 ```
 
-Expected: the runner service executes as `opc-runner`, has no admin membership, no developer signing keys, no personal GitHub/SSH credentials, and a mode `0700` runner/worktree root. The GitHub runner is registered only to the private sandbox with labels `self-hosted,macOS,ARM64,opc` and job concurrency one. Package caches are prewarmed interactively, then the dry run uses offline bootstrap.
+Expected: the runner service executes as `opc-runner`, has no admin membership, no developer signing keys, no personal GitHub/SSH credentials, and a mode `0700` runner/worktree root. `codex --version` exactly matches the release manifest and `codex login status` reports ChatGPT authentication. The host-owned Codex home is outside runner/worktree roots; its directory is mode `0700`, credential/config files are mode `0600`, `cli_auth_credentials_store = "file"`, and managed requirements permit only `opc-executor` and `opc-reviewer`. The GitHub runner is registered only to the private sandbox with labels `self-hosted,macOS,ARM64,opc` and job concurrency one. Package caches are prewarmed interactively, then the dry run uses offline bootstrap.
 
 - [ ] **Step 3: Run the real private sandbox matrix**
 
-Follow `docs/runbooks/m3-private-sandbox.md` to enable the OpenAI repository secret, keep Contents read-only, and run one controlled success plus one each of executor failure, Evidence failure, review mismatch, duplicate trigger, timeout, and simulated offline recovery. Inspect every artifact and Actions permission summary.
+Follow `docs/runbooks/m3-private-sandbox.md` to verify the dedicated runner user's ChatGPT login, pinned local CLI, host-owned auth/config permissions, and profile digests; add no provider secret to the repository. Keep Contents read-only, then run one controlled success plus one each of executor failure, Evidence failure, review mismatch, duplicate trigger, timeout, and simulated offline recovery. Inspect every artifact and Actions permission summary.
 
-Expected: success ends at verified Candidate Result; failure cases create the correct control-plane outcome; none creates a commit, branch, or Pull Request; executor and reviewer logs contain neither GitHub nor OpenAI secret material.
+Expected: success ends at verified Candidate Result; failure cases create the correct control-plane outcome; none creates a commit, branch, or Pull Request; executor and reviewer logs contain neither GitHub credential nor ChatGPT authentication material.
 
 - [ ] **Step 4: Run the full M3 gate**
 

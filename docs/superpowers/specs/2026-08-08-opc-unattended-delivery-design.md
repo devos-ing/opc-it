@@ -10,7 +10,7 @@
 
 ## 1. 结论
 
-OPC v1 使用标准 GitHub Actions、固定版本的 Codex CLI、官方 `openai/codex-action` 和一台专用 Mac mini self-hosted macOS runner，实现从批准计划到验证结果的无人值守交付。官方 Action 负责安装并调用 Codex CLI；OPC 不实现自定义 Responses API agent runtime。
+OPC v1 使用标准 GitHub Actions、一台专用 Mac mini self-hosted macOS runner，以及该机器上预装的固定版本 Codex CLI，实现从批准计划到验证结果的无人值守交付。GitHub Actions 只负责事件、排队与权限分离；Mac mini 直接运行 `codex exec`，复用专用 runner 用户通过 `codex login` 建立的 ChatGPT 订阅登录。v1 不使用 `openai/codex-action`、OpenAI API Key 或自定义 Responses API agent runtime。
 
 人的参与被严格限制为：
 
@@ -78,7 +78,7 @@ Temporal 适合大量跨服务、跨天运行且必须从故障点恢复的关�
 
 ### 3.4 为什么不使用 gh-aw
 
-GitHub Agentic Workflows 提供 agent workflow、安全输出和失败 Issue 等相近能力，但其 self-hosted 运行路径以 Linux 和 Docker 为边界，不能直接满足 Mac mini 原生 macOS runner 的目标。v1 因此使用标准 GitHub Actions 与官方 Codex Action，并自行实现较小、明确的状态机。
+GitHub Agentic Workflows 提供 agent workflow、安全输出和失败 Issue 等相近能力，但其 self-hosted 运行路径以 Linux 和 Docker 为边界，不能直接满足 Mac mini 原生 macOS runner 的目标。v1 因此使用标准 GitHub Actions 排队，在 Mac mini 上直接调用本机 Codex CLI，并自行实现较小、明确的状态机。
 
 ## 4. 系统边界
 
@@ -137,28 +137,32 @@ flowchart LR
 
 ### 5.1 GitHub Actions jobs 与权限
 
-| Job | 运行位置 | Repository code | OpenAI credential | GitHub 权限 | 职责 |
+| Job | 运行位置 | Repository code | Codex 登录 | GitHub 权限 | 职责 |
 |---|---|---:|---:|---|---|
 | `dispatch-and-claim` | GitHub-hosted | 不执行 | 无 | Issues write，Actions/Contents read | 验证授权、选择队首、创建 Work Claim |
 | `heartbeat` | GitHub-hosted | 不执行 | 无 | Actions/Contents read | 每五分钟上传最小 liveness artifact，观察 execute/review jobs |
-| `execute` | Mac mini | 执行 | 有 | Contents read | 创建 Execution Workspace，运行 Codex 和 Evidence Gate |
-| `review` | Mac mini | 只读 | 有 | Contents read | 新会话独立审查合约、diff 与 Evidence Bundle |
+| `execute` | Mac mini | 执行 | 主机侧 ChatGPT auth | Contents read | 创建 Execution Workspace，直接运行本机 Codex CLI 和 Evidence Gate |
+| `review` | Mac mini | 只读 | 同一主机 auth，新会话 | Contents read | 新会话独立审查合约、diff 与 Evidence Bundle |
 | `recover` | GitHub-hosted | 不执行 | 无 | Issues/Actions write | 创建去重 Recovery Issue 或 Terminal Blocker，并显式 dispatch 下一次尝试 |
 | `publish` | GitHub-hosted | 不执行脚本 | 无 | Contents/PR/Issues write | 验证 artifact，创建 commit、branch 和 PR |
 
 权限按 job 明确声明。下游 reusable workflow 只能维持或降低 caller 提供的 `GITHUB_TOKEN` 权限，不能自行提权。
 
-Target Repository checkout 使用 `persist-credentials: false`。OPC 在启动 Codex 前准备好所需上下文，并从 Codex 子进程环境移除 GitHub token；`Contents read` 只供受控 checkout 与编排步骤使用。OpenAI credential 只传给 Codex Action step，不传给 bootstrap、Evidence commands 或 publisher。
+Target Repository checkout 使用 `persist-credentials: false`。OPC 在启动 Codex 前准备好所需上下文，并从 Codex 子进程环境移除 GitHub token；`Contents read` 只供受控 checkout 与编排步骤使用。ChatGPT 登录文件只存在于 Mac mini 的 host-owned Codex home，由 `codex` 客户端读取；它不通过 GitHub secret、workflow input 或子进程环境传给 bootstrap、Evidence commands、publisher 或 Target Repository code。
 
 ### 5.2 Mac mini 隔离
 
 - 使用专用 macOS runner 用户。
 - 不登录 iCloud，不存放个人文件，不使用日常开发用户的 SSH Agent 或 Keychain。
+- 由 runner service 在仓库外固定一个持久、host-owned 的 Codex home；首次由该专用用户执行 `codex login`，登录方式必须是 ChatGPT，凭证目录权限为 `0700`，`auth.json` 为 `0600`，永不提交、上传、打印或复制到 worktree。
+- Codex CLI 使用 `cli_auth_credentials_store = "file"`，从该 Codex home 复用并刷新 ChatGPT 登录。一个 auth 文件副本只由这台机器的单一、串行 runner job stream 使用；不得由多个 runner service 并发共享。
+- runner onboarding 固定 Codex CLI 的绝对路径、版本与二进制 digest，并固定 `opc-executor`、`opc-reviewer` permission profiles 及 host-managed `requirements.toml` 的 digest；每次 job 在运行前 fail closed 校验版本、文件 owner/mode、配置 digest 与 `codex login status`。
 - 每次尝试创建新的 disposable worktree。
-- Codex 使用 `workspace-write` sandbox，workload 默认断网。
-- OpenAI credential 只存在于 executor 和 reviewer job。
+- executor 使用 host-managed `opc-executor` permission profile，只能写当前 worktree 与 job temp；reviewer 使用 `opc-reviewer` read-only profile。两者都禁止模型生成的本地命令读取持久 Codex home，并默认禁止本地工具网络；Codex 客户端到 OpenAI 服务的认证传输不属于 workload 工具网络。
+- executor 与 reviewer 都直接运行 `codex exec --ephemeral --strict-config`。共享认证不等于共享会话：两次调用不共享 rollout、对话、workspace、prompt 或 output。
+- workflow 不接收 `OPENAI_API_KEY`、`CODEX_API_KEY`、`auth.json` 或任何账户 token；Target Repository、Issue、Repository Variable 与 workflow input 也不能选择 Codex home、permission profile、模型、effort 或 CLI 版本。
 - executor job 最多只有 GitHub read 权限，Codex 子进程不接收 GitHub token。
-- 结束后移除 worktree、临时文件和 job-scoped credential。
+- 结束后移除 worktree 与临时文件；持久 ChatGPT 登录保留在 host-owned Codex home，供下一次串行 job 使用。
 - v1 的隔离弱于 VM 或容器，因此私有仓库、owner approval 和 Repository Policy 是强制补偿控制。
 
 ## 6. 端到端流程
@@ -193,7 +197,7 @@ Plan Approval 只授权该 Milestone Contract，不授权相邻工作、后续 m
 ### 6.3 执行
 
 1. 在批准的 `base_sha` 创建 Execution Workspace。
-2. 编排器在注入 OpenAI credential 前，按 Repository Policy 的独立 bootstrap network policy 执行固定 bootstrap 命令。
+2. 编排器在启动 Codex 前，按 Repository Policy 的独立 bootstrap network policy 执行固定 bootstrap 命令；bootstrap 永远看不到 host Codex home 或账户凭证。
 3. `gpt-5.6-luna` + `high` 的 Codex CLI executor 获得：
    - Milestone Contract。
    - Repository Policy 的收紧视图。
@@ -496,7 +500,7 @@ Mac mini 离线、GitHub/OpenAI/API 暂时不可用或 runner 未能可靠启动
 1. 不执行、不 rebase、不消耗 Recovery Budget。
 2. 自动生成 change-impact summary。
 3. Issue 进入 `opc:needs-reapproval`。
-4. 返回 Codex Desktop 请求新的 Plan Approval。
+4. 返回交互式 Codex 计划面请求新的 Plan Approval。
 
 v1 不尝试判断代码变化“看起来无关”后自动重签，因为这种判断会把批准权转交给系统。
 
@@ -515,7 +519,7 @@ v1 不尝试判断代码变化“看起来无关”后自动重签，因为这�
 
 Repository Policy 和 Milestone Contract 可以降低但不能提高这些上限。执行超时是 Execution Failure；在可信执行尚未开始前的 runner 或服务不可用是 Run Incident。
 
-planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 使用 implementation route：`gpt-5.6-luna` + `high`。三个角色都通过固定版本的 Codex CLI 运行；无人值守 executor/reviewer 可由官方 `openai/codex-action` 安装并调用该 CLI。中央别名固定具体 model、CLI 版本与 reasoning profile，升级必须通过 OPC 自身 acceptance suite。每次运行记录可用的 model version、token usage、duration、transition 和 artifact hashes。
+planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 使用 implementation route：`gpt-5.6-luna` + `high`。三个角色都通过固定版本的 Codex CLI 运行；无人值守 executor/reviewer 由 Mac mini 上预装的 CLI 直接执行，并复用该专用 runner 用户的 ChatGPT 订阅登录。中央 release manifest 固定具体 model、CLI 版本、binary digest、reasoning profile 与 permission-profile digest，升级必须通过 OPC 自身 acceptance suite。每次运行记录可用的 model version、token usage、duration、transition 和 artifact hashes，但不记录认证内容。
 
 ## 13. 通知与可观测性
 
@@ -619,7 +623,7 @@ planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 
 
 1. 执行与结果审查分离。
 2. 每仓库串行。
-3. 原生 GitHub Actions 与 Codex Action。
+3. 原生 GitHub Actions 与本机 Codex CLI。
 4. 仅 owner-approved private repositories。
 5. immutable Milestone Contract 与 digest。
 6. heartbeat Claim Lease。
@@ -638,8 +642,11 @@ planner 与 reviewer 使用 thinking route：`gpt-5.6-sol` + `xhigh`。executor 
 
 ## 19. 主要资料
 
-- [OpenAI Codex GitHub Action](https://learn.chatgpt.com/docs/github-action)
+- [OpenAI Codex authentication](https://learn.chatgpt.com/docs/auth)
+- [OpenAI Codex ChatGPT account authentication for CI/CD](https://learn.chatgpt.com/docs/auth/ci-cd-auth)
 - [OpenAI Codex Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [OpenAI Codex permissions](https://learn.chatgpt.com/docs/permissions)
+- [OpenAI Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 - [OpenAI model catalog](https://developers.openai.com/api/docs/models/all)
 - [GitHub Self-hosted runners reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 - [GitHub Adding self-hosted runners](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
