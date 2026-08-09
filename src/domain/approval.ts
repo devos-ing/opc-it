@@ -1,4 +1,5 @@
 import type { Sha256 } from "./identity.js";
+import type { DomainErrorCode } from "./errors.js";
 
 export interface ApprovalRecord {
   readonly actor: string;
@@ -10,6 +11,19 @@ export interface ApprovalRecord {
 export type ApprovalResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "actor" | "digest" | "edited" | "format" };
+
+export type ApprovalFailureReason = Extract<ApprovalResult, { readonly ok: false }>["reason"];
+
+const approvalFailureCodes: Readonly<Record<ApprovalFailureReason, DomainErrorCode>> = {
+  actor: "APPROVAL_ACTOR_REJECTED",
+  digest: "APPROVAL_DIGEST_MISMATCH",
+  edited: "APPROVAL_EDITED",
+  format: "APPROVAL_FORMAT_INVALID",
+};
+
+export function approvalFailureCode(reason: ApprovalFailureReason): DomainErrorCode {
+  return approvalFailureCodes[reason];
+}
 
 export function verifyApproval(
   record: ApprovalRecord,

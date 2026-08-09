@@ -56,3 +56,40 @@ it("reports an unclaimed result without execution data", () => {
     toActionOutputs({ command: "claim", claimed: false, reason: "empty" }),
   ).toEqual({ claimed: "false" });
 });
+
+it("does not expose execution outputs for a Recovery control result", () => {
+  expect(
+    toActionOutputs({
+      command: "recover",
+      recovery: { outcome: "created", issueNumber: 42, nextAttempt: 2 },
+    }),
+  ).toEqual({ claimed: "false" });
+});
+
+it("exports a claim obtained by a scheduled reconciliation", () => {
+  const claim: ActionCommandResult = {
+    command: "reconcile",
+    reconciliation: { active: 0, kept: 0, requeued: 0, blocked: 0, cancelled: 0 },
+    claim: {
+      claimed: true,
+      issueNumber: 7,
+      attempt: 1,
+      baseSha: validMilestoneObject.base_sha,
+      runId: "scheduled-123",
+      envelope: {
+        issueNumber: 7,
+        rootIssueNumber: 7,
+        attempt: 1,
+        contract: validMilestoneObject,
+        policy: validPolicy,
+        approvalDigest: digestCanonical(validMilestoneObject),
+      },
+    },
+  };
+
+  expect(toActionOutputs(claim)).toMatchObject({
+    claimed: "true",
+    "issue-number": "7",
+    attempt: "1",
+  });
+});

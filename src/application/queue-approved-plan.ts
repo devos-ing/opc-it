@@ -1,4 +1,5 @@
 import type { MilestoneContract, RepositoryPolicy } from "../domain/contracts.js";
+import { renderContractBlock } from "../adapters/github/issue-parser.js";
 import { DomainError } from "../domain/errors.js";
 import { digestCanonical, type Sha256 } from "../domain/identity.js";
 import { assertMilestoneWithinPolicy } from "../domain/policy.js";
@@ -21,6 +22,7 @@ export interface PlanQueuePort {
   loadRepositoryPolicy(): Promise<RepositoryPolicy>;
   loadDefaultBranchSha(): Promise<string>;
   findOpenWorkById(workId: string): Promise<ExistingWork | undefined>;
+  ensureControlLabels(): Promise<void>;
   createNeedsApprovalIssue(body: string): Promise<number>;
   createApprovalComment(issueNumber: number, body: string): Promise<void>;
   replaceLabels(issueNumber: number, labels: readonly string[]): Promise<void>;
@@ -43,9 +45,7 @@ function renderWorkIssue(contract: MilestoneContract): string {
   return [
     `# OPC Work ${contract.work_id}`,
     "",
-    "```yaml opc-contract",
-    JSON.stringify(contract, null, 2),
-    "```",
+    renderContractBlock(JSON.stringify(contract, null, 2)),
     "",
   ].join("\n");
 }
@@ -82,6 +82,7 @@ export async function queueApprovedPlan(
     return { issueNumber: existing.issueNumber, approvalDigest: digest, queued: false };
   }
 
+  await port.ensureControlLabels();
   const issueNumber = await port.createNeedsApprovalIssue(renderWorkIssue(input.contract));
   await port.createApprovalComment(issueNumber, `/opc approve ${digest}`);
   await port.replaceLabels(issueNumber, ["opc:work", "opc:ready", "opc:attempt-1"]);

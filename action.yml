@@ -13,6 +13,9 @@ inputs:
   workflow-ref:
     description: caller default branch used for explicit workflow dispatch
     required: false
+  failure-payload-b64:
+    description: base64url-encoded bounded failure evidence for recover
+    required: false
   github-token:
     description: repository-scoped GitHub Actions token
     required: false

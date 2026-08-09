@@ -6,8 +6,21 @@ import type {
 } from "../../application/queue-approved-plan.js";
 import { DomainError } from "../../domain/errors.js";
 import { digestCanonical } from "../../domain/identity.js";
+import { workStates } from "../../domain/state.js";
 import { parseIssueContractYaml, parseRepositoryPolicyYaml } from "../../domain/validation.js";
 import { extractContractBlock } from "./issue-parser.js";
+
+const controlLabelDefinitions = [
+  { name: "opc:work", description: "OPC approved Work queue record" },
+  { name: "opc:recovery", description: "OPC bounded Recovery queue record" },
+  ...workStates.map((state) => ({
+    name: `opc:${state}`,
+    description: `OPC lifecycle state: ${state}`,
+  })),
+  { name: "opc:attempt-1", description: "OPC attempt 1" },
+  { name: "opc:attempt-2", description: "OPC attempt 2" },
+  { name: "opc:attempt-3", description: "OPC attempt 3" },
+] as const;
 
 export class GitHubPlanQueue implements PlanQueuePort {
   private repositoryIdentity?: Promise<RepositoryIdentity>;
@@ -86,6 +99,25 @@ export class GitHubPlanQueue implements PlanQueuePort {
       labels: ["opc:work", "opc:needs-approval", "opc:attempt-1"],
     });
     return data.number;
+  }
+
+  async ensureControlLabels(): Promise<void> {
+    const labels = await this.octokit.paginate(this.octokit.rest.issues.listLabelsForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      per_page: 100,
+    });
+    const existing = new Set(labels.map((label) => label.name));
+    for (const definition of controlLabelDefinitions) {
+      if (existing.has(definition.name)) continue;
+      await this.octokit.rest.issues.createLabel({
+        owner: this.owner,
+        repo: this.repo,
+        name: definition.name,
+        color: "1D76DB",
+        description: definition.description,
+      });
+    }
   }
 
   async createApprovalComment(issueNumber: number, body: string): Promise<void> {

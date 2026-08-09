@@ -17,6 +17,7 @@ const validTransitions: ReadonlyArray<readonly [WorkState, WorkEvent, WorkState]
   ["ready", "drift", "needs-reapproval"],
   ["needs-reapproval", "approve", "ready"],
   ["claimed", "lease-expired", "ready"],
+  ["claimed", "outage-block", "blocked"],
 ];
 
 describe("transition", () => {

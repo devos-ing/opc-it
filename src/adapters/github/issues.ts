@@ -1,6 +1,10 @@
 import type { Octokit } from "@octokit/rest";
 import type { WorkIssueRecord } from "../../application/ports.js";
-import { verifyApproval, type ApprovalRecord } from "../../domain/approval.js";
+import {
+  approvalFailureCode,
+  verifyApproval,
+  type ApprovalRecord,
+} from "../../domain/approval.js";
 import type { MilestoneContract, RecoveryAddendum } from "../../domain/contracts.js";
 import { DomainError } from "../../domain/errors.js";
 import type { Sha256 } from "../../domain/identity.js";
@@ -51,7 +55,11 @@ function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
 function approvalFromComments(
   comments: Awaited<ReturnType<Octokit["rest"]["issues"]["listComments"]>>["data"],
   approvers: readonly string[] | undefined,
-): { approval?: ApprovalRecord; approvalDigest?: Sha256 } {
+): {
+  approval?: ApprovalRecord;
+  approvals: readonly ApprovalRecord[];
+  approvalDigest?: Sha256;
+} {
   const approvals = comments.flatMap((comment) => {
     const actor = comment.user?.login;
     const body = comment.body;
@@ -68,23 +76,34 @@ function approvalFromComments(
   approvals.sort((left, right) =>
     right.approval.createdAt.localeCompare(left.approval.createdAt),
   );
-  const latest = approvals[0];
-  if (!latest) return {};
+  if (!approvers) {
+    return { approvals: approvals.map((candidate) => candidate.approval) };
+  }
+  const authorized = approvals.filter((candidate) =>
+    approvers.includes(candidate.approval.actor),
+  );
+  const latest =
+    authorized.find(
+      (candidate) => candidate.approval.createdAt === candidate.approval.updatedAt,
+    ) ??
+    authorized[0] ??
+    approvals[0];
+  if (!latest) return { approvals: [] };
   const verification = verifyApproval(
     latest.approval,
-    approvers ?? [latest.approval.actor],
+    approvers,
     latest.approvalDigest,
   );
   if (!verification.ok) {
-    const codes = {
-      actor: "APPROVAL_ACTOR_REJECTED",
-      digest: "APPROVAL_DIGEST_MISMATCH",
-      edited: "APPROVAL_EDITED",
-      format: "APPROVAL_FORMAT_INVALID",
-    } as const;
-    throw new DomainError(codes[verification.reason], latest.approval.actor);
+    throw new DomainError(
+      approvalFailureCode(verification.reason),
+      latest.approval.actor,
+    );
   }
-  return latest;
+  return {
+    ...latest,
+    approvals: approvals.map((candidate) => candidate.approval),
+  };
 }
 
 function hasHttpStatus(error: unknown): error is { readonly status: number } {

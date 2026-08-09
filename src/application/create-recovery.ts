@@ -7,10 +7,12 @@ import {
   type FailureCategory,
 } from "../domain/recovery.js";
 import type { RecoveryIssueInput } from "./ports.js";
+import { renderContractBlock } from "../adapters/github/issue-parser.js";
 
 export interface FailedAttempt {
   readonly category: FailureCategory;
   readonly attempt: Exclude<CompletedAttempts, 0>;
+  readonly approvedAttempts: 1 | 2 | 3;
   readonly requiresExpansion: boolean;
   readonly rootIssueNumber: number;
   readonly issueNumber: number;
@@ -52,9 +54,7 @@ function serializeRecoveryIssue(addendum: RecoveryAddendum): string {
     "",
     "This Issue records one bounded repair attempt for an approved Work contract.",
     "",
-    "```yaml opc-contract",
-    stringify(addendum).trimEnd(),
-    "```",
+    renderContractBlock(stringify(addendum)),
     "",
   ].join("\n");
 }
@@ -63,6 +63,13 @@ export async function createRecovery(
   input: FailedAttempt,
   port: RecoveryPort,
 ): Promise<RecoveryResult> {
+  if (
+    input.category !== "infrastructure" &&
+    !input.requiresExpansion &&
+    input.attempt >= input.approvedAttempts
+  ) {
+    return { outcome: "blocked", reason: "budget-exhausted" };
+  }
   const decision = decideRecovery({
     category: input.category,
     completedAttempts: input.attempt,
@@ -97,7 +104,6 @@ export async function createRecovery(
   };
   const issueNumber = await port.createRecovery({
     rootIssueNumber: input.rootIssueNumber,
-    parentIssueNumber: input.issueNumber,
     body: serializeRecoveryIssue(addendum),
     fingerprint: input.fingerprint,
     attempt: decision.nextAttempt,

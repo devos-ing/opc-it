@@ -29,6 +29,7 @@ export const workEvents = [
   "block",
   "drift",
   "lease-expired",
+  "outage-block",
 ] as const;
 export type WorkEvent = (typeof workEvents)[number];
 
@@ -38,7 +39,7 @@ type TransitionMap = Readonly<Partial<Record<WorkState, StateTransitions>>>;
 const transitions: TransitionMap = {
   "needs-approval": { approve: "ready" },
   ready: { claim: "claimed", drift: "needs-reapproval" },
-  claimed: { start: "running", "lease-expired": "ready" },
+  claimed: { start: "running", "lease-expired": "ready", "outage-block": "blocked" },
   running: { candidate: "reviewing", "work-failure": "recovering", incident: "ready" },
   reviewing: { verify: "result-ready", "work-failure": "recovering" },
   recovering: { retry: "ready", block: "blocked" },

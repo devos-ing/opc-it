@@ -5,6 +5,25 @@ import { queueApprovedPlan } from "../../src/application/queue-approved-plan.js"
 import { digestCanonical } from "../../src/domain/identity.js";
 import { validMilestoneObject, validPolicy } from "../fixtures/contracts.js";
 
+const requiredControlLabels = [
+  "opc:work",
+  "opc:recovery",
+  "opc:needs-approval",
+  "opc:ready",
+  "opc:claimed",
+  "opc:running",
+  "opc:reviewing",
+  "opc:recovering",
+  "opc:result-ready",
+  "opc:needs-reapproval",
+  "opc:needs-decision",
+  "opc:blocked",
+  "opc:delivered",
+  "opc:attempt-1",
+  "opc:attempt-2",
+  "opc:attempt-3",
+] as const;
+
 interface ApiRoute {
   readonly method: string;
   readonly path: string;
@@ -16,6 +35,12 @@ interface ApiRequest {
   readonly method: string;
   readonly path: string;
   readonly body?: unknown;
+}
+
+function requestLabelName(request: ApiRequest): unknown {
+  return typeof request.body === "object" && request.body !== null
+    ? Object.fromEntries(Object.entries(request.body)).name
+    : undefined;
 }
 
 function createGitHubApi(routes: readonly ApiRoute[]): {
@@ -91,6 +116,17 @@ it("creates one immutable Issue, records owner approval, then marks it Ready", a
       path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100",
       response: [],
     },
+    {
+      method: "GET",
+      path: "/repos/acme/app/labels?per_page=100",
+      response: [],
+    },
+    ...requiredControlLabels.map((name) => ({
+      method: "POST",
+      path: "/repos/acme/app/labels",
+      response: { name },
+      status: 201,
+    })),
     { method: "POST", path: "/repos/acme/app/issues", response: { number: 7 }, status: 201 },
     {
       method: "POST",
@@ -112,6 +148,11 @@ it("creates one immutable Issue, records owner approval, then marks it Ready", a
   );
 
   expect(result).toEqual({ issueNumber: 7, approvalDigest: digest, queued: true });
+  expect(
+    api.requests
+      .filter((request) => request.path === "/repos/acme/app/labels")
+      .map(requestLabelName),
+  ).toEqual([...requiredControlLabels]);
   expect(api.requests.slice(-3)).toMatchObject([
     {
       method: "POST",

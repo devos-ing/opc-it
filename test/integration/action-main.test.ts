@@ -53,7 +53,12 @@ class TestActionRuntime implements ActionRuntime {
   constructor(
     private readonly inputs: Readonly<Record<string, string>>,
     private readonly octokit?: Octokit,
+    private readonly actionRepository = "acme/OPC",
   ) {}
+
+  getActionRepository(): string {
+    return this.actionRepository;
+  }
 
   getInput(name: string): string {
     return this.inputs[name] ?? "";
@@ -107,7 +112,22 @@ it("reports a stable domain error for malformed scheduler input", async () => {
   expect(runtime.failures).toEqual(["INVALID_ACTION_COMMAND"]);
 });
 
-it("claims through Octokit and publishes the immutable envelope outputs", async () => {
+it("rejects a target outside the control Action owner", async () => {
+  const runtime = new TestActionRuntime(
+    { command: "claim", repository: "mallory/app" },
+    undefined,
+    "acme/OPC",
+  );
+
+  await main(runtime);
+
+  expect(runtime.outputs.size).toBe(0);
+  expect(runtime.failures).toEqual(["UNTRUSTED_REPOSITORY"]);
+});
+
+it.each(["claim", "reconcile"] as const)(
+  "%s reaches the Octokit claim path and publishes immutable outputs",
+  async (command) => {
   const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
   const approvalDigest = digestCanonical(contract);
   const body = `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`;
@@ -125,8 +145,28 @@ it("claims through Octokit and publishes the immutable envelope outputs", async 
       created_at: "2026-08-08T00:01:00Z",
       updated_at: "2026-08-08T00:01:00Z",
     },
+    {
+      user: { login: "mallory" },
+      body: `/opc approve ${approvalDigest}`,
+      created_at: "2026-08-08T00:02:00Z",
+      updated_at: "2026-08-08T00:02:00Z",
+    },
   ];
   const api = createGitHubApi([
+    ...(command === "reconcile"
+      ? [
+          {
+            method: "GET",
+            path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
+            response: [],
+          },
+        ]
+      : []),
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues?state=open&per_page=100",
+      response: [],
+    },
     {
       method: "GET",
       path: "/repos/acme/app/issues?state=open&labels=opc%3Aready&per_page=100",
@@ -189,7 +229,7 @@ it("claims through Octokit and publishes the immutable envelope outputs", async 
   ]);
   const runtime = new TestActionRuntime(
     {
-      command: "claim",
+      command,
       repository: "acme/app",
       "github-token": "test",
     },
@@ -208,4 +248,5 @@ it("claims through Octokit and publishes the immutable envelope outputs", async 
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
   ]);
   expect(api.isDone()).toBe(true);
-});
+  },
+);

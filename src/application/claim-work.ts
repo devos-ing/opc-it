@@ -1,6 +1,10 @@
 import type { WorkIssueRecord, StateTransitionCommand, TransitionResult } from "./ports.js";
 import { selectWork } from "./select-work.js";
-import { verifyApproval } from "../domain/approval.js";
+import {
+  approvalFailureCode,
+  verifyApproval,
+  type ApprovalFailureReason,
+} from "../domain/approval.js";
 import type {
   MilestoneContract,
   RecoveryAddendum,
@@ -23,6 +27,7 @@ export interface RepositoryControlIdentity {
 }
 
 export interface ClaimPort {
+  hasActiveClaim(): Promise<boolean>;
   listEligibleWork(): Promise<readonly WorkIssueRecord[]>;
   loadWorkIssue(issueNumber: number): Promise<WorkIssueRecord>;
   loadRepositoryIdentity(): Promise<RepositoryControlIdentity>;
@@ -50,19 +55,41 @@ export type ClaimResult =
       readonly runId: string;
       readonly envelope: ExecutionEnvelope;
     }
-  | { readonly claimed: false; readonly reason: "empty" | "lost-race" };
+  | {
+      readonly claimed: false;
+      readonly reason: "empty" | "lost-race" | "active-claim";
+    };
 
-function approvalError(reason: "actor" | "digest" | "edited" | "format"): DomainError {
-  const codes = {
-    actor: "APPROVAL_ACTOR_REJECTED",
-    digest: "APPROVAL_DIGEST_MISMATCH",
-    edited: "APPROVAL_EDITED",
-    format: "APPROVAL_FORMAT_INVALID",
-  } as const;
-  return new DomainError(codes[reason], reason);
+function approvalError(reason: ApprovalFailureReason): DomainError {
+  return new DomainError(approvalFailureCode(reason), reason);
 }
 
-async function verifyReadyIssue(
+function selectApproval(
+  issue: WorkIssueRecord,
+  approvers: readonly string[],
+  approvalDigest: Sha256,
+) {
+  const candidates = issue.approvals ?? (issue.approval ? [issue.approval] : []);
+  if (candidates.length === 0) {
+    throw new DomainError("APPROVAL_MISSING", String(issue.number));
+  }
+  const authorized = candidates.filter((candidate) => approvers.includes(candidate.actor));
+  if (authorized.length === 0) throw approvalError("actor");
+  const unedited = authorized.filter(
+    (candidate) => candidate.createdAt === candidate.updatedAt,
+  );
+  const eligible = unedited.length > 0 ? unedited : authorized;
+  for (const candidate of eligible) {
+    if (verifyApproval(candidate, approvers, approvalDigest).ok) return candidate;
+  }
+  const latest = eligible[0];
+  if (!latest) throw new DomainError("APPROVAL_MISSING", String(issue.number));
+  const failed = verifyApproval(latest, approvers, approvalDigest);
+  if (failed.ok) return latest;
+  throw approvalError(failed.reason);
+}
+
+export async function verifyWorkIssue(
   issue: WorkIssueRecord,
   port: ClaimPort,
 ): Promise<ExecutionEnvelope> {
@@ -92,9 +119,15 @@ async function verifyReadyIssue(
     approvalIssue = rootIssue;
     recovery = parsed;
   }
+  if (recovery && recovery.attempt > contract.limits.attempts) {
+    throw new DomainError("RECOVERY_BUDGET_EXCEEDED", String(recovery.attempt));
+  }
   const policy = await port.loadRepositoryPolicy(contract.base_sha);
+  const issueAuthorAllowed = recovery
+    ? issue.author === "github-actions[bot]"
+    : policy.approvers.includes(issue.author);
   if (
-    !policy.approvers.includes(issue.author) ||
+    !issueAuthorAllowed ||
     !policy.approvers.includes(approvalIssue.author)
   ) {
     throw new DomainError("ISSUE_AUTHOR_REJECTED", issue.author);
@@ -110,11 +143,7 @@ async function verifyReadyIssue(
   if (recovery && recovery.approval_digest !== approvalDigest) {
     throw new DomainError("APPROVAL_DIGEST_MISMATCH", recovery.approval_digest);
   }
-  if (!approvalIssue.approval) {
-    throw new DomainError("APPROVAL_MISSING", String(approvalIssue.number));
-  }
-  const approval = verifyApproval(approvalIssue.approval, policy.approvers, approvalDigest);
-  if (!approval.ok) throw approvalError(approval.reason);
+  selectApproval(approvalIssue, policy.approvers, approvalDigest);
   if (issue.approvalDigest && issue.approvalDigest !== approvalDigest) {
     throw new DomainError("APPROVAL_DIGEST_MISMATCH", issue.approvalDigest);
   }
@@ -134,6 +163,9 @@ export async function claimNextWork(
   clock: Clock,
   input: { readonly runId: string },
 ): Promise<ClaimResult> {
+  if (await port.hasActiveClaim()) {
+    return { claimed: false, reason: "active-claim" };
+  }
   const eligible = (await port.listEligibleWork()).flatMap((item) =>
     item.state === "ready" ? [{ ...item, state: "ready" as const }] : [],
   );
@@ -141,7 +173,7 @@ export async function claimNextWork(
   if (!selected) return { claimed: false, reason: "empty" };
   const current = await port.loadWorkIssue(selected.number);
   if (current.state !== "ready") return { claimed: false, reason: "lost-race" };
-  const envelope = await verifyReadyIssue(current, port);
+  const envelope = await verifyWorkIssue(current, port);
   const claimedAt = clock.now();
   const command: StateTransitionCommand = {
     issueNumber: current.number,

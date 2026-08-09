@@ -1,20 +1,40 @@
 import type { Octokit } from "@octokit/rest";
 import type { RecoveryPort } from "../../application/create-recovery.js";
-import type { RecoveryIssueInput } from "../../application/ports.js";
+import type { RecoveryControlPort } from "../../application/recover-failed-work.js";
+import type {
+  RecoveryIssueInput,
+  StateTransitionCommand,
+  TransitionResult,
+  WorkIssueRecord,
+} from "../../application/ports.js";
 import type { Sha256 } from "../../domain/identity.js";
 import { parseIssueContractYaml } from "../../domain/validation.js";
 import { extractContractBlock } from "./issue-parser.js";
+import { GitHubStateStore } from "./state-store.js";
 
 function recoveryMarker(rootIssueNumber: number, fingerprint: Sha256): string {
   return `<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=${fingerprint} -->`;
 }
 
-export class GitHubRecovery implements RecoveryPort {
+export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
+  private readonly stateStore: GitHubStateStore;
+
   constructor(
     private readonly octokit: Octokit,
     private readonly owner: string,
     private readonly repo: string,
-  ) {}
+    trustedOwner = owner,
+  ) {
+    this.stateStore = new GitHubStateStore(octokit, owner, repo, undefined, trustedOwner);
+  }
+
+  loadWorkIssue(issueNumber: number): Promise<WorkIssueRecord> {
+    return this.stateStore.loadWorkIssue(issueNumber);
+  }
+
+  transition(command: StateTransitionCommand): Promise<TransitionResult> {
+    return this.stateStore.transition(command);
+  }
 
   async findOpenRecovery(
     rootIssueNumber: number,

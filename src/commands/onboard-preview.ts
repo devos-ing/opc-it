@@ -20,7 +20,11 @@ export interface TemplateFiles {
 }
 
 export interface RepositoryReader {
-  get(repository: string): Promise<{ readonly private: boolean; readonly fork: boolean }>;
+  get(repository: string): Promise<{
+    readonly private: boolean;
+    readonly fork: boolean;
+    readonly owner: string;
+  }>;
 }
 
 interface RenderedTemplate {
@@ -109,7 +113,11 @@ export async function onboardPreview(
 ): Promise<readonly string[]> {
   validatePreviewInput(input);
   const repository = await ports.repositories.get(input.repository);
-  if (!repository.private || repository.fork) {
+  if (
+    !repository.private ||
+    repository.fork ||
+    repository.owner !== input.controlOwner
+  ) {
     throw new DomainError("UNTRUSTED_REPOSITORY", input.repository);
   }
   const rendered = await renderM2Templates(input, ports.files);
@@ -170,10 +178,14 @@ class LocalTemplateFiles implements TemplateFiles {
 class OctokitRepositoryReader implements RepositoryReader {
   constructor(private readonly octokit: Octokit) {}
 
-  async get(repository: string): Promise<{ readonly private: boolean; readonly fork: boolean }> {
+  async get(repository: string): Promise<{
+    readonly private: boolean;
+    readonly fork: boolean;
+    readonly owner: string;
+  }> {
     const [owner, repo] = repositoryParts(repository);
     const { data } = await this.octokit.rest.repos.get({ owner, repo });
-    return { private: data.private, fork: data.fork };
+    return { private: data.private, fork: data.fork, owner: data.owner.login };
   }
 }
 

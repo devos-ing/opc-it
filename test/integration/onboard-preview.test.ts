@@ -42,7 +42,7 @@ class MemoryTemplateFiles implements TemplateFiles {
 }
 
 function repositoryReader(
-  repository: { readonly private: boolean; readonly fork: boolean },
+  repository: { readonly private: boolean; readonly fork: boolean; readonly owner: string },
 ): RepositoryReader {
   return { get: () => Promise.resolve(repository) };
 }
@@ -61,7 +61,7 @@ it("renders three mode-0600 templates under the contained output", async () => {
   expect(
     await onboardPreview(validInput, {
       files,
-      repositories: repositoryReader({ private: true, fork: false }),
+      repositories: repositoryReader({ private: true, fork: false, owner: "0xroylee" }),
     }),
   ).toEqual([
     ".codex-pipeline.yml",
@@ -82,12 +82,13 @@ it("renders three mode-0600 templates under the contained output", async () => {
 });
 
 it.each([
-  [{ ...validInput, controlRef: "main" }, { private: true, fork: false }, "UNPINNED_CONTROL_REF"],
-  [{ ...validInput, output: "../escape" }, { private: true, fork: false }, "OUTPUT_OUTSIDE_REPOSITORY"],
-  [{ ...validInput, approver: "-bad" }, { private: true, fork: false }, "INVALID_GITHUB_LOGIN"],
-  [{ ...validInput, repository: "invalid" }, { private: true, fork: false }, "INVALID_REPOSITORY"],
-  [validInput, { private: false, fork: false }, "UNTRUSTED_REPOSITORY"],
-  [validInput, { private: true, fork: true }, "UNTRUSTED_REPOSITORY"],
+  [{ ...validInput, controlRef: "main" }, { private: true, fork: false, owner: "0xroylee" }, "UNPINNED_CONTROL_REF"],
+  [{ ...validInput, output: "../escape" }, { private: true, fork: false, owner: "0xroylee" }, "OUTPUT_OUTSIDE_REPOSITORY"],
+  [{ ...validInput, approver: "-bad" }, { private: true, fork: false, owner: "0xroylee" }, "INVALID_GITHUB_LOGIN"],
+  [{ ...validInput, repository: "invalid" }, { private: true, fork: false, owner: "0xroylee" }, "INVALID_REPOSITORY"],
+  [validInput, { private: false, fork: false, owner: "0xroylee" }, "UNTRUSTED_REPOSITORY"],
+  [validInput, { private: true, fork: true, owner: "0xroylee" }, "UNTRUSTED_REPOSITORY"],
+  [validInput, { private: true, fork: false, owner: "mallory" }, "UNTRUSTED_REPOSITORY"],
 ] as const)("rejects unsafe onboarding input", async (input, repository, code) => {
   const files = new MemoryTemplateFiles();
   expect(

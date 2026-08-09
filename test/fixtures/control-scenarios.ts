@@ -73,7 +73,7 @@ function recoveryIssue(root: WorkIssueRecord): WorkIssueRecord {
   } as const;
   return {
     number: 8,
-    author: "roy",
+    author: "github-actions[bot]",
     body: `# Recovery\n\n\`\`\`yaml opc-contract\n${JSON.stringify(addendum)}\n\`\`\`\n`,
     state: "ready",
     createdAt: "2026-08-08T09:30:00Z",
@@ -102,6 +102,14 @@ class ScenarioClaimPort implements ClaimPort {
 
   listEligibleWork(): Promise<readonly WorkIssueRecord[]> {
     return Promise.resolve([...this.issues.values()].map((issue) => this.current(issue)));
+  }
+
+  hasActiveClaim(): Promise<boolean> {
+    return Promise.resolve(
+      [...this.states.values()].some((state) =>
+        ["claimed", "running", "reviewing", "result-ready"].includes(state),
+      ),
+    );
   }
 
   loadWorkIssue(issueNumber: number): Promise<WorkIssueRecord> {
@@ -167,6 +175,7 @@ function failedAttempt(attempt: 1 | 2 | 3): FailedAttempt {
   return {
     category: "execution",
     attempt,
+    approvedAttempts: 3,
     requiresExpansion: false,
     rootIssueNumber: 7,
     issueNumber: 7,
@@ -198,7 +207,7 @@ export async function runControlScenario(
       return { state: port.state(7), claims: port.transitions.length };
     }
     case "recovery-priority": {
-      const root = workIssue();
+      const root = { ...workIssue(), state: "recovering" as const };
       const port = new ScenarioClaimPort([root, recoveryIssue(root)]);
       const result = await claimNextWork(port, fixedClock, { runId: "200" });
       return {

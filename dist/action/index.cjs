@@ -17177,10 +17177,10 @@ var require_oidc_utils = __commonJS((exports2) => {
       return __awaiter(this, undefined, undefined, function* () {
         const httpclient = OidcClient.createHttpClient();
         const res = yield httpclient.getJson(id_token_url).catch((error) => {
-          throw new Error(`Failed to get ID Token. 
- 
+          throw new Error(`Failed to get ID Token.
+
         Error Code : ${error.statusCode}
- 
+
         Error Message: ${error.message}`);
         });
         const id_token = (_a = res.result) === null || _a === undefined ? undefined : _a.value;
@@ -40034,7 +40034,7 @@ class DomainError extends Error {
 var transitions = {
   "needs-approval": { approve: "ready" },
   ready: { claim: "claimed", drift: "needs-reapproval" },
-  claimed: { start: "running", "lease-expired": "ready" },
+  claimed: { start: "running", "lease-expired": "ready", "outage-block": "blocked" },
   running: { candidate: "reviewing", "work-failure": "recovering", incident: "ready" },
   reviewing: { verify: "result-ready", "work-failure": "recovering" },
   recovering: { retry: "ready", block: "blocked" },
@@ -42759,6 +42759,15 @@ function parseRepositoryPolicyYaml(text) {
 }
 
 // src/domain/approval.ts
+var approvalFailureCodes = {
+  actor: "APPROVAL_ACTOR_REJECTED",
+  digest: "APPROVAL_DIGEST_MISMATCH",
+  edited: "APPROVAL_EDITED",
+  format: "APPROVAL_FORMAT_INVALID"
+};
+function approvalFailureCode(reason) {
+  return approvalFailureCodes[reason];
+}
 function verifyApproval(record, approvers, expected) {
   if (!approvers.includes(record.actor))
     return { ok: false, reason: "actor" };
@@ -42773,10 +42782,17 @@ function verifyApproval(record, approvers, expected) {
 }
 
 // src/adapters/github/issue-parser.ts
-var contractBlock = /```yaml opc-contract\n([\s\S]*?)```/g;
+var contractBlock = /^(`{3,})yaml opc-contract[ \t]*\r?\n([\s\S]*?)^\1[ \t]*$/gm;
+function renderContractBlock(yaml) {
+  const longestBacktickRun = Math.max(0, ...yaml.match(/`+/g)?.map((run) => run.length) ?? []);
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}yaml opc-contract
+${yaml.trimEnd()}
+${fence}`;
+}
 function extractContractBlock(body) {
   const matches = [...body.matchAll(contractBlock)];
-  const contract = matches[0]?.[1];
+  const contract = matches[0]?.[2];
   if (matches.length !== 1 || contract === undefined) {
     throw new DomainError("INVALID_CONTRACT_BLOCK_COUNT", String(matches.length));
   }
@@ -42834,20 +42850,21 @@ function approvalFromComments(comments, approvers) {
     return [{ approval: { actor, body, createdAt, updatedAt }, approvalDigest: digest }];
   });
   approvals.sort((left, right) => right.approval.createdAt.localeCompare(left.approval.createdAt));
-  const latest = approvals[0];
-  if (!latest)
-    return {};
-  const verification = verifyApproval(latest.approval, approvers ?? [latest.approval.actor], latest.approvalDigest);
-  if (!verification.ok) {
-    const codes = {
-      actor: "APPROVAL_ACTOR_REJECTED",
-      digest: "APPROVAL_DIGEST_MISMATCH",
-      edited: "APPROVAL_EDITED",
-      format: "APPROVAL_FORMAT_INVALID"
-    };
-    throw new DomainError(codes[verification.reason], latest.approval.actor);
+  if (!approvers) {
+    return { approvals: approvals.map((candidate) => candidate.approval) };
   }
-  return latest;
+  const authorized = approvals.filter((candidate) => approvers.includes(candidate.approval.actor));
+  const latest = authorized.find((candidate) => candidate.approval.createdAt === candidate.approval.updatedAt) ?? authorized[0] ?? approvals[0];
+  if (!latest)
+    return { approvals: [] };
+  const verification = verifyApproval(latest.approval, approvers, latest.approvalDigest);
+  if (!verification.ok) {
+    throw new DomainError(approvalFailureCode(verification.reason), latest.approval.actor);
+  }
+  return {
+    ...latest,
+    approvals: approvals.map((candidate) => candidate.approval)
+  };
 }
 function hasHttpStatus(error) {
   return typeof error === "object" && error !== null && "status" in error;
@@ -42942,6 +42959,12 @@ class GitHubIssues {
 function issueLabels(labels) {
   return labels.map((label) => typeof label === "string" ? label : label.name).filter((label) => Boolean(label));
 }
+var activeStateLabels = new Set([
+  "opc:claimed",
+  "opc:running",
+  "opc:reviewing",
+  "opc:result-ready"
+]);
 
 class GitHubStateStore {
   octokit;
@@ -42959,6 +42982,15 @@ class GitHubStateStore {
   loadWorkIssue(issueNumber) {
     return this.issues.loadWorkIssue(issueNumber);
   }
+  async hasActiveClaim() {
+    const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      state: "open",
+      per_page: 100
+    });
+    return issues.some((issue) => issueLabels(issue.labels).some((label) => activeStateLabels.has(label)));
+  }
   async listEligibleWork() {
     const candidates = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
@@ -42967,7 +42999,12 @@ class GitHubStateStore {
       labels: "opc:ready",
       per_page: 100
     });
-    return Promise.all(candidates.map((issue) => this.loadWorkIssue(issue.number)));
+    const loaded = await Promise.all(candidates.map((issue) => this.loadWorkIssue(issue.number).catch((error) => {
+      if (error instanceof DomainError)
+        return;
+      throw error;
+    })));
+    return loaded.filter((issue) => issue !== undefined);
   }
   async loadRepositoryIdentity() {
     const { data } = await this.octokit.rest.repos.get({ owner: this.owner, repo: this.repo });
@@ -43034,6 +43071,161 @@ class GitHubStateStore {
   }
 }
 
+// src/adapters/github/reconciler.ts
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
+}
+function parseDate(value) {
+  if (typeof value !== "string")
+    return;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+function claimMetadata(body) {
+  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
+  if (!payload)
+    return;
+  let value;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const transitionRecord = record(value);
+  const metadata = record(transitionRecord?.metadata);
+  const runId = metadata?.run_id;
+  const claimedAt = parseDate(metadata?.claimed_at);
+  return transitionRecord?.event === "claim" && typeof runId === "string" && claimedAt ? { runId, claimedAt } : undefined;
+}
+function hasHttpStatus2(error) {
+  return typeof error === "object" && error !== null && "status" in error;
+}
+
+class GitHubReconciler {
+  octokit;
+  owner;
+  repo;
+  stateStore;
+  constructor(octokit, owner, repo, trustedOwner) {
+    this.octokit = octokit;
+    this.owner = owner;
+    this.repo = repo;
+    this.stateStore = new GitHubStateStore(octokit, owner, repo, undefined, trustedOwner);
+  }
+  async listActiveClaims() {
+    const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      state: "open",
+      labels: "opc:claimed",
+      per_page: 100
+    });
+    return Promise.all(issues.map((issue) => this.loadActiveClaim(issue.number)));
+  }
+  transition(command) {
+    return this.stateStore.transition(command);
+  }
+  async loadActiveClaim(issueNumber) {
+    const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      per_page: 100
+    });
+    const metadata = comments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.created_at === comment.updated_at).map((comment) => claimMetadata(comment.body)).filter((candidate) => candidate !== undefined).at(-1);
+    if (!metadata || !/^\d+$/.test(metadata.runId)) {
+      throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
+    }
+    let lastHeartbeat = metadata.claimedAt;
+    let cancelledByOwner = false;
+    try {
+      const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
+        owner: this.owner,
+        repo: this.repo,
+        run_id: Number(metadata.runId)
+      });
+      const updatedAt = parseDate(run.updated_at);
+      if (updatedAt && updatedAt > lastHeartbeat)
+        lastHeartbeat = updatedAt;
+      cancelledByOwner = run.conclusion === "cancelled";
+    } catch (error) {
+      if (!hasHttpStatus2(error) || error.status !== 404)
+        throw error;
+    }
+    return {
+      issueNumber,
+      lastHeartbeat,
+      outageStarted: metadata.claimedAt,
+      cancelledByOwner
+    };
+  }
+}
+
+// src/adapters/github/recovery.ts
+function recoveryMarker(rootIssueNumber, fingerprint) {
+  return `<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=${fingerprint} -->`;
+}
+
+class GitHubRecovery {
+  octokit;
+  owner;
+  repo;
+  stateStore;
+  constructor(octokit, owner, repo, trustedOwner = owner) {
+    this.octokit = octokit;
+    this.owner = owner;
+    this.repo = repo;
+    this.stateStore = new GitHubStateStore(octokit, owner, repo, undefined, trustedOwner);
+  }
+  loadWorkIssue(issueNumber) {
+    return this.stateStore.loadWorkIssue(issueNumber);
+  }
+  transition(command) {
+    return this.stateStore.transition(command);
+  }
+  async findOpenRecovery(rootIssueNumber, fingerprint) {
+    const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      state: "open",
+      labels: "opc:recovery",
+      per_page: 100
+    });
+    const marker = recoveryMarker(rootIssueNumber, fingerprint);
+    for (const issue of issues) {
+      if (!issue.body?.includes(marker))
+        continue;
+      const contract = parseIssueContractYaml(extractContractBlock(issue.body));
+      if (contract.kind === "Recovery" && contract.error_fingerprint === fingerprint) {
+        return issue.number;
+      }
+    }
+    return;
+  }
+  async createRecovery(input) {
+    const { data } = await this.octokit.rest.issues.create({
+      owner: this.owner,
+      repo: this.repo,
+      title: `[OPC Recovery] Work #${String(input.rootIssueNumber)} attempt ${String(input.attempt)}`,
+      body: `${input.body}
+${recoveryMarker(input.rootIssueNumber, input.fingerprint)}
+`,
+      assignees: [],
+      labels: ["opc:recovery", "opc:ready", `opc:attempt-${String(input.attempt)}`]
+    });
+    return data.number;
+  }
+  async dispatch(workflowFile, ref, inputs) {
+    await this.octokit.rest.actions.createWorkflowDispatch({
+      owner: this.owner,
+      repo: this.repo,
+      workflow_id: workflowFile,
+      ref,
+      inputs
+    });
+  }
+}
+
 // src/application/select-work.ts
 function selectWork(items) {
   return [...items].sort((left, right) => {
@@ -43064,15 +43256,31 @@ function assertMilestoneWithinPolicy(policy, milestone) {
 
 // src/application/claim-work.ts
 function approvalError(reason) {
-  const codes = {
-    actor: "APPROVAL_ACTOR_REJECTED",
-    digest: "APPROVAL_DIGEST_MISMATCH",
-    edited: "APPROVAL_EDITED",
-    format: "APPROVAL_FORMAT_INVALID"
-  };
-  return new DomainError(codes[reason], reason);
+  return new DomainError(approvalFailureCode(reason), reason);
 }
-async function verifyReadyIssue(issue, port) {
+function selectApproval(issue, approvers, approvalDigest) {
+  const candidates = issue.approvals ?? (issue.approval ? [issue.approval] : []);
+  if (candidates.length === 0) {
+    throw new DomainError("APPROVAL_MISSING", String(issue.number));
+  }
+  const authorized = candidates.filter((candidate) => approvers.includes(candidate.actor));
+  if (authorized.length === 0)
+    throw approvalError("actor");
+  const unedited = authorized.filter((candidate) => candidate.createdAt === candidate.updatedAt);
+  const eligible = unedited.length > 0 ? unedited : authorized;
+  for (const candidate of eligible) {
+    if (verifyApproval(candidate, approvers, approvalDigest).ok)
+      return candidate;
+  }
+  const latest = eligible[0];
+  if (!latest)
+    throw new DomainError("APPROVAL_MISSING", String(issue.number));
+  const failed = verifyApproval(latest, approvers, approvalDigest);
+  if (failed.ok)
+    return latest;
+  throw approvalError(failed.reason);
+}
+async function verifyWorkIssue(issue, port) {
   const identity = await port.loadRepositoryIdentity();
   if (!identity.private || identity.fork || !identity.sameTrustDomain) {
     throw new DomainError("UNTRUSTED_REPOSITORY", String(issue.number));
@@ -43094,8 +43302,12 @@ async function verifyReadyIssue(issue, port) {
     approvalIssue = rootIssue;
     recovery = parsed;
   }
+  if (recovery && recovery.attempt > contract.limits.attempts) {
+    throw new DomainError("RECOVERY_BUDGET_EXCEEDED", String(recovery.attempt));
+  }
   const policy = await port.loadRepositoryPolicy(contract.base_sha);
-  if (!policy.approvers.includes(issue.author) || !policy.approvers.includes(approvalIssue.author)) {
+  const issueAuthorAllowed = recovery ? issue.author === "github-actions[bot]" : policy.approvers.includes(issue.author);
+  if (!issueAuthorAllowed || !policy.approvers.includes(approvalIssue.author)) {
     throw new DomainError("ISSUE_AUTHOR_REJECTED", issue.author);
   }
   assertMilestoneWithinPolicy(policy, contract);
@@ -43109,12 +43321,7 @@ async function verifyReadyIssue(issue, port) {
   if (recovery && recovery.approval_digest !== approvalDigest) {
     throw new DomainError("APPROVAL_DIGEST_MISMATCH", recovery.approval_digest);
   }
-  if (!approvalIssue.approval) {
-    throw new DomainError("APPROVAL_MISSING", String(approvalIssue.number));
-  }
-  const approval = verifyApproval(approvalIssue.approval, policy.approvers, approvalDigest);
-  if (!approval.ok)
-    throw approvalError(approval.reason);
+  selectApproval(approvalIssue, policy.approvers, approvalDigest);
   if (issue.approvalDigest && issue.approvalDigest !== approvalDigest) {
     throw new DomainError("APPROVAL_DIGEST_MISMATCH", issue.approvalDigest);
   }
@@ -43129,6 +43336,9 @@ async function verifyReadyIssue(issue, port) {
   };
 }
 async function claimNextWork(port, clock, input) {
+  if (await port.hasActiveClaim()) {
+    return { claimed: false, reason: "active-claim" };
+  }
   const eligible = (await port.listEligibleWork()).flatMap((item) => item.state === "ready" ? [{ ...item, state: "ready" }] : []);
   const selected = selectWork(eligible);
   if (!selected)
@@ -43136,7 +43346,7 @@ async function claimNextWork(port, clock, input) {
   const current = await port.loadWorkIssue(selected.number);
   if (current.state !== "ready")
     return { claimed: false, reason: "lost-race" };
-  const envelope = await verifyReadyIssue(current, port);
+  const envelope = await verifyWorkIssue(current, port);
   const claimedAt = clock.now();
   const command = {
     issueNumber: current.number,
@@ -43162,18 +43372,276 @@ async function claimNextWork(port, clock, input) {
   } : { claimed: false, reason: "lost-race" };
 }
 
+// src/application/create-recovery.ts
+var import_yaml2 = __toESM(require_dist2(), 1);
+
+// src/domain/recovery.ts
+var failureCategories = ["execution", "evidence", "review", "infrastructure"];
+function isCompletedAttempts(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 3;
+}
+function decideRecovery(input) {
+  if (input.requiresExpansion)
+    return { action: "block", reason: "authority-expansion" };
+  if (!isCompletedAttempts(input.completedAttempts)) {
+    return { action: "block", reason: "budget-exhausted" };
+  }
+  if (input.category === "infrastructure") {
+    return { action: "requeue", completedAttempts: input.completedAttempts };
+  }
+  if (input.completedAttempts >= 3)
+    return { action: "block", reason: "budget-exhausted" };
+  const nextAttempt = input.completedAttempts + 1;
+  if (nextAttempt !== 2 && nextAttempt !== 3) {
+    return { action: "block", reason: "budget-exhausted" };
+  }
+  return { action: "recover", nextAttempt };
+}
+
+// src/application/create-recovery.ts
+function serializeRecoveryIssue(addendum) {
+  return [
+    "# OPC Recovery",
+    "",
+    "This Issue records one bounded repair attempt for an approved Work contract.",
+    "",
+    renderContractBlock(import_yaml2.stringify(addendum)),
+    ""
+  ].join(`
+`);
+}
+async function createRecovery(input, port) {
+  if (input.category !== "infrastructure" && !input.requiresExpansion && input.attempt >= input.approvedAttempts) {
+    return { outcome: "blocked", reason: "budget-exhausted" };
+  }
+  const decision = decideRecovery({
+    category: input.category,
+    completedAttempts: input.attempt,
+    requiresExpansion: input.requiresExpansion
+  });
+  if (decision.action === "requeue") {
+    return { outcome: "requeued", attempt: decision.completedAttempts };
+  }
+  if (decision.action === "block") {
+    return { outcome: "blocked", reason: decision.reason };
+  }
+  if (input.category === "infrastructure") {
+    throw new Error("INFRASTRUCTURE_RECOVERY_INVARIANT");
+  }
+  const existing = await port.findOpenRecovery(input.rootIssueNumber, input.fingerprint);
+  if (existing !== undefined) {
+    return { outcome: "deduplicated", issueNumber: existing };
+  }
+  const addendum = {
+    kind: "Recovery",
+    root_work_id: input.workId,
+    parent_issue: input.issueNumber,
+    attempt: decision.nextAttempt,
+    approval_digest: input.approvalDigest,
+    failure_type: input.category,
+    error_fingerprint: input.fingerprint,
+    evidence_links: [input.actionsUrl, input.evidenceUrl],
+    repair_hypothesis: input.repairHypothesis,
+    verification_focus: input.verificationFocus
+  };
+  const issueNumber = await port.createRecovery({
+    rootIssueNumber: input.rootIssueNumber,
+    body: serializeRecoveryIssue(addendum),
+    fingerprint: input.fingerprint,
+    attempt: decision.nextAttempt
+  });
+  await port.dispatch("opc.yml", input.defaultBranch, {
+    reason: "recovery",
+    issue_number: String(issueNumber)
+  });
+  return { outcome: "created", issueNumber, nextAttempt: decision.nextAttempt };
+}
+
+// src/application/recover-failed-work.ts
+function transitionMetadata(input) {
+  return {
+    category: input.category,
+    fingerprint: input.fingerprint,
+    attempt: String(input.attempt)
+  };
+}
+async function ensureRecovering(input, port) {
+  if (input.state === "recovering")
+    return;
+  if (input.state !== "running" && input.state !== "reviewing") {
+    throw new DomainError("INVALID_TRANSITION", `${input.state}:work-failure`);
+  }
+  const result = await port.transition({
+    issueNumber: input.issueNumber,
+    expected: input.state,
+    event: "work-failure",
+    metadata: transitionMetadata(input)
+  });
+  if (!result.changed && result.current !== "recovering") {
+    throw new DomainError("INVALID_TRANSITION", `${result.current}:work-failure`);
+  }
+}
+async function blockRecoveringIssue(issueNumber, port, metadata) {
+  const result = await port.transition({
+    issueNumber,
+    expected: "recovering",
+    event: "block",
+    metadata
+  });
+  if (!result.changed && result.current !== "blocked") {
+    throw new DomainError("INVALID_TRANSITION", `${result.current}:block`);
+  }
+}
+async function blockChain(input, port) {
+  const metadata = transitionMetadata(input);
+  await blockRecoveringIssue(input.issueNumber, port, metadata);
+  if (input.rootIssueNumber === input.issueNumber)
+    return;
+  const root = await port.loadWorkIssue(input.rootIssueNumber);
+  if (root.state === "blocked")
+    return;
+  if (root.state !== "recovering") {
+    throw new DomainError("INVALID_TRANSITION", `${root.state}:block`);
+  }
+  await blockRecoveringIssue(root.number, port, metadata);
+}
+async function requeueInfrastructure(input, port) {
+  const result = await createRecovery(input, port);
+  if (result.outcome !== "requeued")
+    return result;
+  if (input.state === "ready")
+    return result;
+  if (input.state !== "running") {
+    throw new DomainError("INVALID_TRANSITION", `${input.state}:incident`);
+  }
+  const transitionResult = await port.transition({
+    issueNumber: input.issueNumber,
+    expected: "running",
+    event: "incident",
+    metadata: transitionMetadata(input)
+  });
+  if (!transitionResult.changed && transitionResult.current !== "ready") {
+    throw new DomainError("INVALID_TRANSITION", `${transitionResult.current}:incident`);
+  }
+  return result;
+}
+async function recoverFailedWork(input, port) {
+  if (input.category === "infrastructure" && !input.requiresExpansion) {
+    return requeueInfrastructure(input, port);
+  }
+  await ensureRecovering(input, port);
+  const result = await createRecovery(input, port);
+  if (result.outcome === "blocked")
+    await blockChain(input, port);
+  return result;
+}
+
+// src/application/reconcile.ts
+var leaseDurationMs = 30 * 60 * 1000;
+var outageBlockDurationMs = 24 * 60 * 60 * 1000;
+function reconcileClaim(input) {
+  if (input.cancelledByOwner)
+    return "cancelled";
+  if (input.outageStarted && input.now.getTime() - input.outageStarted.getTime() >= outageBlockDurationMs) {
+    return "block";
+  }
+  if (input.now.getTime() - input.lastHeartbeat.getTime() >= leaseDurationMs) {
+    return "requeue";
+  }
+  return "keep";
+}
+
+// src/application/reconcile-repository.ts
+async function reconcileRepository(port, clock) {
+  const claims = await port.listActiveClaims();
+  let kept = 0;
+  let requeued = 0;
+  let blocked = 0;
+  let cancelled = 0;
+  for (const claim of claims) {
+    const decision = reconcileClaim({
+      now: clock.now(),
+      lastHeartbeat: claim.lastHeartbeat,
+      ...claim.outageStarted ? { outageStarted: claim.outageStarted } : {},
+      cancelledByOwner: claim.cancelledByOwner
+    });
+    if (decision === "keep") {
+      kept += 1;
+      continue;
+    }
+    if (decision === "cancelled") {
+      cancelled += 1;
+      continue;
+    }
+    const result = await port.transition({
+      issueNumber: claim.issueNumber,
+      expected: "claimed",
+      event: decision === "block" ? "outage-block" : "lease-expired",
+      metadata: {
+        reconcile_decision: decision,
+        reconciled_at: clock.now().toISOString()
+      }
+    });
+    if (!result.changed) {
+      kept += 1;
+    } else if (decision === "block") {
+      blocked += 1;
+    } else {
+      requeued += 1;
+    }
+  }
+  return { active: claims.length, kept, requeued, blocked, cancelled };
+}
+
 // src/commands/action-command.ts
 var systemClock = { now: () => new Date };
+function approvedAttempts(value) {
+  if (value === 1 || value === 2 || value === 3)
+    return value;
+  throw new DomainError("INVALID_CONTRACT", `limits.attempts=${String(value)}`);
+}
 async function runActionCommand(inputs, octokit, context) {
   if (inputs.command === "validate")
     return { command: "validate", valid: true };
-  if (inputs.command !== "claim") {
+  if (inputs.owner !== context.controlOwner) {
+    throw new DomainError("UNTRUSTED_REPOSITORY", `${inputs.owner}/${inputs.repo}`);
+  }
+  if (inputs.command !== "claim" && inputs.command !== "reconcile" && inputs.command !== "recover") {
     throw new DomainError("ACTION_COMMAND_NOT_IMPLEMENTED", inputs.command);
   }
   if (!octokit) {
     throw new DomainError("MISSING_GITHUB_TOKEN", "claim requires github-token");
   }
-  const store = new GitHubStateStore(octokit, inputs.owner, inputs.repo, undefined, inputs.owner);
+  const store = new GitHubStateStore(octokit, inputs.owner, inputs.repo, undefined, context.controlOwner);
+  if (inputs.command === "recover") {
+    const issueNumber = inputs.issueNumber;
+    const workflowRef = inputs.workflowRef;
+    const failure = inputs.failure;
+    if (issueNumber === undefined || !workflowRef || !failure) {
+      throw new DomainError("INVALID_FAILURE_PAYLOAD", "incomplete recover input");
+    }
+    const issue = await store.loadWorkIssue(issueNumber);
+    const envelope = await verifyWorkIssue(issue, store);
+    const recovery = await recoverFailedWork({
+      ...failure,
+      state: issue.state,
+      attempt: issue.attempt,
+      approvedAttempts: approvedAttempts(envelope.contract.limits.attempts),
+      rootIssueNumber: envelope.rootIssueNumber,
+      issueNumber: issue.number,
+      workId: envelope.contract.work_id,
+      approvalDigest: envelope.approvalDigest,
+      actionsUrl: `https://github.com/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}`,
+      defaultBranch: workflowRef
+    }, new GitHubRecovery(octokit, inputs.owner, inputs.repo, context.controlOwner));
+    return { command: "recover", recovery };
+  }
+  if (inputs.command === "reconcile") {
+    const clock = context.clock ?? systemClock;
+    const reconciliation = await reconcileRepository(new GitHubReconciler(octokit, inputs.owner, inputs.repo, context.controlOwner), clock);
+    const claim = reconciliation.active === 0 ? await claimNextWork(store, clock, { runId: context.runId }) : undefined;
+    return { command: "reconcile", reconciliation, claim };
+  }
   const result = await claimNextWork(store, context.clock ?? systemClock, {
     runId: context.runId
   });
@@ -43184,6 +43652,67 @@ async function runActionCommand(inputs, octokit, context) {
 var actionCommands = ["validate", "claim", "reconcile", "recover", "publish"];
 function isActionCommand(value) {
   return typeof value === "string" && actionCommands.some((command) => command === value);
+}
+function record2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
+}
+function boundedText(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 2000;
+}
+function isFailureCategory(value) {
+  return typeof value === "string" && failureCategories.some((candidate) => candidate === value);
+}
+function parseFailurePayload(encoded, owner, repo) {
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "missing or invalid base64url");
+  }
+  let value;
+  try {
+    const decoded = Buffer.from(encoded, "base64url");
+    if (decoded.toString("base64url") !== encoded)
+      throw new Error("non-canonical base64url");
+    value = JSON.parse(decoded.toString("utf8"));
+  } catch {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "invalid JSON payload");
+  }
+  const payload = record2(value);
+  const keys = payload ? Object.keys(payload).sort() : [];
+  const expectedKeys = [
+    "category",
+    "evidenceUrl",
+    "fingerprint",
+    "repairHypothesis",
+    "requiresExpansion",
+    "verificationFocus"
+  ];
+  if (!payload || keys.join("\x00") !== expectedKeys.join("\x00")) {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "unexpected payload shape");
+  }
+  const category = payload.category;
+  const fingerprint = payload.fingerprint;
+  const evidenceUrl = payload.evidenceUrl;
+  const repairHypothesis = payload.repairHypothesis;
+  const verificationFocus = payload.verificationFocus;
+  if (!isFailureCategory(category) || typeof payload.requiresExpansion !== "boolean" || typeof fingerprint !== "string" || !/^sha256:[0-9a-f]{64}$/.test(fingerprint) || !boundedText(evidenceUrl) || !boundedText(repairHypothesis) || !boundedText(verificationFocus)) {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "invalid payload value");
+  }
+  let evidence;
+  try {
+    evidence = new URL(evidenceUrl);
+  } catch {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "invalid evidence URL");
+  }
+  if (evidence.protocol !== "https:" || evidence.hostname !== "github.com" || !evidence.pathname.startsWith(`/${owner}/${repo}/actions/runs/`)) {
+    throw new DomainError("INVALID_FAILURE_PAYLOAD", "evidence URL is outside target repository");
+  }
+  return {
+    category,
+    requiresExpansion: payload.requiresExpansion,
+    fingerprint,
+    evidenceUrl,
+    repairHypothesis,
+    verificationFocus
+  };
 }
 function parseActionInputs(raw) {
   if (!isActionCommand(raw.command)) {
@@ -43201,29 +43730,41 @@ function parseActionInputs(raw) {
   if (raw.command === "recover" && !raw.workflowRef) {
     throw new DomainError("MISSING_WORKFLOW_REF", "recover requires workflow-ref");
   }
+  if (raw.command === "recover" && issueNumber === undefined) {
+    throw new DomainError("INVALID_ISSUE_NUMBER", "recover requires issue-number");
+  }
+  const failure = raw.command === "recover" ? parseFailurePayload(raw.failurePayloadB64, owner, repo) : undefined;
   return {
     command: raw.command,
     owner,
     repo,
     ...issueNumber === undefined ? {} : { issueNumber },
-    ...raw.workflowRef ? { workflowRef: raw.workflowRef } : {}
+    ...raw.workflowRef ? { workflowRef: raw.workflowRef } : {},
+    ...failure ? { failure } : {}
   };
 }
 
 // src/action/outputs.ts
+function claimResult(result) {
+  if (result.command === "validate" || result.command === "recover")
+    return;
+  return result.command === "reconcile" ? result.claim : result;
+}
 function toActionOutputs(result) {
-  if (result.command !== "claim" || !result.claimed)
+  const claim = claimResult(result);
+  if (!claim || !claim.claimed) {
     return { claimed: "false" };
+  }
   return {
     claimed: "true",
-    "issue-number": String(result.issueNumber),
-    attempt: String(result.attempt),
-    "base-sha": result.baseSha,
-    "envelope-b64": Buffer.from(JSON.stringify(result.envelope)).toString("base64url"),
+    "issue-number": String(claim.issueNumber),
+    attempt: String(claim.attempt),
+    "base-sha": claim.baseSha,
+    "envelope-b64": Buffer.from(JSON.stringify(claim.envelope)).toString("base64url"),
     "heartbeat-payload-b64": Buffer.from(JSON.stringify({
-      runId: result.runId,
-      issueNumber: result.issueNumber,
-      attempt: result.attempt,
+      runId: claim.runId,
+      issueNumber: claim.issueNumber,
+      attempt: claim.attempt,
       watchJobs: ["execute", "review"]
     })).toString("base64url")
   };
@@ -43231,6 +43772,7 @@ function toActionOutputs(result) {
 
 // src/action/main.ts
 var githubActionsRuntime = {
+  getActionRepository: () => process.env.GITHUB_ACTION_REPOSITORY ?? "",
   getInput: (name) => core.getInput(name),
   getRunId: () => String(github.context.runId),
   setOutput: (name, value) => {
@@ -43240,19 +43782,31 @@ var githubActionsRuntime = {
     core.setFailed(message);
   }
 };
+function controlOwnerFromActionRepository(repository) {
+  const [owner, repo, extra] = repository.split("/");
+  if (!owner || !repo || extra) {
+    throw new DomainError("UNTRUSTED_REPOSITORY", repository || "missing action repository");
+  }
+  return owner;
+}
 async function main(runtime = githubActionsRuntime) {
   try {
     const issueNumber = runtime.getInput("issue-number");
     const workflowRef = runtime.getInput("workflow-ref");
+    const failurePayloadB64 = runtime.getInput("failure-payload-b64");
     const inputs = parseActionInputs({
       command: runtime.getInput("command"),
       repository: runtime.getInput("repository"),
       ...issueNumber ? { issueNumber } : {},
-      ...workflowRef ? { workflowRef } : {}
+      ...workflowRef ? { workflowRef } : {},
+      ...failurePayloadB64 ? { failurePayloadB64 } : {}
     });
     const token = runtime.getInput("github-token");
     const octokit = token ? runtime.createGitHubClient?.(token) ?? createGitHubClient(token) : undefined;
-    const result = await runActionCommand(inputs, octokit, { runId: runtime.getRunId() });
+    const result = await runActionCommand(inputs, octokit, {
+      runId: runtime.getRunId(),
+      controlOwner: controlOwnerFromActionRepository(runtime.getActionRepository())
+    });
     runtime.setOutput("result-json", JSON.stringify(result));
     for (const [name, value] of Object.entries(toActionOutputs(result))) {
       runtime.setOutput(name, value);

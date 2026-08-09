@@ -53,7 +53,7 @@ function recoveryIssue(root: WorkIssueRecord): WorkIssueRecord {
   } as const;
   return {
     number: 8,
-    author: "roy",
+    author: "github-actions[bot]",
     body: `# Recovery\n\n\`\`\`yaml opc-contract\n${JSON.stringify(addendum)}\n\`\`\`\n`,
     state: "ready",
     createdAt: "2026-08-08T09:30:00Z",
@@ -74,7 +74,15 @@ class InMemoryClaimPort implements ClaimPort {
   }
 
   listEligibleWork(): Promise<readonly WorkIssueRecord[]> {
-    return Promise.resolve(this.eligible.map((issue) => ({ ...issue, state: "ready" })));
+    return Promise.all(this.eligible.map((issue) => this.loadWorkIssue(issue.number)));
+  }
+
+  hasActiveClaim(): Promise<boolean> {
+    return Promise.resolve(
+      [...this.states.values()].some((state) =>
+        ["claimed", "running", "reviewing", "result-ready"].includes(state),
+      ),
+    );
   }
 
   loadWorkIssue(issueNumber: number): Promise<WorkIssueRecord> {
@@ -127,7 +135,7 @@ it("returns one claim and one lost-race result for duplicate triggers", async ()
     baseSha: validMilestoneObject.base_sha,
     runId: "100",
   });
-  expect(second).toEqual({ claimed: false, reason: "lost-race" });
+  expect(second).toEqual({ claimed: false, reason: "active-claim" });
   expect(port.claimTransitions).toHaveLength(1);
   expect(port.claimTransitions[0]?.metadata).toMatchObject({
     run_id: "100",
@@ -137,8 +145,30 @@ it("returns one claim and one lost-race result for duplicate triggers", async ()
   });
 });
 
+it("does not claim a second ready Issue while another lease is active", async () => {
+  const first = workIssue();
+  const second = {
+    ...workIssue(),
+    number: 9,
+    rootIssueNumber: 9,
+    createdAt: "2026-08-08T09:30:00Z",
+  };
+  const port = new InMemoryClaimPort([first, second]);
+  const clock: Clock = { now: () => new Date("2026-08-08T10:00:00Z") };
+
+  expect(await claimNextWork(port, clock, { runId: "110" })).toMatchObject({
+    claimed: true,
+    issueNumber: 7,
+  });
+  expect(await claimNextWork(port, clock, { runId: "111" })).toEqual({
+    claimed: false,
+    reason: "active-claim",
+  });
+  expect(port.claimTransitions).toHaveLength(1);
+});
+
 it("claims Recovery using the root Work approval", async () => {
-  const root = workIssue();
+  const root = { ...workIssue(), state: "recovering" as const };
   const recovery = recoveryIssue(root);
   const port = new InMemoryClaimPort([root, recovery], [recovery]);
   const clock: Clock = { now: () => new Date("2026-08-08T10:00:00Z") };
@@ -154,4 +184,62 @@ it("claims Recovery using the root Work approval", async () => {
     },
   });
   expect(port.claimTransitions).toHaveLength(1);
+});
+
+it("rejects a Recovery chain forged by an external Issue author", async () => {
+  const root = workIssue();
+  const recovery = { ...recoveryIssue(root), author: "mallory" };
+  const port = new InMemoryClaimPort([root, recovery], [recovery]);
+
+  expect(
+    await claimNextWork(port, { now: () => new Date("2026-08-08T10:00:00Z") }, {
+      runId: "201",
+    }).catch((error: unknown) => error),
+  ).toMatchObject({ code: "ISSUE_AUTHOR_REJECTED" });
+  expect(port.claimTransitions).toHaveLength(0);
+});
+
+it("rejects a Recovery attempt beyond the root Work approval budget", async () => {
+  const limitedContract = {
+    ...validMilestoneObject,
+    policy_sha: digestCanonical(validPolicy),
+    limits: { ...validMilestoneObject.limits, attempts: 1 as const },
+  };
+  const limitedDigest = digestCanonical(limitedContract);
+  const root: WorkIssueRecord = {
+    ...workIssue(),
+    body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(limitedContract)}\n\`\`\`\n`,
+    approval: {
+      actor: "roy",
+      body: `/opc approve ${limitedDigest}`,
+      createdAt: "2026-08-08T09:01:00Z",
+      updatedAt: "2026-08-08T09:01:00Z",
+    },
+    approvalDigest: limitedDigest,
+  };
+  const recoveryContract = {
+    kind: "Recovery",
+    root_work_id: limitedContract.work_id,
+    parent_issue: root.number,
+    attempt: 2,
+    approval_digest: limitedDigest,
+    failure_type: "execution",
+    error_fingerprint: `sha256:${"f".repeat(64)}`,
+    evidence_links: ["https://github.com/acme/app/actions/runs/1"],
+    repair_hypothesis: "retry the failed unit test",
+    verification_focus: "unit",
+  } as const;
+  const recovery: WorkIssueRecord = {
+    ...recoveryIssue(root),
+    body: `# Recovery\n\n\`\`\`yaml opc-contract\n${JSON.stringify(recoveryContract)}\n\`\`\`\n`,
+    approvalDigest: limitedDigest,
+  };
+  const port = new InMemoryClaimPort([root, recovery], [recovery]);
+
+  expect(
+    await claimNextWork(port, { now: () => new Date("2026-08-08T10:00:00Z") }, {
+      runId: "202",
+    }).catch((error: unknown) => error),
+  ).toMatchObject({ code: "RECOVERY_BUDGET_EXCEEDED" });
+  expect(port.claimTransitions).toHaveLength(0);
 });

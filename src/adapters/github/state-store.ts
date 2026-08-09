@@ -24,6 +24,13 @@ function issueLabels(labels: readonly (string | { readonly name?: string | null 
     .filter((label): label is string => Boolean(label));
 }
 
+const activeStateLabels = new Set([
+  "opc:claimed",
+  "opc:running",
+  "opc:reviewing",
+  "opc:result-ready",
+]);
+
 export class GitHubStateStore implements ClaimPort {
   private readonly issues: GitHubIssues;
 
@@ -41,6 +48,18 @@ export class GitHubStateStore implements ClaimPort {
     return this.issues.loadWorkIssue(issueNumber);
   }
 
+  async hasActiveClaim(): Promise<boolean> {
+    const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      state: "open",
+      per_page: 100,
+    });
+    return issues.some((issue) =>
+      issueLabels(issue.labels).some((label) => activeStateLabels.has(label)),
+    );
+  }
+
   async listEligibleWork(): Promise<readonly WorkIssueRecord[]> {
     const candidates = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
@@ -49,7 +68,15 @@ export class GitHubStateStore implements ClaimPort {
       labels: "opc:ready",
       per_page: 100,
     });
-    return Promise.all(candidates.map((issue) => this.loadWorkIssue(issue.number)));
+    const loaded = await Promise.all(
+      candidates.map((issue) =>
+        this.loadWorkIssue(issue.number).catch((error: unknown) => {
+          if (error instanceof DomainError) return undefined;
+          throw error;
+        }),
+      ),
+    );
+    return loaded.filter((issue): issue is WorkIssueRecord => issue !== undefined);
   }
 
   async loadRepositoryIdentity(): Promise<RepositoryControlIdentity> {

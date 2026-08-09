@@ -16,4 +16,8 @@ const action = await Bun.build({
 
 if (!cli.success || !action.success) throw new Error("OPC_BUILD_FAILED");
 
+const actionBundlePath = "dist/action/index.cjs";
+const actionBundle = await Bun.file(actionBundlePath).text();
+await Bun.write(actionBundlePath, actionBundle.replace(/[ \t]+$/gm, ""));
+
 export {};

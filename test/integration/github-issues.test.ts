@@ -136,6 +136,31 @@ it("loads one issue and its latest unedited owner approval", async () => {
   expect(api.isDone()).toBe(true);
 });
 
+it("preserves all approval candidates when policy approvers are resolved later", async () => {
+  const api = mockIssueAndComments(issueFixture(), [
+    approvalFixture(),
+    approvalFixture({
+      user: { login: "mallory" },
+      created_at: "2026-08-08T00:02:00Z",
+      updated_at: "2026-08-08T00:02:00Z",
+    }),
+  ]);
+
+  const record = await new GitHubIssues(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    undefined,
+  ).loadWorkIssue(7);
+
+  expect(record.approval).toBeUndefined();
+  expect(record.approvals?.map((candidate) => candidate.actor)).toEqual([
+    "mallory",
+    "roy",
+  ]);
+  expect(api.isDone()).toBe(true);
+});
+
 const hostileCases: readonly {
   readonly name: string;
   readonly issue: IssueFixture;

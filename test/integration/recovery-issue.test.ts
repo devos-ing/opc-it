@@ -1,11 +1,13 @@
 import { expect, it } from "bun:test";
 import { Octokit } from "@octokit/rest";
+import { extractContractBlock } from "../../src/adapters/github/issue-parser.js";
 import { GitHubRecovery } from "../../src/adapters/github/recovery.js";
 import {
   createRecovery,
   type FailedAttempt,
 } from "../../src/application/create-recovery.js";
 import type { Sha256 } from "../../src/domain/identity.js";
+import { parseIssueContractYaml } from "../../src/domain/validation.js";
 
 interface ApiRoute {
   readonly method: string;
@@ -18,6 +20,12 @@ interface ApiRequest {
   readonly method: string;
   readonly path: string;
   readonly body?: unknown;
+}
+
+function requestBodyField(request: ApiRequest | undefined, field: string): unknown {
+  return typeof request?.body === "object" && request.body !== null
+    ? Object.fromEntries(Object.entries(request.body))[field]
+    : undefined;
 }
 
 function createGitHubApi(routes: readonly ApiRoute[]): {
@@ -60,6 +68,7 @@ function failedAttempt(): FailedAttempt {
   return {
     category: "execution",
     attempt: 1,
+    approvedAttempts: 3,
     requiresExpansion: false,
     rootIssueNumber: 7,
     issueNumber: 7,
@@ -68,11 +77,25 @@ function failedAttempt(): FailedAttempt {
     fingerprint,
     actionsUrl: "https://github.com/acme/app/actions/runs/100",
     evidenceUrl: "https://github.com/acme/app/actions/runs/100/artifacts/200",
-    repairHypothesis: "retry the failed unit test",
+    repairHypothesis: "retry the ```unit``` test",
     verificationFocus: "unit",
     defaultBranch: "main",
   };
 }
+
+it("does not create a Recovery beyond the approved Work attempt budget", async () => {
+  const api = createGitHubApi([]);
+  const port = new GitHubRecovery(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+  );
+
+  expect(
+    await createRecovery({ ...failedAttempt(), approvedAttempts: 1 }, port),
+  ).toEqual({ outcome: "blocked", reason: "budget-exhausted" });
+  expect(api.requests).toHaveLength(0);
+});
 
 function recoveryBody(): string {
   return [
@@ -160,5 +183,15 @@ it("creates one unassigned Recovery and dispatches it exactly once", async () =>
       },
     },
   ]);
+  const createRequest = api.requests.find(
+    (request) => request.method === "POST" && request.path === "/repos/acme/app/issues",
+  );
+  const createBody = requestBodyField(createRequest, "body");
+  expect(typeof createBody).toBe("string");
+  const recovery = parseIssueContractYaml(extractContractBlock(String(createBody)));
+  expect(recovery).toMatchObject({
+    kind: "Recovery",
+    repair_hypothesis: "retry the ```unit``` test",
+  });
   expect(api.isDone()).toBe(true);
 });
