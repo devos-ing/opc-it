@@ -10,7 +10,7 @@
     "opc": "dist/cli.js"
   },
   "scripts": {
-    "build": "bun build ./src/cli/main.ts --target=bun --outfile=./dist/cli.js",
+    "build": "bun run scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "bun test",

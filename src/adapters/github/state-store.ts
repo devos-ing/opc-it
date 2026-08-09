@@ -31,7 +31,7 @@ export class GitHubStateStore implements ClaimPort {
     private readonly octokit: Octokit,
     private readonly owner: string,
     private readonly repo: string,
-    approvers: readonly string[],
+    approvers: readonly string[] | undefined,
     private readonly trustedOwner: string,
   ) {
     this.issues = new GitHubIssues(octokit, owner, repo, approvers);

@@ -50,7 +50,7 @@ function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
 
 function approvalFromComments(
   comments: Awaited<ReturnType<Octokit["rest"]["issues"]["listComments"]>>["data"],
-  approvers: readonly string[],
+  approvers: readonly string[] | undefined,
 ): { approval?: ApprovalRecord; approvalDigest?: Sha256 } {
   const approvals = comments.flatMap((comment) => {
     const actor = comment.user?.login;
@@ -70,7 +70,11 @@ function approvalFromComments(
   );
   const latest = approvals[0];
   if (!latest) return {};
-  const verification = verifyApproval(latest.approval, approvers, latest.approvalDigest);
+  const verification = verifyApproval(
+    latest.approval,
+    approvers ?? [latest.approval.actor],
+    latest.approvalDigest,
+  );
   if (!verification.ok) {
     const codes = {
       actor: "APPROVAL_ACTOR_REJECTED",
@@ -92,7 +96,7 @@ export class GitHubIssues {
     private readonly octokit: Octokit,
     private readonly owner: string,
     private readonly repo: string,
-    private readonly approvers: readonly string[],
+    private readonly approvers: readonly string[] | undefined,
   ) {}
 
   private async resolveRecoveryRoot(

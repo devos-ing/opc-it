@@ -1,0 +1,36 @@
+name: OPC Orchestration Core
+description: Run one scheduler-independent OPC control command
+inputs:
+  command:
+    description: validate, claim, reconcile, recover, or publish
+    required: true
+  repository:
+    description: owner/name of the caller repository
+    required: true
+  issue-number:
+    description: optional Work or Recovery Issue number
+    required: false
+  workflow-ref:
+    description: caller default branch used for explicit workflow dispatch
+    required: false
+  github-token:
+    description: repository-scoped GitHub Actions token
+    required: false
+outputs:
+  result-json:
+    description: schema-validated JSON command result
+  claimed:
+    description: true when this run obtained the repository claim
+  issue-number:
+    description: claimed Work or Recovery Issue number
+  attempt:
+    description: current bounded attempt number
+  base-sha:
+    description: approved immutable base commit
+  envelope-b64:
+    description: base64url-encoded immutable execution envelope
+  heartbeat-payload-b64:
+    description: base64url-encoded heartbeat watch inputs
+runs:
+  using: node24
+  main: dist/action/index.cjs
