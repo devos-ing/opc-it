@@ -1,0 +1,1 @@
+{"initialState":"needs-approval","events":[{"type":"transition","event":"approve"},{"type":"transition","event":"claim"},{"type":"transition","event":"start"},{"type":"transition","event":"candidate"},{"type":"transition","event":"verify"}]}

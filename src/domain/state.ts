@@ -1,32 +1,36 @@
 import { DomainError } from "./errors.js";
 
-export type WorkState =
-  | "needs-approval"
-  | "ready"
-  | "claimed"
-  | "running"
-  | "reviewing"
-  | "recovering"
-  | "result-ready"
-  | "needs-reapproval"
-  | "needs-decision"
-  | "blocked"
-  | "delivered";
+export const workStates = [
+  "needs-approval",
+  "ready",
+  "claimed",
+  "running",
+  "reviewing",
+  "recovering",
+  "result-ready",
+  "needs-reapproval",
+  "needs-decision",
+  "blocked",
+  "delivered",
+] as const;
+export type WorkState = (typeof workStates)[number];
 
-export type WorkEvent =
-  | "approve"
-  | "claim"
-  | "start"
-  | "candidate"
-  | "verify"
-  | "merge"
-  | "close-unmerged"
-  | "work-failure"
-  | "incident"
-  | "retry"
-  | "block"
-  | "drift"
-  | "lease-expired";
+export const workEvents = [
+  "approve",
+  "claim",
+  "start",
+  "candidate",
+  "verify",
+  "merge",
+  "close-unmerged",
+  "work-failure",
+  "incident",
+  "retry",
+  "block",
+  "drift",
+  "lease-expired",
+] as const;
+export type WorkEvent = (typeof workEvents)[number];
 
 type StateTransitions = Readonly<Partial<Record<WorkEvent, WorkState>>>;
 type TransitionMap = Readonly<Partial<Record<WorkState, StateTransitions>>>;

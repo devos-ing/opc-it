@@ -1,4 +1,5 @@
-export type FailureCategory = "execution" | "evidence" | "review" | "infrastructure";
+export const failureCategories = ["execution", "evidence", "review", "infrastructure"] as const;
+export type FailureCategory = (typeof failureCategories)[number];
 export type CompletedAttempts = 0 | 1 | 2 | 3;
 
 export interface RecoveryInput {
