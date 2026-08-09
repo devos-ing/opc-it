@@ -31,3 +31,5 @@ jobs:
       codex_version: "0.144.4"
       executor_model: "gpt-5.6-luna"
       executor_effort: "high"
+      reviewer_model: "gpt-5.6-sol"
+      reviewer_effort: "xhigh"

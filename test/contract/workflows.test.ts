@@ -56,6 +56,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   const dispatchAndClaim = record(jobs["dispatch-and-claim"], "dispatch-and-claim");
   const heartbeat = record(jobs.heartbeat, "heartbeat");
   const execute = record(jobs.execute, "execute");
+  const review = record(jobs.review, "review");
 
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
@@ -75,4 +76,5 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     actions: "read",
   });
   expect(record(execute.permissions, "execute permissions")).toEqual({ contents: "read" });
+  expect(record(review.permissions, "review permissions")).toEqual({ contents: "read" });
 });

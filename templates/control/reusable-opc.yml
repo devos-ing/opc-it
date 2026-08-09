@@ -17,6 +17,12 @@ on:
       executor_effort:
         required: true
         type: string
+      reviewer_model:
+        required: true
+        type: string
+      reviewer_effort:
+        required: true
+        type: string
 
 jobs:
   dispatch-and-claim:
@@ -68,6 +74,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      artifact_sha256: ${{ steps.finalize.outputs['artifact-sha256'] }}
     env:
       OPC_BUNDLE_DIR: ${{ runner.temp }}/opc-bundle-${{ github.run_id }}
       OPC_WORKTREE_ROOT: ${{ runner.temp }}/opc-worktrees/${{ github.run_id }}
@@ -107,7 +115,11 @@ jobs:
           OPC_MODEL: ${{ inputs.executor_model }}
           OPC_EFFORT: ${{ inputs.executor_effort }}
         run: |
-          "$OPC_CODEX_BIN" exec \
+          env -i \
+            HOME="$HOME" \
+            PATH="$PATH" \
+            TMPDIR="$RUNNER_TEMP" \
+            "$OPC_CODEX_BIN" exec \
             --ephemeral \
             --strict-config \
             --profile opc-executor \
@@ -133,5 +145,83 @@ jobs:
         with:
           name: opc-candidate-${{ github.run_id }}
           path: ${{ steps.finalize.outputs['bundle-directory'] }}
+          if-no-files-found: error
+          retention-days: 30
+
+  review:
+    needs: [dispatch-and-claim, execute]
+    if: needs.execute.result == 'success'
+    runs-on: [self-hosted, macOS, ARM64, opc]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.decision.outputs.outcome }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opc-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/opc-review-input
+      - name: Verify bundle and prepare review input
+        id: prepare-review
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: prepare-review
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+          input-file: ${{ runner.temp }}/opc-review-input
+          artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
+      - name: Verify local Codex reviewer
+        id: codex-preflight
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: verify-codex-runner
+          repository: ${{ github.repository }}
+          codex-version: ${{ inputs.codex_version }}
+          permission-profile: opc-reviewer
+      - name: Review candidate independently
+        shell: bash
+        env:
+          OPC_CODEX_BIN: ${{ steps.codex-preflight.outputs['codex-bin'] }}
+          OPC_PROMPT_FILE: ${{ steps.prepare-review.outputs['prompt-file'] }}
+          OPC_OUTPUT_FILE: ${{ runner.temp }}/opc-result-review.json
+          OPC_SCHEMA_FILE: ${{ steps.prepare-review.outputs['review-schema-file'] }}
+          OPC_WORKSPACE: ${{ runner.temp }}/opc-review-input
+          OPC_MODEL: ${{ inputs.reviewer_model }}
+          OPC_EFFORT: ${{ inputs.reviewer_effort }}
+        run: |
+          env -i \
+            HOME="$HOME" \
+            PATH="$PATH" \
+            TMPDIR="$RUNNER_TEMP" \
+            "$OPC_CODEX_BIN" exec \
+            --ephemeral \
+            --strict-config \
+            --profile opc-reviewer \
+            --model "$OPC_MODEL" \
+            --config "model_reasoning_effort=\"$OPC_EFFORT\"" \
+            --cd "$OPC_WORKSPACE" \
+            --output-schema "$OPC_SCHEMA_FILE" \
+            --output-last-message "$OPC_OUTPUT_FILE" \
+            - < "$OPC_PROMPT_FILE"
+      - name: Apply deterministic Evidence Gate
+        id: decision
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: decide-result
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+          input-file: ${{ runner.temp }}/opc-result-review.json
+          artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
+      - name: Upload reviewed candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opc-reviewed-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/opc-review-input
+            ${{ runner.temp }}/opc-result-review.json
           if-no-files-found: error
           retention-days: 30

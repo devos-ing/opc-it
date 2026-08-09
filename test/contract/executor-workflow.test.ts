@@ -62,6 +62,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   expect(finalize.if).toBe("always()");
 
   const codex = namedStep(steps, "Execute approved milestone");
+  expect(codex.run).toContain("env -i");
   expect(codex.run).toContain('"$OPC_CODEX_BIN" exec');
   for (const flag of [
     "--ephemeral",
@@ -92,7 +93,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     (match) => match[1],
   );
   expect(new Set(opcActionRefs).size).toBe(1);
-  expect(opcActionRefs).toHaveLength(5);
+  expect(opcActionRefs).toHaveLength(8);
 });
 
 it("pins executor route constants in the generated Target caller", async () => {
