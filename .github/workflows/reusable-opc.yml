@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Claim or reconcile
         id: opc
-        uses: "0xroylee/OPC@41ba03538fc572e0e6f010f41f517c4eac0d44a7"
+        uses: "0xroylee/OPC@e249fdc9df8efc855e9666484efdbb6ccd95c489"
         with:
           command: ${{ inputs.event_name == 'schedule' && 'reconcile' || 'claim' }}
           repository: ${{ github.repository }}
