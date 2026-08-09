@@ -169,6 +169,42 @@ it("keeps watching through separate execute and review queues plus both job wind
   expect(result).toEqual({ status: "stopped", polls: 34 });
 });
 
+it("allows the watched jobs to become terminal on the final 185-minute poll", async () => {
+  let poll = 0;
+  const result = await monitorHeartbeat(
+    {
+      owner: "acme",
+      repo: "private",
+      runId: "10",
+      issueNumber: 7,
+      attempt: 1,
+      watchJobs: ["execute", "review"],
+    },
+    {
+      listJobs: () => {
+        poll += 1;
+        return Promise.resolve(
+          poll < 38
+            ? [
+                { name: "execute", status: "completed" },
+                { name: "review", status: "in_progress" },
+              ]
+            : [
+                { name: "execute", status: "completed" },
+                { name: "review", status: "completed" },
+              ],
+        );
+      },
+      upload: () => Promise.resolve(),
+      now: () => new Date("2026-08-08T10:00:00Z"),
+      sleep: async () => {},
+      intervalMs: 300_000,
+    },
+  );
+
+  expect(result).toEqual({ status: "stopped", polls: 38 });
+});
+
 it("writes one-line heartbeat JSON only under runner temp before upload", async () => {
   const runnerTemp = await mkdtemp(join(tmpdir(), "opc-heartbeat-uploader-"));
   const calls: { name: string; files: string[]; root: string }[] = [];
