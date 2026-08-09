@@ -226,3 +226,49 @@ it("does not revive an old claim when the latest trusted transition is ready", a
 
   expect(await store.hasActiveClaim()).toBe(false);
 });
+
+it("binds completion to the newest uninterrupted trusted claim run", async () => {
+  const transitionBody = (event: string, runId?: string) =>
+    `<!-- opc-transition ${JSON.stringify({
+      expected: event === "claim" ? "ready" : "claimed",
+      event,
+      metadata: runId ? { run_id: runId } : {},
+    })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("claim", "123"),
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("lease-expired"),
+            created_at: "2026-08-08T00:33:00Z",
+            updated_at: "2026-08-08T00:33:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("claim", "124"),
+            created_at: "2026-08-08T00:34:00Z",
+            updated_at: "2026-08-08T00:34:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.ownsRun(7, "123")).toBe(false);
+  expect(await store.ownsRun(7, "124")).toBe(true);
+});

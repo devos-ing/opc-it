@@ -8,7 +8,14 @@ import type {
   TransitionResult,
 } from "../../application/ports.js";
 import { DomainError } from "../../domain/errors.js";
+import {
+  transition,
+  workEvents,
+  workStates,
+  type WorkState,
+} from "../../domain/state.js";
 import { GitHubStateStore } from "./state-store.js";
+import { workStateFromLabels } from "./issues.js";
 import {
   trustedTransitionRecords,
   type TransitionRecord,
@@ -17,6 +24,32 @@ import {
 interface ClaimMetadata {
   readonly runId: string;
   readonly claimedAt: Date;
+}
+
+function newestHeartbeat(
+  artifacts: readonly {
+    readonly name: string;
+    readonly created_at?: string | null;
+    readonly expired?: boolean;
+  }[],
+  runId: string,
+  claimedAt: Date,
+): Date | undefined {
+  const trustedName = new RegExp(`^opc-heartbeat-${runId}-\\d{6}$`);
+  let newest: Date | undefined;
+  for (const artifact of artifacts) {
+    const createdAt = parseDate(artifact.created_at);
+    if (
+      artifact.expired === true ||
+      !trustedName.test(artifact.name) ||
+      !createdAt ||
+      createdAt.getTime() < claimedAt.getTime()
+    ) {
+      continue;
+    }
+    if (!newest || createdAt.getTime() > newest.getTime()) newest = createdAt;
+  }
+  return newest;
 }
 
 function parseDate(value: unknown): Date | undefined {
@@ -34,6 +67,32 @@ function claimMetadata(record: TransitionRecord | undefined): ClaimMetadata | un
     ? { runId, claimedAt }
     : undefined;
 }
+
+function stateAfterRecord(record: TransitionRecord | undefined): WorkState | undefined {
+  if (
+    !record?.expected ||
+    !workStates.some((state) => state === record.expected) ||
+    !workEvents.some((event) => event === record.event)
+  ) {
+    return undefined;
+  }
+  try {
+    return transition(record.expected as WorkState, record.event as (typeof workEvents)[number]);
+  } catch (error) {
+    if (error instanceof DomainError) return undefined;
+    throw error;
+  }
+}
+
+function issueLabels(
+  labels: readonly (string | { readonly name?: string | null })[],
+): string[] {
+  return labels
+    .map((label) => (typeof label === "string" ? label : label.name))
+    .filter((label): label is string => Boolean(label));
+}
+
+const activeExecutionStates = new Set<WorkState>(["claimed", "running", "reviewing"]);
 
 function hasHttpStatus(error: unknown): error is { readonly status: number } {
   return typeof error === "object" && error !== null && "status" in error;
@@ -56,12 +115,22 @@ export class GitHubReconciler implements ReconcilePort {
       owner: this.owner,
       repo: this.repo,
       state: "open",
-      labels: "opc:claimed",
       per_page: 100,
     });
+    const activeIssues = issues.flatMap((issue) => {
+      try {
+        const state = workStateFromLabels(issueLabels(issue.labels));
+        return activeExecutionStates.has(state)
+          ? [{ number: issue.number, state: state as ActiveClaim["state"] }]
+          : [];
+      } catch (error) {
+        if (error instanceof DomainError) return [];
+        throw error;
+      }
+    });
     const claims = await Promise.all(
-      issues.map((issue) =>
-        this.loadActiveClaim(issue.number).catch((error: unknown) => {
+      activeIssues.map((issue) =>
+        this.loadActiveClaim(issue.number, issue.state).catch((error: unknown) => {
           if (error instanceof DomainError) return undefined;
           throw error;
         }),
@@ -74,7 +143,23 @@ export class GitHubReconciler implements ReconcilePort {
     return this.stateStore.transition(command);
   }
 
-  private async loadActiveClaim(issueNumber: number): Promise<ActiveClaim> {
+  async cancelRun(runId: string): Promise<void> {
+    try {
+      await this.octokit.rest.actions.cancelWorkflowRun({
+        owner: this.owner,
+        repo: this.repo,
+        run_id: Number(runId),
+      });
+    } catch (error) {
+      if (hasHttpStatus(error) && (error.status === 404 || error.status === 409)) return;
+      throw error;
+    }
+  }
+
+  private async loadActiveClaim(
+    issueNumber: number,
+    state: ActiveClaim["state"],
+  ): Promise<ActiveClaim> {
     const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
       owner: this.owner,
       repo: this.repo,
@@ -82,18 +167,23 @@ export class GitHubReconciler implements ReconcilePort {
       per_page: 100,
     });
     const records = trustedTransitionRecords(comments);
-    const metadata = claimMetadata(records.at(-1));
+    if (stateAfterRecord(records.at(-1)) !== state) {
+      throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
+    }
+    const claimIndex = records.findLastIndex((record) => record.event === "claim");
+    const metadata = claimMetadata(records[claimIndex]);
     if (!metadata || !/^\d+$/.test(metadata.runId)) {
       throw new DomainError("INCOMPLETE_CLAIM_METADATA", String(issueNumber));
     }
 
-    const previous = records.at(-2);
+    const previous = records[claimIndex - 1];
     const persistedOutageStarted =
-      previous?.event === "lease-expired"
+      previous?.event === "lease-expired" || previous?.event === "incident"
         ? parseDate(previous.metadata.outage_started)
         : undefined;
 
     let cancelledByOwner = false;
+    let artifactHeartbeat: Date | undefined;
     try {
       const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
         owner: this.owner,
@@ -101,15 +191,30 @@ export class GitHubReconciler implements ReconcilePort {
         run_id: Number(metadata.runId),
       });
       cancelledByOwner = run.conclusion === "cancelled";
+      const { data: artifactPage } =
+        await this.octokit.rest.actions.listWorkflowRunArtifacts({
+          owner: this.owner,
+          repo: this.repo,
+          run_id: Number(metadata.runId),
+          per_page: 100,
+        });
+      artifactHeartbeat = newestHeartbeat(
+        artifactPage.artifacts,
+        metadata.runId,
+        metadata.claimedAt,
+      );
     } catch (error) {
       if (!hasHttpStatus(error) || error.status !== 404) throw error;
     }
-    // M2 has no executor heartbeat artifact reader. Workflow bookkeeping such as
-    // run.updated_at is not runner liveness, so the trusted lease anchor remains the claim.
+    const lastHeartbeat = artifactHeartbeat ?? metadata.claimedAt;
     return {
       issueNumber,
-      lastHeartbeat: metadata.claimedAt,
-      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
+      runId: metadata.runId,
+      state,
+      lastHeartbeat,
+      outageStarted: artifactHeartbeat
+        ? artifactHeartbeat
+        : (persistedOutageStarted ?? metadata.claimedAt),
       cancelledByOwner,
     };
   }

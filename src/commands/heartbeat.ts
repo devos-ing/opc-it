@@ -53,7 +53,9 @@ function trustedWatchedJobs(
 ): readonly WatchedJob[] {
   const selected: WatchedJob[] = [];
   for (const name of names) {
-    const matches = jobs.filter((job) => job.name === name);
+    const matches = jobs.filter(
+      (job) => job.name === name || job.name.endsWith(` / ${name}`),
+    );
     if (matches.length !== 1) {
       throw new DomainError("UNTRUSTED_HEARTBEAT_JOBS", `${name}:${String(matches.length)}`);
     }
@@ -71,8 +73,8 @@ export async function monitorHeartbeat(
   dependencies: HeartbeatMonitorDependencies,
 ): Promise<{ status: "stopped"; polls: number }> {
   validateInput(input);
-  const heartbeat = new Heartbeat(dependencies.upload, dependencies.now, dependencies.intervalMs);
-  await heartbeat.start(input);
+  const heartbeat = new Heartbeat(dependencies.upload, dependencies.now);
+  heartbeat.start(input);
   try {
     for (let polls = 1; polls <= 22; polls += 1) {
       let jobs: readonly WatchedJob[];
@@ -85,6 +87,9 @@ export async function monitorHeartbeat(
       if (watched.every((job) => job.status === "completed")) {
         await heartbeat.stop("stopped");
         return { status: "stopped", polls };
+      }
+      if (watched.some((job) => job.status === "in_progress")) {
+        await heartbeat.pulse();
       }
       if (polls === 22) break;
       await dependencies.sleep(dependencies.intervalMs);

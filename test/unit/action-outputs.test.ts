@@ -58,13 +58,13 @@ it("reports an unclaimed result without execution data", () => {
   ).toEqual({ claimed: "false" });
 });
 
-it("does not expose execution outputs for a Recovery control result", () => {
+it("exports only the trusted production completion outcome", () => {
   expect(
     toActionOutputs({
-      command: "recover",
-      recovery: { outcome: "created", issueNumber: 42, nextAttempt: 2 },
+      command: "complete-run",
+      completion: { outcome: "verified", state: "result-ready" },
     }),
-  ).toEqual({ claimed: "false" });
+  ).toEqual({ outcome: "verified" });
 });
 
 it("exports a claim obtained by a scheduled reconciliation", () => {

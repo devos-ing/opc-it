@@ -2,13 +2,20 @@ import type { ActionCommandResult } from "../commands/action-command.js";
 import type { ClaimResult } from "../application/claim-work.js";
 
 function claimResult(result: ActionCommandResult): ClaimResult | undefined {
-  if (result.command === "validate" || result.command === "recover") return undefined;
+  if (
+    result.command === "validate" || result.command === "complete-run"
+  ) {
+    return undefined;
+  }
   return result.command === "reconcile" ? result.claim : result;
 }
 
 export function toActionOutputs(
   result: ActionCommandResult,
 ): Readonly<Record<string, string>> {
+  if (result.command === "complete-run") {
+    return { outcome: result.completion.outcome };
+  }
   const claim = claimResult(result);
   if (!claim || !claim.claimed) {
     return { claimed: "false" };

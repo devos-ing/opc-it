@@ -8,6 +8,7 @@ import type { StateTransitionCommand, TransitionResult } from "../../src/applica
 
 class InMemoryReconcilePort implements ReconcilePort {
   readonly transitions: StateTransitionCommand[] = [];
+  readonly cancelledRuns: string[] = [];
 
   constructor(private readonly claims: readonly ActiveClaim[]) {}
 
@@ -23,30 +24,43 @@ class InMemoryReconcilePort implements ReconcilePort {
       changed: true,
     });
   }
+
+  cancelRun(runId: string): Promise<void> {
+    this.cancelledRuns.push(runId);
+    return Promise.resolve();
+  }
 }
 
 it("connects lease decisions to fail-closed state transitions", async () => {
   const port = new InMemoryReconcilePort([
     {
       issueNumber: 1,
+      runId: "101",
+      state: "claimed",
       lastHeartbeat: new Date("2026-08-08T09:35:00Z"),
       outageStarted: new Date("2026-08-08T09:00:00Z"),
       cancelledByOwner: false,
     },
     {
       issueNumber: 2,
+      runId: "102",
+      state: "running",
       lastHeartbeat: new Date("2026-08-08T09:29:00Z"),
       outageStarted: new Date("2026-08-08T09:00:00Z"),
       cancelledByOwner: false,
     },
     {
       issueNumber: 3,
+      runId: "103",
+      state: "reviewing",
       lastHeartbeat: new Date("2026-08-07T09:59:00Z"),
       outageStarted: new Date("2026-08-07T09:59:00Z"),
       cancelledByOwner: false,
     },
     {
       issueNumber: 4,
+      runId: "104",
+      state: "claimed",
       lastHeartbeat: new Date("2026-08-07T09:00:00Z"),
       outageStarted: new Date("2026-08-07T09:00:00Z"),
       cancelledByOwner: true,
@@ -59,10 +73,11 @@ it("connects lease decisions to fail-closed state transitions", async () => {
   expect(port.transitions).toMatchObject([
     {
       issueNumber: 2,
-      expected: "claimed",
-      event: "lease-expired",
+      expected: "running",
+      event: "incident",
       metadata: { outage_started: "2026-08-08T09:00:00.000Z" },
     },
-    { issueNumber: 3, expected: "claimed", event: "outage-block" },
+    { issueNumber: 3, expected: "reviewing", event: "outage-block" },
   ]);
+  expect(port.cancelledRuns).toEqual(["102", "103"]);
 });

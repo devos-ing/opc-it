@@ -18,6 +18,7 @@ interface RunnerManifest {
   runner_user: string;
   codex: PinnedFile & { version: string; home: string };
   auth: { credentials_store: "file" };
+  config: PinnedFile;
   requirements: PinnedFile;
   profiles: Record<"opc-executor" | "opc-reviewer", PinnedFile>;
   network_deny: { command: string; sha256: Sha256 };
@@ -28,6 +29,25 @@ export interface TrustedRunnerConfiguration {
   codexHome: string;
   codexVersion: string;
   networkDenyCommand: string;
+}
+
+export function repositorySandboxPrefix(
+  configuration: TrustedRunnerConfiguration,
+  manifestPath: string,
+  workspace: string,
+  temporaryDirectory: string,
+): readonly string[] {
+  return [
+    "--workspace",
+    workspace,
+    "--temp",
+    temporaryDirectory,
+    "--deny",
+    configuration.codexHome,
+    "--deny",
+    dirname(manifestPath),
+    "--",
+  ];
 }
 
 export interface RunnerFileDependencies {
@@ -75,7 +95,16 @@ function parseManifest(value: unknown): RunnerManifest {
   const record = objectRecord(value, "manifest");
   exactKeys(
     record,
-    ["version", "runner_user", "codex", "auth", "requirements", "profiles", "network_deny"],
+    [
+      "version",
+      "runner_user",
+      "codex",
+      "auth",
+      "config",
+      "requirements",
+      "profiles",
+      "network_deny",
+    ],
     "manifest keys",
   );
   if (record.version !== 1 || typeof record.runner_user !== "string") invalid("manifest identity");
@@ -96,15 +125,28 @@ function parseManifest(value: unknown): RunnerManifest {
     { path: network.command, sha256: network.sha256 },
     "network deny command",
   );
+  const config = pinnedFile(record.config, "base config");
+  const requirements = pinnedFile(record.requirements, "requirements");
+  const executorProfile = pinnedFile(profiles["opc-executor"], "executor profile");
+  const reviewerProfile = pinnedFile(profiles["opc-reviewer"], "reviewer profile");
+  if (
+    config.path !== join(codex.home, "config.toml") ||
+    requirements.path !== join(codex.home, "requirements.toml") ||
+    executorProfile.path !== join(codex.home, "opc-executor.config.toml") ||
+    reviewerProfile.path !== join(codex.home, "opc-reviewer.config.toml")
+  ) {
+    invalid("Codex home config paths");
+  }
   return {
     version: 1,
     runner_user: record.runner_user,
     codex: { ...codexFile, version: codex.version, home: codex.home },
     auth: { credentials_store: "file" },
-    requirements: pinnedFile(record.requirements, "requirements"),
+    config,
+    requirements,
     profiles: {
-      "opc-executor": pinnedFile(profiles["opc-executor"], "executor profile"),
-      "opc-reviewer": pinnedFile(profiles["opc-reviewer"], "reviewer profile"),
+      "opc-executor": executorProfile,
+      "opc-reviewer": reviewerProfile,
     },
     network_deny: { command: networkFile.path, sha256: networkFile.sha256 },
   };
@@ -171,6 +213,7 @@ export async function loadTrustedRunnerConfiguration(
     invalid("auth metadata");
   }
   await assertPinnedFile(manifest.codex, user.uid, true);
+  await assertPinnedFile(manifest.config, user.uid, false);
   await assertPinnedFile(manifest.requirements, user.uid, false);
   await assertPinnedFile(manifest.profiles[permissionProfile], user.uid, false);
   await assertPinnedFile(
@@ -189,7 +232,7 @@ export async function loadTrustedRunnerConfiguration(
 export async function verifyCodexRunner(
   input: { codexVersion: string; permissionProfile: "opc-executor" | "opc-reviewer" },
   dependencies: CodexRunnerDependencies,
-): Promise<{ codexBin: string }> {
+): Promise<{ codexBin: string; codexHome: string; runnerManifestPath: string }> {
   const config = await loadTrustedRunnerConfiguration(input.permissionProfile, dependencies);
   if (config.codexVersion !== input.codexVersion) invalid("requested version");
   const environment = {
@@ -211,5 +254,9 @@ export async function verifyCodexRunner(
   if (login.exitCode !== 0 || !/chatgpt/i.test(loginStatus) || /api[- ]?key/i.test(loginStatus)) {
     invalid("ChatGPT login status");
   }
-  return { codexBin: config.codexBin };
+  return {
+    codexBin: config.codexBin,
+    codexHome: config.codexHome,
+    runnerManifestPath: dependencies.manifestPath,
+  };
 }

@@ -24,15 +24,6 @@ class FakeArtifactStorage {
   }
 }
 
-class FakeRepositoryWriter {
-  createDeliveryCalls = 0;
-
-  createDelivery(): Promise<void> {
-    this.createDeliveryCalls += 1;
-    return Promise.resolve();
-  }
-}
-
 const online = {
   runnerAvailable: true,
   now: new Date("2026-08-10T10:00:00Z"),
@@ -59,42 +50,36 @@ const expectedOutcomes = {
     candidate: "bundle-produced",
     review: "pass",
     attemptEffect: "one-completed",
-    repositoryWrites: 0,
   },
   "executor failure": {
     kind: "execution-failure",
     candidate: "failure-record",
     review: "not-started",
     attemptEffect: "consumes-one",
-    repositoryWrites: 0,
   },
   "forbidden path": {
     kind: "policy-failure",
     candidate: "policy-failure",
     review: "not-started",
     attemptEffect: "consumes-one",
-    repositoryWrites: 0,
   },
   "evidence failure": {
     kind: "evidence-failure",
     candidate: "bundle-retained",
     review: "not-started",
     attemptEffect: "consumes-one",
-    repositoryWrites: 0,
   },
   "review mismatch": {
     kind: "review-failure",
     candidate: "bundle-retained",
     review: "fail",
     attemptEffect: "consumes-one",
-    repositoryWrites: 0,
   },
   "runner offline before start": {
     kind: "run-incident",
     candidate: "none",
     review: "none",
     attemptEffect: "zero",
-    repositoryWrites: 0,
     reason: "runner-offline",
   },
   "heartbeat expiry": {
@@ -102,7 +87,6 @@ const expectedOutcomes = {
     candidate: "none",
     review: "none",
     attemptEffect: "zero",
-    repositoryWrites: 0,
     reason: "heartbeat-expired",
   },
   "nonempty network allowlist": {
@@ -110,7 +94,6 @@ const expectedOutcomes = {
     candidate: "onboarding-rejection",
     review: "none",
     attemptEffect: "zero",
-    repositoryWrites: 0,
   },
 } satisfies Record<string, MacDryRunOutcome>;
 
@@ -180,7 +163,6 @@ it("proves the exact read-only Mac execution matrix without publishing", async (
   expect(Object.keys(expectedOutcomes)).toEqual(cases.map((entry) => entry.name));
   for (const scenario of cases) {
     const artifacts = new FakeArtifactStorage();
-    const repository = new FakeRepositoryWriter();
     let reviewCalls = 0;
     const outcome = await runMacDryRun(scenario.input, {
       artifacts,
@@ -190,11 +172,9 @@ it("proves the exact read-only Mac execution matrix without publishing", async (
           return Promise.resolve(scenario.review);
         },
       },
-      repository,
     });
 
     expect(outcome).toEqual(expectedOutcomes[scenario.name]);
-    expect(repository.createDeliveryCalls).toBe(0);
     expect(reviewCalls).toBe(
       scenario.name === "success" || scenario.name === "review mismatch" ? 1 : 0,
     );

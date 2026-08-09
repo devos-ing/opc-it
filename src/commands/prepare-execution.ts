@@ -17,7 +17,10 @@ import {
 } from "../domain/validation.js";
 import { assertNetworkPolicyEnforceable, buildChildEnvironment } from "../security/environment.js";
 import { buildExecutorPrompt } from "../prompts/executor.js";
-import { loadTrustedRunnerConfiguration } from "./verify-codex-runner.js";
+import {
+  loadTrustedRunnerConfiguration,
+  repositorySandboxPrefix,
+} from "./verify-codex-runner.js";
 
 export interface LocalExecutionRuntime {
   readonly runnerTemp: string;
@@ -35,6 +38,7 @@ export interface PreparedExecution {
   promptFile: string;
   executorSchemaFile: string;
   reviewSchemaFile: string;
+  timeoutSeconds: number;
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -174,9 +178,10 @@ function currentUser(runtime: LocalExecutionRuntime): { username: string; uid: n
 }
 
 export async function prepareExecution(
-  input: { issueNumber: number; payloadB64: string },
+  input: { issueNumber: number; payloadB64: string; enabled: boolean },
   runtime: LocalExecutionRuntime,
 ): Promise<PreparedExecution> {
+  if (!input.enabled) throw new DomainError("POLICY_DISABLED", "execution kill switch");
   const envelope = parseExecutionEnvelopePayload(input.payloadB64, input.issueNumber);
   assertNetworkPolicyEnforceable(envelope.policy.network.bootstrap);
   const paths = executionPaths(runtime, envelope.contract.work_id);
@@ -223,9 +228,33 @@ export async function prepareExecution(
       environmentSource,
       envelope.policy.environment_allowlist,
     );
+    const sandboxPrefix = repositorySandboxPrefix(
+      runner,
+      runtime.runnerManifestPath,
+      workspace.path,
+      paths.executionRoot,
+    );
+    for (const access of ["-r", "-w"] as const) {
+      const probe = await runBounded({
+        command: runner.networkDenyCommand,
+        args: [
+          ...sandboxPrefix,
+          "/usr/bin/test",
+          access,
+          join(runner.codexHome, "auth.json"),
+        ],
+        cwd: workspace.path,
+        env: environment,
+        timeoutMs: 10_000,
+        outputLimitBytes: 1_024,
+      });
+      if (probe.status !== "fail") {
+        throw new DomainError("INVALID_CODEX_RUNNER", `sandbox credential probe:${access}`);
+      }
+    }
     const bunVersion = await runBounded({
       command: runner.networkDenyCommand,
-      args: ["bun", "--version"],
+      args: [...sandboxPrefix, "bun", "--version"],
       cwd: workspace.path,
       env: environment,
       timeoutMs: 10_000,
@@ -236,7 +265,7 @@ export async function prepareExecution(
     }
     const result = await runBounded({
       command: runner.networkDenyCommand,
-      args: [bootstrap.command, ...bootstrap.args],
+      args: [...sandboxPrefix, bootstrap.command, ...bootstrap.args],
       cwd: workspace.path,
       env: environment,
       timeoutMs:
@@ -266,6 +295,11 @@ export async function prepareExecution(
       promptFile: paths.promptFile,
       executorSchemaFile: await schemaPath(runtime.actionPath, "executor-output.schema.json"),
       reviewSchemaFile: await schemaPath(runtime.actionPath, "result-review.schema.json"),
+      timeoutSeconds:
+        Math.min(
+          envelope.contract.limits.timeout_minutes,
+          envelope.policy.limits.timeout_minutes,
+        ) * 60,
     };
   } catch (error) {
     const { removeExecutionWorkspace } = await import("../adapters/local/workspace.js");

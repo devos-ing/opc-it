@@ -10,7 +10,10 @@ import {
   parseExecutionEnvelopePayload,
   type LocalExecutionRuntime,
 } from "./prepare-execution.js";
-import { loadTrustedRunnerConfiguration } from "./verify-codex-runner.js";
+import {
+  loadTrustedRunnerConfiguration,
+  repositorySandboxPrefix,
+} from "./verify-codex-runner.js";
 
 interface ExecutorOutput {
   status: "completed" | "failed";
@@ -105,7 +108,15 @@ export async function finalizeExecution(
         envelope.policy.environment_allowlist,
       ),
       durationSeconds,
-      commandPrefix: { command: runner.networkDenyCommand, args: [] },
+      commandPrefix: {
+        command: runner.networkDenyCommand,
+        args: repositorySandboxPrefix(
+          runner,
+          runtime.runnerManifestPath,
+          workspace.path,
+          paths.executionRoot,
+        ),
+      },
     });
     return {
       bundleReady: true,

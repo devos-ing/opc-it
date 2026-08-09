@@ -47,59 +47,52 @@ export interface MacDryRunInput {
 export interface MacDryRunPorts {
   readonly artifacts: { write(record: DryRunArtifact): Promise<void> };
   readonly reviewer: { review(bundle: ReviewedCandidateBundle): Promise<ReviewResult> };
-  readonly repository: { createDelivery(): Promise<void> };
 }
 
-type BaseOutcome = {
-  readonly repositoryWrites: 0;
-};
-
 export type MacDryRunOutcome =
-  | (BaseOutcome & {
+  | {
       readonly kind: "verified";
       readonly candidate: "bundle-produced";
       readonly review: "pass";
       readonly attemptEffect: "one-completed";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "execution-failure";
       readonly candidate: "failure-record";
       readonly review: "not-started";
       readonly attemptEffect: "consumes-one";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "policy-failure";
       readonly candidate: "policy-failure";
       readonly review: "not-started";
       readonly attemptEffect: "consumes-one";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "evidence-failure";
       readonly candidate: "bundle-retained";
       readonly review: "not-started";
       readonly attemptEffect: "consumes-one";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "review-failure";
       readonly candidate: "bundle-retained";
       readonly review: "fail";
       readonly attemptEffect: "consumes-one";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "run-incident";
       readonly candidate: "none";
       readonly review: "none";
       readonly attemptEffect: "zero";
       readonly reason: "runner-offline" | "heartbeat-expired";
-    })
-  | (BaseOutcome & {
+    }
+  | {
       readonly kind: "onboarding-rejection";
       readonly candidate: "onboarding-rejection";
       readonly review: "none";
       readonly attemptEffect: "zero";
-    });
-
-const repositoryWrites = 0 as const;
+    };
 
 export async function runMacDryRun(
   input: MacDryRunInput,
@@ -118,7 +111,6 @@ export async function runMacDryRun(
       candidate: "onboarding-rejection",
       review: "none",
       attemptEffect: "zero",
-      repositoryWrites,
     };
   }
 
@@ -128,7 +120,6 @@ export async function runMacDryRun(
       candidate: "none",
       review: "none",
       attemptEffect: "zero",
-      repositoryWrites,
       reason: "runner-offline",
     };
   }
@@ -144,7 +135,6 @@ export async function runMacDryRun(
       candidate: "none",
       review: "none",
       attemptEffect: "zero",
-      repositoryWrites,
       reason: "heartbeat-expired",
     };
   }
@@ -156,7 +146,6 @@ export async function runMacDryRun(
       candidate: "failure-record",
       review: "not-started",
       attemptEffect: "consumes-one",
-      repositoryWrites,
     };
   }
 
@@ -172,7 +161,6 @@ export async function runMacDryRun(
       candidate: "policy-failure",
       review: "not-started",
       attemptEffect: "consumes-one",
-      repositoryWrites,
     };
   }
 
@@ -186,7 +174,6 @@ export async function runMacDryRun(
       candidate: "bundle-retained",
       review: "not-started",
       attemptEffect: "consumes-one",
-      repositoryWrites,
     };
   }
 
@@ -205,7 +192,6 @@ export async function runMacDryRun(
       candidate: "bundle-retained",
       review: "fail",
       attemptEffect: "consumes-one",
-      repositoryWrites,
     };
   }
 
@@ -214,6 +200,5 @@ export async function runMacDryRun(
     candidate: "bundle-produced",
     review: "pass",
     attemptEffect: "one-completed",
-    repositoryWrites,
   };
 }

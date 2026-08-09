@@ -74,6 +74,32 @@ it("detects an entry changed after bundle creation", async () => {
   expect(error).toMatchObject({ code: "BUNDLE_ENTRY_DIGEST_MISMATCH" });
 });
 
+it("rejects files outside the exact bundle index before write and after download", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-extra-bundle-entry-"));
+  const prefilled = join(temporary, "prefilled");
+  await mkdir(prefilled);
+  await writeFile(join(prefilled, "executor-transcript.txt"), "unindexed");
+  const writeError = await writeBundle(
+    prefilled,
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  ).catch((caught: unknown) => caught);
+  expect(writeError).toMatchObject({ code: "UNSAFE_BUNDLE_CONTENT" });
+
+  const bundle = await writeBundle(
+    join(temporary, "downloaded"),
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  );
+  await writeFile(join(bundle.directory, "executor-transcript.txt"), "unindexed");
+  const verifyError = await verifyBundle(
+    bundle.directory,
+    bundle.artifactSha256,
+    10_000,
+  ).catch((caught: unknown) => caught);
+  expect(verifyError).toMatchObject({ code: "UNSAFE_BUNDLE_CONTENT" });
+});
+
 function contract(baseSha: string): MilestoneContract {
   return {
     kind: "Work",

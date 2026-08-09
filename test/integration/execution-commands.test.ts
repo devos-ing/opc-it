@@ -13,6 +13,7 @@ async function executionFixture(): Promise<{
   runtime: LocalExecutionRuntime;
   payloadB64: string;
   issueNumber: number;
+  authPath: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "opc-execution-command-"));
   const githubWorkspace = join(root, "github-workspace");
@@ -35,18 +36,41 @@ async function executionFixture(): Promise<{
   await mkdir(codexHome, { mode: 0o700 });
   const wrapper = join(hostRoot, "network-deny");
   const binary = join(hostRoot, "codex");
-  const requirements = join(hostRoot, "requirements.toml");
-  const executorProfile = join(hostRoot, "executor.toml");
-  const reviewerProfile = join(hostRoot, "reviewer.toml");
-  await writeFile(wrapper, "#!/bin/sh\nexec \"$@\"\n");
+  const config = join(codexHome, "config.toml");
+  const requirements = join(codexHome, "requirements.toml");
+  const executorProfile = join(codexHome, "opc-executor.config.toml");
+  const reviewerProfile = join(codexHome, "opc-reviewer.config.toml");
+  const authPath = join(codexHome, "auth.json");
+  await writeFile(
+    wrapper,
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "denied=''",
+      "while [ \"$#\" -gt 0 ]; do",
+      "  case \"$1\" in",
+      "    --workspace|--temp) shift 2 ;;",
+      "    --deny) denied=\"$denied $2\"; shift 2 ;;",
+      "    --) shift; break ;;",
+      "    *) exit 64 ;;",
+      "  esac",
+      "done",
+      "for path in $denied; do",
+      "  case \" $* \" in *\"$path\"*) exit 126 ;; esac",
+      "done",
+      "exec \"$@\"",
+      "",
+    ].join("\n"),
+  );
   await writeFile(binary, "codex");
+  await writeFile(config, "cli_auth_credentials_store = 'file'");
   await writeFile(requirements, "requirements");
   await writeFile(executorProfile, "executor");
   await writeFile(reviewerProfile, "reviewer");
-  await writeFile(join(codexHome, "auth.json"), "secret");
+  await writeFile(authPath, "secret");
   await chmod(wrapper, 0o755);
   await chmod(binary, 0o755);
-  for (const path of [requirements, executorProfile, reviewerProfile, join(codexHome, "auth.json")]) {
+  for (const path of [config, requirements, executorProfile, reviewerProfile, authPath]) {
     await chmod(path, 0o600);
   }
   const digest = async (path: string): Promise<string> => sha256Bytes(await Bun.file(path).bytes());
@@ -58,6 +82,7 @@ async function executionFixture(): Promise<{
       runner_user: userInfo().username,
       codex: { path: binary, version: "0.144.4", sha256: await digest(binary), home: codexHome },
       auth: { credentials_store: "file" },
+      config: { path: config, sha256: await digest(config) },
       requirements: { path: requirements, sha256: await digest(requirements) },
       profiles: {
         "opc-executor": { path: executorProfile, sha256: await digest(executorProfile) },
@@ -109,6 +134,7 @@ async function executionFixture(): Promise<{
   return {
     issueNumber,
     payloadB64,
+    authPath,
     runtime: {
       runnerTemp,
       githubWorkspace,
@@ -124,7 +150,7 @@ async function executionFixture(): Promise<{
 it("prepares, finalizes, and removes an isolated execution workspace", async () => {
   const fixture = await executionFixture();
   const prepared = await prepareExecution(
-    { issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
+    { enabled: true, issueNumber: fixture.issueNumber, payloadB64: fixture.payloadB64 },
     fixture.runtime,
   );
   await writeFile(join(prepared.workspace, "src/added.ts"), "export const added = true;\n");
@@ -148,4 +174,27 @@ it("prepares, finalizes, and removes an isolated execution workspace", async () 
     (caught: unknown) => caught,
   );
   expect(removed).toBeInstanceOf(Error);
+});
+
+it("keeps repository-controlled commands outside the Codex credential boundary", async () => {
+  const fixture = await executionFixture();
+  const envelope = JSON.parse(
+    Buffer.from(fixture.payloadB64, "base64url").toString("utf8"),
+  ) as {
+    policy: RepositoryPolicy;
+    contract: Record<string, unknown>;
+    approvalDigest: string;
+  };
+  envelope.policy.commands.bootstrap = `bun -e "await Bun.file('${fixture.authPath}').text()"`;
+  envelope.contract.policy_sha = digestCanonical(envelope.policy);
+  envelope.approvalDigest = digestCanonical(envelope.contract);
+  const payloadB64 = Buffer.from(JSON.stringify(envelope)).toString("base64url");
+
+  const error = await prepareExecution(
+    { enabled: true, issueNumber: fixture.issueNumber, payloadB64 },
+    fixture.runtime,
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "BOOTSTRAP_FAILED" });
+  expect(await readFile(fixture.authPath, "utf8")).toBe("secret");
 });

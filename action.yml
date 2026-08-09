@@ -10,12 +10,6 @@ inputs:
   issue-number:
     description: optional Work or Recovery Issue number
     required: false
-  workflow-ref:
-    description: caller default branch used for explicit workflow dispatch
-    required: false
-  failure-payload-b64:
-    description: base64url-encoded bounded failure evidence for recover
-    required: false
   payload-b64:
     description: base64url-encoded immutable execution or heartbeat envelope
     required: false
@@ -27,6 +21,24 @@ inputs:
     required: false
   artifact-sha256:
     description: trusted outer bundle-index digest from finalize-execution
+    required: false
+  enabled:
+    description: repository execution kill switch, must be exactly true
+    required: false
+  workspace:
+    description: verified workspace used by the pinned Codex route
+    required: false
+  prompt-file:
+    description: mode-0600 prompt file under runner temp
+    required: false
+  output-file:
+    description: structured Codex output file under runner temp
+    required: false
+  schema-file:
+    description: commit-pinned JSON schema inside this Action
+    required: false
+  timeout-seconds:
+    description: approved host-enforced execution deadline
     required: false
   permission-profile:
     description: host-owned opc-executor or opc-reviewer profile
@@ -51,6 +63,8 @@ outputs:
     description: base64url-encoded heartbeat watch inputs
   codex-bin:
     description: verified absolute Codex CLI path
+  codex-home:
+    description: verified host-owned Codex home used by the CLI
   workspace:
     description: isolated execution worktree
   prompt-file:
@@ -59,6 +73,8 @@ outputs:
     description: commit-pinned executor JSON schema path
   review-schema-file:
     description: commit-pinned result-review JSON schema path
+  timeout-seconds:
+    description: approved executor deadline in seconds
   bundle-ready:
     description: true only when a Candidate Result bundle is complete
   bundle-directory:
@@ -66,7 +82,7 @@ outputs:
   artifact-sha256:
     description: outer Candidate Result bundle-index digest
   outcome:
-    description: deterministic Evidence Gate outcome
+    description: deterministic Evidence Gate or production completion outcome
 runs:
   using: node24
   main: dist/action/index.cjs

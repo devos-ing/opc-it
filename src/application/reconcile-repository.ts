@@ -4,6 +4,8 @@ import { reconcileClaim } from "./reconcile.js";
 
 export interface ActiveClaim {
   readonly issueNumber: number;
+  readonly runId: string;
+  readonly state: "claimed" | "running" | "reviewing";
   readonly lastHeartbeat: Date;
   readonly outageStarted?: Date;
   readonly cancelledByOwner: boolean;
@@ -12,6 +14,7 @@ export interface ActiveClaim {
 export interface ReconcilePort {
   listActiveClaims(): Promise<readonly ActiveClaim[]>;
   transition(command: StateTransitionCommand): Promise<TransitionResult>;
+  cancelRun(runId: string): Promise<void>;
 }
 
 export interface RepositoryReconciliation {
@@ -46,10 +49,16 @@ export async function reconcileRepository(
       cancelled += 1;
       continue;
     }
+    const event =
+      decision === "block"
+        ? "outage-block"
+        : claim.state === "claimed"
+          ? "lease-expired"
+          : "incident";
     const result = await port.transition({
       issueNumber: claim.issueNumber,
-      expected: "claimed",
-      event: decision === "block" ? "outage-block" : "lease-expired",
+      expected: claim.state,
+      event,
       metadata: {
         reconcile_decision: decision,
         reconciled_at: clock.now().toISOString(),
@@ -62,8 +71,10 @@ export async function reconcileRepository(
       kept += 1;
     } else if (decision === "block") {
       blocked += 1;
+      await port.cancelRun(claim.runId);
     } else {
       requeued += 1;
+      await port.cancelRun(claim.runId);
     }
   }
   return { active: claims.length, kept, requeued, blocked, cancelled };

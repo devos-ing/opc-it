@@ -19,6 +19,7 @@ import {
 import { parseRepositoryPolicyYaml } from "../../domain/validation.js";
 import {
   GitHubIssues,
+  attemptFromLabels,
   isWorkStateLabel,
   labelForWorkState,
   workStateFromLabels,
@@ -82,6 +83,44 @@ export class GitHubStateStore implements ClaimPort {
 
   loadWorkIssue(issueNumber: number): Promise<WorkIssueRecord> {
     return this.issues.loadWorkIssue(issueNumber);
+  }
+
+  async loadIssueState(issueNumber: number): Promise<{
+    readonly state: WorkState;
+    readonly attempt: 1 | 2 | 3;
+  }> {
+    const { data: issue } = await this.octokit.rest.issues.get({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+    });
+    const labels = issueLabels(issue.labels);
+    return {
+      state: workStateFromLabels(labels),
+      attempt: attemptFromLabels(labels),
+    };
+  }
+
+  async ownsRun(issueNumber: number, runId: string): Promise<boolean> {
+    const comments = await this.octokit.paginate(
+      this.octokit.rest.issues.listComments,
+      {
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: issueNumber,
+        per_page: 100,
+      },
+    );
+    const records = trustedTransitionRecords(comments);
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index];
+      if (!record) continue;
+      if (record.event === "lease-expired" || record.event === "outage-block") {
+        return false;
+      }
+      if (record.event === "claim") return record.metadata.run_id === runId;
+    }
+    return false;
   }
 
   async hasActiveClaim(): Promise<boolean> {

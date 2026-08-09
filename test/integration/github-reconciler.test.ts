@@ -3,8 +3,10 @@ import { Octokit } from "@octokit/rest";
 import { GitHubReconciler } from "../../src/adapters/github/reconciler.js";
 
 interface Route {
+  readonly method?: string;
   readonly path: string;
   readonly response: unknown;
+  readonly status?: number;
 }
 
 function createGitHubApi(routes: readonly Route[]): {
@@ -23,11 +25,12 @@ function createGitHubApi(routes: readonly Route[]): {
     const path = url.pathname + url.search;
     requests.push(path);
     const route = pending.shift();
-    if (!route || request.method !== "GET" || route.path !== path) {
+    if (!route || request.method !== (route.method ?? "GET") || route.path !== path) {
       return Promise.reject(new Error(`UNEXPECTED_GITHUB_REQUEST: ${request.method} ${path}`));
     }
     return Promise.resolve(
       new Response(JSON.stringify(route.response), {
+        status: route.status ?? 200,
         headers: { "content-type": "application/json" },
       }),
     );
@@ -48,6 +51,7 @@ function transitionComment(
   return {
     user: { login: actor },
     body: `<!-- opc-transition ${JSON.stringify({
+      expected: event === "claim" ? "ready" : "claimed",
       event,
       metadata,
     })} -->`,
@@ -65,11 +69,14 @@ function claimComment(actor: string, runId: string, claimedAt: string) {
   );
 }
 
-it("ignores forged claims without treating workflow bookkeeping as heartbeat", async () => {
+it("uses only trusted heartbeat artifacts and ignores workflow bookkeeping", async () => {
   const api = createGitHubApi([
     {
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
-      response: [{ number: 6 }, { number: 7 }],
+      path: "/repos/acme/app/issues?state=open&per_page=100",
+      response: [
+        { number: 6, labels: [{ name: "opc:claimed" }] },
+        { number: 7, labels: [{ name: "opc:claimed" }] },
+      ],
     },
     {
       path: "/repos/acme/app/issues/6/comments?per_page=100",
@@ -96,6 +103,28 @@ it("ignores forged claims without treating workflow bookkeeping as heartbeat", a
         conclusion: null,
       },
     },
+    {
+      path: "/repos/acme/app/actions/runs/123/artifacts?per_page=100",
+      response: {
+        artifacts: [
+          {
+            name: "opc-heartbeat-999-000001",
+            created_at: "2026-08-08T09:29:00Z",
+            expired: false,
+          },
+          {
+            name: "opc-heartbeat-123-000001",
+            created_at: "2026-08-08T09:20:00Z",
+            expired: false,
+          },
+          {
+            name: "opc-heartbeat-123-000002",
+            created_at: "2026-08-08T09:25:00Z",
+            expired: true,
+          },
+        ],
+      },
+    },
   ]);
   const reconciler = new GitHubReconciler(
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
@@ -107,12 +136,17 @@ it("ignores forged claims without treating workflow bookkeeping as heartbeat", a
   expect(await reconciler.listActiveClaims()).toEqual([
     {
       issueNumber: 7,
-      lastHeartbeat: new Date("2026-08-08T09:00:00Z"),
-      outageStarted: new Date("2026-08-07T09:00:00Z"),
+      runId: "123",
+      state: "claimed",
+      lastHeartbeat: new Date("2026-08-08T09:20:00Z"),
+      outageStarted: new Date("2026-08-08T09:20:00Z"),
       cancelledByOwner: false,
     },
   ]);
   expect(api.requests).toContain("/repos/acme/app/actions/runs/123");
+  expect(api.requests).toContain(
+    "/repos/acme/app/actions/runs/123/artifacts?per_page=100",
+  );
   expect(api.requests).not.toContain("/repos/acme/app/actions/runs/999");
   expect(api.isDone()).toBe(true);
 });
@@ -120,8 +154,8 @@ it("ignores forged claims without treating workflow bookkeeping as heartbeat", a
 it("preserves the original outage when a reclaimed run has no later heartbeat", async () => {
   const api = createGitHubApi([
     {
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
-      response: [{ number: 7 }],
+      path: "/repos/acme/app/issues?state=open&per_page=100",
+      response: [{ number: 7, labels: [{ name: "opc:claimed" }] }],
     },
     {
       path: "/repos/acme/app/issues/7/comments?per_page=100",
@@ -143,6 +177,10 @@ it("preserves the original outage when a reclaimed run has no later heartbeat", 
         conclusion: null,
       },
     },
+    {
+      path: "/repos/acme/app/actions/runs/123/artifacts?per_page=100",
+      response: { artifacts: [] },
+    },
   ]);
   const reconciler = new GitHubReconciler(
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
@@ -154,6 +192,8 @@ it("preserves the original outage when a reclaimed run has no later heartbeat", 
   expect(await reconciler.listActiveClaims()).toEqual([
     {
       issueNumber: 7,
+      runId: "123",
+      state: "claimed",
       lastHeartbeat: new Date("2026-08-08T09:00:00Z"),
       outageStarted: new Date("2026-08-07T09:00:00Z"),
       cancelledByOwner: false,
@@ -165,8 +205,8 @@ it("preserves the original outage when a reclaimed run has no later heartbeat", 
 it("ignores a relabeled claim after a later trusted transition ended it", async () => {
   const api = createGitHubApi([
     {
-      path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
-      response: [{ number: 7 }],
+      path: "/repos/acme/app/issues?state=open&per_page=100",
+      response: [{ number: 7, labels: [{ name: "opc:claimed" }] }],
     },
     {
       path: "/repos/acme/app/issues/7/comments?per_page=100",
@@ -189,5 +229,27 @@ it("ignores a relabeled claim after a later trusted transition ended it", async 
   );
 
   expect(await reconciler.listActiveClaims()).toEqual([]);
+  expect(api.isDone()).toBe(true);
+});
+
+it("cancels the stale workflow run after its state is released", async () => {
+  const api = createGitHubApi([
+    {
+      method: "POST",
+      path: "/repos/acme/app/actions/runs/123/cancel",
+      response: {},
+      status: 202,
+    },
+  ]);
+  const reconciler = new GitHubReconciler(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    "acme",
+  );
+
+  await reconciler.cancelRun("123");
+
+  expect(api.requests).toEqual(["/repos/acme/app/actions/runs/123/cancel"]);
   expect(api.isDone()).toBe(true);
 });

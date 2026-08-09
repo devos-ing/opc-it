@@ -4,12 +4,14 @@ import type { Octokit } from "@octokit/rest";
 import { userInfo } from "node:os";
 import { execa } from "execa";
 import { createGitHubClient } from "../adapters/github/client.js";
+import { runBounded } from "../adapters/local/process-runner.js";
 import { runActionCommand } from "../commands/action-command.js";
 import { finalizeExecution } from "../commands/finalize-execution.js";
 import { decideResult } from "../commands/decide-result.js";
 import { runActionHeartbeat } from "../commands/heartbeat.js";
 import { prepareExecution, type LocalExecutionRuntime } from "../commands/prepare-execution.js";
 import { prepareReview } from "../commands/prepare-review.js";
+import { runPinnedCodex } from "../commands/run-codex.js";
 import {
   productionRunnerManifestPath,
   productionRunnerUser,
@@ -59,24 +61,32 @@ function controlOwnerFromActionRepository(repository: string): string {
 export async function main(runtime: ActionRuntime = githubActionsRuntime): Promise<void> {
   try {
     const issueNumber = runtime.getInput("issue-number");
-    const workflowRef = runtime.getInput("workflow-ref");
-    const failurePayloadB64 = runtime.getInput("failure-payload-b64");
     const payloadB64 = runtime.getInput("payload-b64");
     const inputFile = runtime.getInput("input-file");
     const codexVersion = runtime.getInput("codex-version");
     const permissionProfile = runtime.getInput("permission-profile");
     const artifactSha256 = runtime.getInput("artifact-sha256");
+    const enabled = runtime.getInput("enabled");
+    const workspace = runtime.getInput("workspace");
+    const promptFile = runtime.getInput("prompt-file");
+    const outputFile = runtime.getInput("output-file");
+    const schemaFile = runtime.getInput("schema-file");
+    const timeoutSeconds = runtime.getInput("timeout-seconds");
     const inputs = parseActionInputs({
       command: runtime.getInput("command"),
       repository: runtime.getInput("repository"),
       ...(issueNumber ? { issueNumber } : {}),
-      ...(workflowRef ? { workflowRef } : {}),
-      ...(failurePayloadB64 ? { failurePayloadB64 } : {}),
       ...(payloadB64 ? { payloadB64 } : {}),
       ...(inputFile ? { inputFile } : {}),
       ...(codexVersion ? { codexVersion } : {}),
       ...(permissionProfile ? { permissionProfile } : {}),
       ...(artifactSha256 ? { artifactSha256 } : {}),
+      ...(enabled ? { enabled } : {}),
+      ...(workspace ? { workspace } : {}),
+      ...(promptFile ? { promptFile } : {}),
+      ...(outputFile ? { outputFile } : {}),
+      ...(schemaFile ? { schemaFile } : {}),
+      ...(timeoutSeconds ? { timeoutSeconds } : {}),
     });
     const token = runtime.getInput("github-token");
     const octokit = token
@@ -88,6 +98,32 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       throw new DomainError("UNTRUSTED_REPOSITORY", `${inputs.owner}/${inputs.repo}`);
     }
     const runnerTemp = runtime.getRunnerTemp?.() ?? "";
+    const verifyLocalRunner = async (
+      profile: "opc-executor" | "opc-reviewer",
+      version = "0.144.4",
+    ) => {
+      const info = userInfo();
+      return verifyCodexRunner(
+        { codexVersion: version, permissionProfile: profile },
+        {
+          manifestPath: productionRunnerManifestPath,
+          expectedRunnerUser: productionRunnerUser,
+          currentUser: () => ({ username: info.username, uid: info.uid }),
+          execute: async (command, args, environment) => {
+            const execution = await execa(command, [...args], {
+              env: environment,
+              extendEnv: false,
+              reject: false,
+            });
+            return {
+              exitCode: execution.exitCode ?? -1,
+              stdout: execution.stdout,
+              stderr: execution.stderr,
+            };
+          },
+        },
+      );
+    };
     const localRuntime = (): LocalExecutionRuntime => {
       const githubWorkspace = runtime.getWorkspace?.() ?? "";
       const actionPath = runtime.getActionPath?.() ?? "";
@@ -113,42 +149,23 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       inputs.command === "prepare-execution" ||
       inputs.command === "finalize-execution" ||
       inputs.command === "prepare-review" ||
-      inputs.command === "decide-result"
+      inputs.command === "decide-result" ||
+      inputs.command === "run-codex"
     ) {
       if (octokit) throw new DomainError("UNEXPECTED_GITHUB_CLIENT", inputs.command);
       if (inputs.command === "verify-codex-runner") {
         const version = inputs.codexVersion;
         const profile = inputs.permissionProfile;
         if (!version || !profile) throw new DomainError("INVALID_CODEX_RUNNER", "missing input");
-        const info = userInfo();
-        const verified = await verifyCodexRunner(
-          { codexVersion: version, permissionProfile: profile },
-          {
-            manifestPath: productionRunnerManifestPath,
-            expectedRunnerUser: productionRunnerUser,
-            currentUser: () => ({ username: info.username, uid: info.uid }),
-            execute: async (command, args, environment) => {
-              const execution = await execa(command, [...args], {
-                env: environment,
-                extendEnv: false,
-                reject: false,
-              });
-              return {
-                exitCode: execution.exitCode ?? -1,
-                stdout: execution.stdout,
-                stderr: execution.stderr,
-              };
-            },
-          },
-        );
+        const verified = await verifyLocalRunner(profile, version);
         result = verified;
-        outputs = { "codex-bin": verified.codexBin };
+        outputs = { "codex-bin": verified.codexBin, "codex-home": verified.codexHome };
       } else if (inputs.command === "prepare-execution") {
-        if (inputs.issueNumber === undefined || !inputs.payloadB64) {
+        if (inputs.issueNumber === undefined || !inputs.payloadB64 || inputs.enabled !== true) {
           throw new DomainError("INVALID_EXECUTION_INPUT", "missing prepare input");
         }
         const prepared = await prepareExecution(
-          { issueNumber: inputs.issueNumber, payloadB64: inputs.payloadB64 },
+          { issueNumber: inputs.issueNumber, payloadB64: inputs.payloadB64, enabled: inputs.enabled },
           localRuntime(),
         );
         result = prepared;
@@ -157,6 +174,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
           "prompt-file": prepared.promptFile,
           "executor-schema-file": prepared.executorSchemaFile,
           "review-schema-file": prepared.reviewSchemaFile,
+          "timeout-seconds": String(prepared.timeoutSeconds),
         };
       } else if (inputs.command === "finalize-execution") {
         if (inputs.issueNumber === undefined || !inputs.payloadB64 || !inputs.inputFile) {
@@ -204,7 +222,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
           "prompt-file": prepared.promptFile,
           "review-schema-file": prepared.reviewSchemaFile,
         };
-      } else {
+      } else if (inputs.command === "decide-result") {
         if (
           inputs.issueNumber === undefined ||
           !inputs.payloadB64 ||
@@ -228,6 +246,34 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
         );
         result = decision;
         outputs = { outcome: decision.outcome };
+      } else {
+        const profile = inputs.permissionProfile;
+        if (
+          !profile ||
+          !inputs.workspace ||
+          !inputs.promptFile ||
+          !inputs.outputFile ||
+          !inputs.schemaFile ||
+          inputs.timeoutSeconds === undefined
+        ) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing run-codex input");
+        }
+        const actionPath = runtime.getActionPath?.() ?? "";
+        if (!runnerTemp || !actionPath) {
+          throw new DomainError("INVALID_EXECUTION_INPUT", "missing runner paths");
+        }
+        result = await runPinnedCodex(
+          {
+            permissionProfile: profile,
+            workspace: inputs.workspace,
+            promptFile: inputs.promptFile,
+            outputFile: inputs.outputFile,
+            schemaFile: inputs.schemaFile,
+            timeoutSeconds: inputs.timeoutSeconds,
+          },
+          { runnerTemp, actionPath, sourceEnvironment: process.env },
+          { verify: verifyLocalRunner, run: runBounded },
+        );
       }
     } else if (inputs.command === "heartbeat") {
       if (!octokit) throw new DomainError("MISSING_GITHUB_TOKEN", "heartbeat requires token");

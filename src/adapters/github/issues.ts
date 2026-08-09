@@ -46,7 +46,7 @@ export function labelForWorkState(state: WorkState): string {
   return `opc:${state}`;
 }
 
-function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
+export function attemptFromLabels(labels: readonly string[]): 1 | 2 | 3 {
   const attempts = labels.filter((label) => label.startsWith("opc:attempt-"));
   if (attempts.length !== 1) {
     throw new DomainError("INVALID_ATTEMPT_LABELS", attempts.join(","));

@@ -2,21 +2,16 @@ import type { Octokit } from "@octokit/rest";
 import { GitHubReconciler } from "../adapters/github/reconciler.js";
 import { GitHubRecovery } from "../adapters/github/recovery.js";
 import { GitHubStateStore } from "../adapters/github/state-store.js";
+import { classifyWorkflowRun } from "../adapters/github/run-outcome.js";
 import type { ActionInputs } from "../action/inputs.js";
-import {
-  claimNextWork,
-  verifyWorkIssue,
-  type ClaimResult,
-  type Clock,
-} from "../application/claim-work.js";
-import { recoverFailedWork } from "../application/recover-failed-work.js";
-import type { RecoveryResult } from "../application/create-recovery.js";
+import { claimNextWork, type ClaimResult, type Clock } from "../application/claim-work.js";
+import { completeRun, type CompleteRunResult } from "../application/complete-run.js";
 import {
   reconcileRepository,
   type RepositoryReconciliation,
 } from "../application/reconcile-repository.js";
 import { DomainError } from "../domain/errors.js";
-import { errorFingerprint } from "../domain/fingerprint.js";
+import { parseExecutionEnvelopePayload } from "./prepare-execution.js";
 
 export type ActionCommandResult =
   | { readonly command: "validate"; readonly valid: true }
@@ -26,7 +21,10 @@ export type ActionCommandResult =
       readonly reconciliation: RepositoryReconciliation;
       readonly claim: ClaimResult | undefined;
     }
-  | { readonly command: "recover"; readonly recovery: RecoveryResult };
+  | {
+      readonly command: "complete-run";
+      readonly completion: CompleteRunResult | { readonly outcome: "stale" };
+    };
 
 interface ActionCommandContext {
   readonly callerWorkflowRef: string;
@@ -36,11 +34,6 @@ interface ActionCommandContext {
 }
 
 const systemClock: Clock = { now: () => new Date() };
-
-function approvedAttempts(value: number): 1 | 2 | 3 {
-  if (value === 1 || value === 2 || value === 3) return value;
-  throw new DomainError("INVALID_CONTRACT", `limits.attempts=${String(value)}`);
-}
 
 export async function runActionCommand(
   inputs: ActionInputs,
@@ -54,7 +47,7 @@ export async function runActionCommand(
   }
 
   if (
-    inputs.command === "recover" &&
+    inputs.command === "complete-run" &&
     !context.callerWorkflowRef.startsWith(
       `${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@`,
     )
@@ -65,7 +58,7 @@ export async function runActionCommand(
   if (
     inputs.command !== "claim" &&
     inputs.command !== "reconcile" &&
-    inputs.command !== "recover"
+    inputs.command !== "complete-run"
   ) {
     throw new DomainError("ACTION_COMMAND_NOT_IMPLEMENTED", inputs.command);
   }
@@ -80,57 +73,56 @@ export async function runActionCommand(
     undefined,
     context.controlOwner,
   );
-  if (inputs.command === "recover") {
+  if (inputs.command === "complete-run") {
     const issueNumber = inputs.issueNumber;
-    const workflowRef = inputs.workflowRef;
-    const failure = inputs.failure;
-    if (issueNumber === undefined || !workflowRef || !failure) {
-      throw new DomainError("INVALID_FAILURE_PAYLOAD", "incomplete recover input");
+    if (issueNumber === undefined || !inputs.payloadB64) {
+      throw new DomainError("INVALID_EXECUTION_INPUT", "complete-run requires issue and payload");
     }
-    const issue = await store.loadWorkIssue(issueNumber);
-    const envelope = await verifyWorkIssue(issue, store);
+    const envelope = parseExecutionEnvelopePayload(inputs.payloadB64, issueNumber);
     const expectedCallerWorkflow = `${inputs.owner}/${inputs.repo}/.github/workflows/opc.yml@refs/heads/${envelope.defaultBranch}`;
-    if (
-      workflowRef !== envelope.defaultBranch ||
-      context.callerWorkflowRef !== expectedCallerWorkflow
-    ) {
+    if (context.callerWorkflowRef !== expectedCallerWorkflow) {
       throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
     }
-    const evidencePath = `/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}/`;
-    if (!new URL(failure.evidenceUrl).pathname.startsWith(evidencePath)) {
-      throw new DomainError("INVALID_FAILURE_PAYLOAD", "evidence run does not match caller");
+    const issue = await store.loadIssueState(issueNumber);
+    if (issue.attempt !== envelope.attempt) {
+      throw new DomainError(
+        "INVALID_ATTEMPT_LABELS",
+        `${String(issue.attempt)}:${String(envelope.attempt)}`,
+      );
     }
-    const recovery = await recoverFailedWork(
-      {
-        category: failure.category,
-        requiresExpansion: failure.requiresExpansion,
-        evidenceUrl: failure.evidenceUrl,
-        repairHypothesis: failure.repairHypothesis,
-        verificationFocus: failure.verificationFocus,
-        fingerprint: errorFingerprint({
-          type: failure.category,
-          checkId: failure.checkId,
-          message: failure.message,
-          baseSha: envelope.contract.base_sha,
-        }),
-        state: issue.state,
-        attempt: issue.attempt,
-        approvedAttempts: approvedAttempts(envelope.contract.limits.attempts),
-        rootIssueNumber: envelope.rootIssueNumber,
-        issueNumber: issue.number,
-        workId: envelope.contract.work_id,
-        approvalDigest: envelope.approvalDigest,
-        actionsUrl: `https://github.com/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}`,
-        defaultBranch: envelope.defaultBranch,
-      },
-      new GitHubRecovery(
-        octokit,
-        inputs.owner,
-        inputs.repo,
-        context.controlOwner,
-      ),
+    if (!(await store.ownsRun(issueNumber, context.runId))) {
+      return { command: "complete-run", completion: { outcome: "stale" } };
+    }
+    const { data } = await octokit.rest.actions.listJobsForWorkflowRun({
+      owner: inputs.owner,
+      repo: inputs.repo,
+      run_id: Number(context.runId),
+      per_page: 100,
+    });
+    const observed = classifyWorkflowRun(
+      data.jobs.map((job) => ({
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
+        startedAt: job.runner_id ? job.started_at : null,
+        steps: (job.steps ?? []).map((step) => ({
+          name: step.name,
+          status: step.status,
+          conclusion: step.conclusion,
+        })),
+      })),
     );
-    return { command: "recover", recovery };
+    const completion = await completeRun(
+      {
+        runId: context.runId,
+        issue: { number: issueNumber, ...issue },
+        envelope,
+        observed,
+        evidenceUrl: `https://github.com/${inputs.owner}/${inputs.repo}/actions/runs/${context.runId}`,
+      },
+      new GitHubRecovery(octokit, inputs.owner, inputs.repo, context.controlOwner),
+    );
+    return { command: "complete-run", completion };
   }
   if (inputs.command === "reconcile") {
     const clock = context.clock ?? systemClock;

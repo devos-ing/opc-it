@@ -8,6 +8,7 @@ export interface CommandRequest {
   env: Readonly<Record<string, string>>;
   timeoutMs: number;
   outputLimitBytes: number;
+  input?: string;
   secrets?: readonly string[];
 }
 
@@ -34,6 +35,7 @@ export async function runBounded(request: CommandRequest): Promise<CommandResult
     timeout: request.timeoutMs,
     killSignal: "SIGKILL",
     maxBuffer: request.outputLimitBytes,
+    ...(request.input === undefined ? {} : { input: request.input }),
   });
   const stdout = truncateUtf8(redact(result.stdout, request.secrets), request.outputLimitBytes);
   const stderr = truncateUtf8(redact(result.stderr, request.secrets), request.outputLimitBytes);

@@ -23,12 +23,12 @@ it("uses only Actions job reads and artifact uploads until watched jobs stop", a
         poll += 1;
         return Promise.resolve(poll === 1
           ? [
-              { name: "execute", status: "in_progress" },
-              { name: "review", status: "queued" },
+              { name: "opc / execute", status: "in_progress" },
+              { name: "opc / review", status: "queued" },
             ]
           : [
-              { name: "execute", status: "completed" },
-              { name: "review", status: "completed" },
+              { name: "opc / execute", status: "completed" },
+              { name: "opc / review", status: "completed" },
             ]);
       },
       upload: (_name, body) => {
@@ -73,6 +73,47 @@ it("fails closed when the watched job list is incomplete", async () => {
   ).catch((caught: unknown) => caught);
 
   expect(error).toMatchObject({ code: "UNTRUSTED_HEARTBEAT_JOBS" });
+});
+
+it("does not treat queued Mac jobs as runner liveness", async () => {
+  const uploads: string[] = [];
+  let poll = 0;
+  const result = await monitorHeartbeat(
+    {
+      owner: "acme",
+      repo: "private",
+      runId: "10",
+      issueNumber: 7,
+      attempt: 1,
+      watchJobs: ["execute", "review"],
+    },
+    {
+      listJobs: () => {
+        poll += 1;
+        return Promise.resolve(
+          poll === 1
+            ? [
+                { name: "execute", status: "queued" },
+                { name: "review", status: "queued" },
+              ]
+            : [
+                { name: "execute", status: "completed" },
+                { name: "review", status: "completed" },
+              ],
+        );
+      },
+      upload: (name) => {
+        uploads.push(name);
+        return Promise.resolve();
+      },
+      now: () => new Date("2026-08-08T10:00:00Z"),
+      sleep: async () => {},
+      intervalMs: 300_000,
+    },
+  );
+
+  expect(result).toEqual({ status: "stopped", polls: 2 });
+  expect(uploads).toEqual([]);
 });
 
 it("writes one-line heartbeat JSON only under runner temp before upload", async () => {

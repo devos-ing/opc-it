@@ -148,25 +148,11 @@ it("rejects a target outside the control Action owner", async () => {
   expect(runtime.failures).toEqual(["UNTRUSTED_REPOSITORY"]);
 });
 
-it("rejects recover when invoked from an arbitrary target workflow", async () => {
-  const failurePayloadB64 = Buffer.from(
-    JSON.stringify({
-      category: "execution",
-      requiresExpansion: false,
-      checkId: "unit",
-      message: "assertion failed",
-      evidenceUrl: "https://github.com/acme/app/actions/runs/123/artifacts/456",
-      repairHypothesis: "retry the failed unit test",
-      verificationFocus: "unit",
-    }),
-  ).toString("base64url");
+it("rejects the removed caller-supplied recover command", async () => {
   const runtime = new TestActionRuntime(
     {
       command: "recover",
       repository: "acme/app",
-      "issue-number": "7",
-      "workflow-ref": "main",
-      "failure-payload-b64": failurePayloadB64,
     },
     undefined,
     "acme/OPC",
@@ -176,7 +162,7 @@ it("rejects recover when invoked from an arbitrary target workflow", async () =>
   await main(runtime);
 
   expect(runtime.outputs.size).toBe(0);
-  expect(runtime.failures).toEqual(["INVALID_WORKFLOW_REF"]);
+  expect(runtime.failures).toEqual(["INVALID_ACTION_COMMAND"]);
 });
 
 it.each(["claim", "reconcile"] as const)(
@@ -211,7 +197,7 @@ it.each(["claim", "reconcile"] as const)(
       ? [
           {
             method: "GET",
-            path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
+            path: "/repos/acme/app/issues?state=open&per_page=100",
             response: [],
           },
         ]

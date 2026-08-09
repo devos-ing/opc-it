@@ -11,17 +11,13 @@ export interface HeartbeatContext {
 export type HeartbeatStatus = "running" | "stopped";
 
 export class Heartbeat {
-  private timer: ReturnType<typeof setInterval> | undefined;
   private sequence = 0;
-  private pending: Promise<void> = Promise.resolve();
-  private failure: unknown;
   private context: HeartbeatContext | undefined;
   private stopped = false;
 
   constructor(
     private readonly upload: (name: string, body: string) => Promise<void>,
     private readonly now: () => Date,
-    private readonly intervalMs = 300_000,
   ) {}
 
   private async emit(status: HeartbeatStatus): Promise<void> {
@@ -40,35 +36,20 @@ export class Heartbeat {
     );
   }
 
-  private queueTick(): void {
-    this.pending = this.pending
-      .then(async () => {
-        if (this.failure === undefined && !this.stopped) await this.emit("running");
-      })
-      .catch((error: unknown) => {
-        this.failure = error;
-      });
-  }
-
-  async start(context: HeartbeatContext): Promise<void> {
+  start(context: HeartbeatContext): void {
     if (this.context !== undefined) throw new DomainError("INVALID_HEARTBEAT_INPUT", "already started");
     this.context = context;
+  }
+
+  async pulse(): Promise<void> {
+    if (this.stopped) throw new DomainError("INVALID_HEARTBEAT_INPUT", "already stopped");
     await this.emit("running");
-    this.timer = setInterval(() => {
-      this.queueTick();
-    }, this.intervalMs);
   }
 
   async stop(finalStatus?: "stopped"): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
-    if (this.timer !== undefined) clearInterval(this.timer);
-    await this.pending;
-    if (this.failure instanceof Error) throw this.failure;
-    if (this.failure !== undefined) {
-      throw new DomainError("UNTRUSTED_HEARTBEAT_JOBS", "heartbeat upload failed");
-    }
-    if (finalStatus !== undefined) await this.emit(finalStatus);
+    if (finalStatus !== undefined && this.sequence > 0) await this.emit(finalStatus);
   }
 }
 
