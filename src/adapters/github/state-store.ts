@@ -55,9 +55,18 @@ export class GitHubStateStore implements ClaimPort {
       state: "open",
       per_page: 100,
     });
-    return issues.some((issue) =>
+    const activeIssues = issues.filter((issue) =>
       issueLabels(issue.labels).some((label) => activeStateLabels.has(label)),
     );
+    const loaded = await Promise.all(
+      activeIssues.map((issue) =>
+        this.loadWorkIssue(issue.number).catch((error: unknown) => {
+          if (error instanceof DomainError) return undefined;
+          throw error;
+        }),
+      ),
+    );
+    return loaded.some((issue) => issue?.claimRecorded === true);
   }
 
   async listEligibleWork(): Promise<readonly WorkIssueRecord[]> {

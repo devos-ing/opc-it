@@ -71,3 +71,101 @@ it("skips one malformed Ready Issue without blocking a valid candidate", async (
 
   expect((await store.listEligibleWork()).map((issue) => issue.number)).toEqual([8]);
 });
+
+it("does not let a forged active label occupy the execution slot", async () => {
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
+  const digest = digestCanonical(contract);
+  const forgedIssue = {
+    number: 7,
+    user: { login: "mallory" },
+    body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+    labels: [
+      { name: "opc:work" },
+      { name: "opc:claimed" },
+      { name: "opc:attempt-1" },
+    ],
+    created_at: "2026-08-08T00:00:00Z",
+  };
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues?state=open&per_page=100", [forgedIssue]],
+      ["GET /repos/acme/app/issues/7", forgedIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "roy" },
+            body: `/opc approve ${digest}`,
+            created_at: "2026-08-08T00:01:00Z",
+            updated_at: "2026-08-08T00:01:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.hasActiveClaim()).toBe(false);
+});
+
+it("recognizes an active slot only after a trusted claim transition", async () => {
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
+  const digest = digestCanonical(contract);
+  const activeIssue = {
+    number: 7,
+    user: { login: "roy" },
+    body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+    labels: [
+      { name: "opc:work" },
+      { name: "opc:claimed" },
+      { name: "opc:attempt-1" },
+    ],
+    created_at: "2026-08-08T00:00:00Z",
+  };
+  const claimBody = `<!-- opc-transition ${JSON.stringify({
+    expected: "ready",
+    event: "claim",
+    metadata: {
+      run_id: "123",
+      claimed_at: "2026-08-08T00:02:00Z",
+    },
+  })} -->`;
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues?state=open&per_page=100", [activeIssue]],
+      ["GET /repos/acme/app/issues/7", activeIssue],
+      [
+        "GET /repos/acme/app/issues/7/comments?per_page=100",
+        [
+          {
+            user: { login: "roy" },
+            body: `/opc approve ${digest}`,
+            created_at: "2026-08-08T00:01:00Z",
+            updated_at: "2026-08-08T00:01:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: claimBody,
+            created_at: "2026-08-08T00:02:00Z",
+            updated_at: "2026-08-08T00:02:00Z",
+          },
+        ],
+      ],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+
+  expect(await store.hasActiveClaim()).toBe(true);
+});

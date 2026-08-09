@@ -173,3 +173,110 @@ it("creates one immutable Issue, records owner approval, then marks it Ready", a
   ]);
   expect(api.isDone()).toBe(true);
 });
+
+it("deduplicates Work created by another allowlisted approver", async () => {
+  const policy = { ...validPolicy, approvers: ["roy", "alice"] };
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(policy) };
+  const digest = digestCanonical(contract);
+  const api = createGitHubApi([
+    { method: "GET", path: "/user", response: { login: "roy" } },
+    {
+      method: "GET",
+      path: "/repos/acme/app",
+      response: {
+        private: true,
+        fork: false,
+        default_branch: "main",
+        owner: { login: "acme" },
+      },
+    },
+    {
+      method: "GET",
+      path: `/repos/acme/app/contents/.codex-pipeline.yml?ref=${contract.base_sha}`,
+      response: encodedPolicyResponse(policy),
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/branches/main",
+      response: { commit: { sha: contract.base_sha } },
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100",
+      response: [
+        {
+          number: 7,
+          user: { login: "alice" },
+          body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(contract)}\n\`\`\`\n`,
+        },
+      ],
+    },
+  ]);
+
+  expect(
+    await queueApprovedPlan(
+      { owner: "acme", repo: "app", contract, approvedDigest: digest },
+      new GitHubPlanQueue(
+        new Octokit({ auth: "interactive-owner-token", request: { fetch: api.fetch } }),
+        "acme",
+        "app",
+        contract.base_sha,
+      ),
+    ),
+  ).toEqual({ issueNumber: 7, approvalDigest: digest, queued: false });
+  expect(api.isDone()).toBe(true);
+});
+
+it("rejects a conflicting Work id created by another allowlisted approver", async () => {
+  const policy = { ...validPolicy, approvers: ["roy", "alice"] };
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(policy) };
+  const existingContract = { ...contract, goal: "A different approved milestone" };
+  const digest = digestCanonical(contract);
+  const api = createGitHubApi([
+    { method: "GET", path: "/user", response: { login: "roy" } },
+    {
+      method: "GET",
+      path: "/repos/acme/app",
+      response: {
+        private: true,
+        fork: false,
+        default_branch: "main",
+        owner: { login: "acme" },
+      },
+    },
+    {
+      method: "GET",
+      path: `/repos/acme/app/contents/.codex-pipeline.yml?ref=${contract.base_sha}`,
+      response: encodedPolicyResponse(policy),
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/branches/main",
+      response: { commit: { sha: contract.base_sha } },
+    },
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100",
+      response: [
+        {
+          number: 7,
+          user: { login: "alice" },
+          body: `# Work\n\n\`\`\`yaml opc-contract\n${JSON.stringify(existingContract)}\n\`\`\`\n`,
+        },
+      ],
+    },
+  ]);
+
+  expect(
+    await queueApprovedPlan(
+      { owner: "acme", repo: "app", contract, approvedDigest: digest },
+      new GitHubPlanQueue(
+        new Octokit({ auth: "interactive-owner-token", request: { fetch: api.fetch } }),
+        "acme",
+        "app",
+        contract.base_sha,
+      ),
+    ).catch((error: unknown) => error),
+  ).toMatchObject({ code: "WORK_ID_CONFLICT" });
+  expect(api.isDone()).toBe(true);
+});

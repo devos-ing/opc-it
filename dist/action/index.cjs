@@ -42799,6 +42799,42 @@ function extractContractBlock(body) {
   return contract;
 }
 
+// src/adapters/github/transition-record.ts
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
+}
+function parseTransitionRecord(body) {
+  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
+  if (!payload)
+    return;
+  let value;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const transitionRecord = record(value);
+  const metadata = record(transitionRecord?.metadata);
+  const event = transitionRecord?.event;
+  const expected = transitionRecord?.expected;
+  if (typeof event !== "string" || !metadata)
+    return;
+  return {
+    event,
+    metadata,
+    ...typeof expected === "string" ? { expected } : {}
+  };
+}
+function trustedTransitionRecords(comments) {
+  return comments.flatMap((comment) => {
+    if (comment.user?.login !== "github-actions[bot]" || comment.created_at !== comment.updated_at) {
+      return [];
+    }
+    const transitionRecord = parseTransitionRecord(comment.body);
+    return transitionRecord ? [transitionRecord] : [];
+  });
+}
+
 // src/adapters/github/issues.ts
 var stateLabels = new Map([
   ["opc:needs-approval", "needs-approval"],
@@ -42874,6 +42910,13 @@ function approvalFromComments(comments, approvers) {
 }
 function hasHttpStatus(error) {
   return typeof error === "object" && error !== null && "status" in error;
+}
+function hasTrustedClaimTransition(comments) {
+  return trustedTransitionRecords(comments).some((transitionRecord) => {
+    const runId = transitionRecord.metadata.run_id;
+    const claimedAt = transitionRecord.metadata.claimed_at;
+    return transitionRecord.expected === "ready" && transitionRecord.event === "claim" && typeof runId === "string" && /^\d+$/.test(runId) && typeof claimedAt === "string" && !Number.isNaN(new Date(claimedAt).getTime());
+  });
 }
 
 class GitHubIssues {
@@ -42960,6 +43003,7 @@ class GitHubIssues {
       createdAt,
       rootIssueNumber,
       attempt,
+      claimRecorded: hasTrustedClaimTransition(comments),
       ...approval
     };
   }
@@ -42999,7 +43043,13 @@ class GitHubStateStore {
       state: "open",
       per_page: 100
     });
-    return issues.some((issue) => issueLabels(issue.labels).some((label) => activeStateLabels.has(label)));
+    const activeIssues = issues.filter((issue) => issueLabels(issue.labels).some((label) => activeStateLabels.has(label)));
+    const loaded = await Promise.all(activeIssues.map((issue) => this.loadWorkIssue(issue.number).catch((error) => {
+      if (error instanceof DomainError)
+        return;
+      throw error;
+    })));
+    return loaded.some((issue) => issue?.claimRecorded === true);
   }
   async listEligibleWork() {
     const candidates = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
@@ -43083,29 +43133,11 @@ class GitHubStateStore {
 }
 
 // src/adapters/github/reconciler.ts
-function record(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : undefined;
-}
 function parseDate(value) {
   if (typeof value !== "string")
     return;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date;
-}
-function parseTransitionRecord(body) {
-  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
-  if (!payload)
-    return;
-  let value;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const transitionRecord = record(value);
-  const metadata = record(transitionRecord?.metadata);
-  const event = transitionRecord?.event;
-  return typeof event === "string" && metadata ? { event, metadata } : undefined;
 }
 function claimMetadata(record2) {
   if (!record2)
@@ -43138,7 +43170,12 @@ class GitHubReconciler {
       labels: "opc:claimed",
       per_page: 100
     });
-    return Promise.all(issues.map((issue) => this.loadActiveClaim(issue.number)));
+    const claims = await Promise.all(issues.map((issue) => this.loadActiveClaim(issue.number).catch((error) => {
+      if (error instanceof DomainError)
+        return;
+      throw error;
+    })));
+    return claims.filter((claim) => claim !== undefined);
   }
   transition(command) {
     return this.stateStore.transition(command);
@@ -43150,7 +43187,7 @@ class GitHubReconciler {
       issue_number: issueNumber,
       per_page: 100
     });
-    const records = comments.filter((comment) => comment.user?.login === "github-actions[bot]" && comment.created_at === comment.updated_at).map((comment) => parseTransitionRecord(comment.body)).filter((candidate) => candidate !== undefined);
+    const records = trustedTransitionRecords(comments);
     let claimIndex = -1;
     let metadata;
     for (const [index, candidate] of records.entries()) {
@@ -43184,7 +43221,7 @@ class GitHubReconciler {
     return {
       issueNumber,
       lastHeartbeat,
-      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
+      ...lastHeartbeat > metadata.claimedAt ? {} : { outageStarted: persistedOutageStarted ?? metadata.claimedAt },
       cancelledByOwner
     };
   }
@@ -43193,6 +43230,9 @@ class GitHubReconciler {
 // src/adapters/github/recovery.ts
 function recoveryMarker(rootIssueNumber, fingerprint) {
   return `<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=${fingerprint} -->`;
+}
+function hasRecoveryRootMarker(body, rootIssueNumber) {
+  return new RegExp(`^<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=sha256:[0-9a-f]{64} -->$`, "m").test(body);
 }
 
 class GitHubRecovery {
@@ -43220,14 +43260,13 @@ class GitHubRecovery {
       labels: "opc:recovery",
       per_page: 100
     });
-    const marker = recoveryMarker(input.rootIssueNumber, input.fingerprint);
     for (const issue of issues) {
-      if (issue.user?.login !== "github-actions[bot]" || !issue.body?.includes(marker)) {
+      if (issue.user?.login !== "github-actions[bot]" || !issue.body || !hasRecoveryRootMarker(issue.body, input.rootIssueNumber)) {
         continue;
       }
       try {
         const contract = parseIssueContractYaml(extractContractBlock(issue.body));
-        if (contract.kind === "Recovery" && contract.root_work_id === input.workId && contract.parent_issue === input.parentIssueNumber && contract.approval_digest === input.approvalDigest && contract.error_fingerprint === input.fingerprint && contract.attempt === input.attempt && contract.failure_type === input.category) {
+        if (contract.kind === "Recovery" && contract.root_work_id === input.workId && contract.parent_issue === input.parentIssueNumber && contract.approval_digest === input.approvalDigest && contract.attempt === input.attempt) {
           return issue.number;
         }
       } catch (error) {
@@ -43484,9 +43523,7 @@ async function createRecovery(input, port) {
     parentIssueNumber: input.issueNumber,
     workId: input.workId,
     approvalDigest: input.approvalDigest,
-    fingerprint: input.fingerprint,
-    attempt: decision.nextAttempt,
-    category: input.category
+    attempt: decision.nextAttempt
   });
   if (existing !== undefined) {
     return { outcome: "deduplicated", issueNumber: existing };

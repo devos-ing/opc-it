@@ -6,6 +6,7 @@ import {
 import {
   createRecovery,
   type FailedAttempt,
+  type RecoveryLookup,
   type RecoveryPort,
 } from "../../src/application/create-recovery.js";
 import type {
@@ -157,18 +158,15 @@ class ScenarioClaimPort implements ClaimPort {
 class ScenarioRecoveryPort implements RecoveryPort {
   readonly issues = new Map<string, number>();
 
-  findOpenRecovery(input: {
-    readonly rootIssueNumber: number;
-    readonly fingerprint: Sha256;
-  }): Promise<number | undefined> {
+  findOpenRecovery(input: RecoveryLookup): Promise<number | undefined> {
     return Promise.resolve(
-      this.issues.get(`${String(input.rootIssueNumber)}:${input.fingerprint}`),
+      this.issues.get(`${String(input.rootIssueNumber)}:${String(input.attempt)}`),
     );
   }
 
   createRecovery(input: RecoveryIssueInput): Promise<number> {
     const issueNumber = 42 + this.issues.size;
-    this.issues.set(`${String(input.rootIssueNumber)}:${input.fingerprint}`, issueNumber);
+    this.issues.set(`${String(input.rootIssueNumber)}:${String(input.attempt)}`, issueNumber);
     return Promise.resolve(issueNumber);
   }
 

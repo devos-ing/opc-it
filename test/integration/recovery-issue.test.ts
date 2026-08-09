@@ -97,7 +97,7 @@ it("does not create a Recovery beyond the approved Work attempt budget", async (
   expect(api.requests).toHaveLength(0);
 });
 
-function recoveryBody(): string {
+function recoveryBody(errorFingerprint: Sha256 = fingerprint): string {
   return [
     "# OPC Recovery",
     "",
@@ -108,13 +108,13 @@ function recoveryBody(): string {
     "attempt: 2",
     `approval_digest: ${approvalDigest}`,
     "failure_type: execution",
-    `error_fingerprint: ${fingerprint}`,
+    `error_fingerprint: ${errorFingerprint}`,
     "evidence_links: [https://github.com/acme/app/actions/runs/100]",
     "repair_hypothesis: retry the failed unit test",
     "verification_focus: unit",
     "```",
     "",
-    `<!-- opc-recovery root_issue=7 fingerprint=${fingerprint} -->`,
+    `<!-- opc-recovery root_issue=7 fingerprint=${errorFingerprint} -->`,
   ].join("\n");
 }
 
@@ -140,6 +140,34 @@ it("returns the existing open Recovery without dispatching again", async () => {
     issueNumber: 42,
   });
   expect(api.requests).toHaveLength(1);
+  expect(api.isDone()).toBe(true);
+});
+
+it("reuses the approved attempt slot when a replay has a new fingerprint", async () => {
+  const replayFingerprint: Sha256 = `sha256:${"e".repeat(64)}`;
+  const api = createGitHubApi([
+    {
+      method: "GET",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Arecovery&per_page=100",
+      response: [
+        {
+          number: 42,
+          user: { login: "github-actions[bot]" },
+          body: recoveryBody(replayFingerprint),
+        },
+      ],
+    },
+  ]);
+  const port = new GitHubRecovery(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+  );
+
+  expect(await createRecovery(failedAttempt(), port)).toEqual({
+    outcome: "deduplicated",
+    issueNumber: 42,
+  });
   expect(api.isDone()).toBe(true);
 });
 

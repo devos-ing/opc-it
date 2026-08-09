@@ -9,44 +9,20 @@ import type {
 } from "../../application/ports.js";
 import { DomainError } from "../../domain/errors.js";
 import { GitHubStateStore } from "./state-store.js";
+import {
+  trustedTransitionRecords,
+  type TransitionRecord,
+} from "./transition-record.js";
 
 interface ClaimMetadata {
   readonly runId: string;
   readonly claimedAt: Date;
 }
 
-interface TransitionRecord {
-  readonly event: string;
-  readonly metadata: Record<string, unknown>;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value))
-    : undefined;
-}
-
 function parseDate(value: unknown): Date | undefined {
   if (typeof value !== "string") return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date;
-}
-
-function parseTransitionRecord(
-  body: string | null | undefined,
-): TransitionRecord | undefined {
-  const payload = /^<!-- opc-transition (.+) -->$/.exec(body ?? "")?.[1];
-  if (!payload) return undefined;
-  let value: unknown;
-  try {
-    value = JSON.parse(payload) as unknown;
-  } catch {
-    return undefined;
-  }
-  const transitionRecord = record(value);
-  const metadata = record(transitionRecord?.metadata);
-  const event = transitionRecord?.event;
-  return typeof event === "string" && metadata ? { event, metadata } : undefined;
 }
 
 function claimMetadata(record: TransitionRecord | undefined): ClaimMetadata | undefined {
@@ -83,7 +59,15 @@ export class GitHubReconciler implements ReconcilePort {
       labels: "opc:claimed",
       per_page: 100,
     });
-    return Promise.all(issues.map((issue) => this.loadActiveClaim(issue.number)));
+    const claims = await Promise.all(
+      issues.map((issue) =>
+        this.loadActiveClaim(issue.number).catch((error: unknown) => {
+          if (error instanceof DomainError) return undefined;
+          throw error;
+        }),
+      ),
+    );
+    return claims.filter((claim): claim is ActiveClaim => claim !== undefined);
   }
 
   transition(command: StateTransitionCommand): Promise<TransitionResult> {
@@ -97,14 +81,7 @@ export class GitHubReconciler implements ReconcilePort {
       issue_number: issueNumber,
       per_page: 100,
     });
-    const records = comments
-      .filter(
-        (comment) =>
-          comment.user?.login === "github-actions[bot]" &&
-          comment.created_at === comment.updated_at,
-      )
-      .map((comment) => parseTransitionRecord(comment.body))
-      .filter((candidate): candidate is TransitionRecord => candidate !== undefined);
+    const records = trustedTransitionRecords(comments);
     let claimIndex = -1;
     let metadata: ClaimMetadata | undefined;
     for (const [index, candidate] of records.entries()) {
@@ -140,7 +117,9 @@ export class GitHubReconciler implements ReconcilePort {
     return {
       issueNumber,
       lastHeartbeat,
-      outageStarted: persistedOutageStarted ?? metadata.claimedAt,
+      ...(lastHeartbeat > metadata.claimedAt
+        ? {}
+        : { outageStarted: persistedOutageStarted ?? metadata.claimedAt }),
       cancelledByOwner,
     };
   }

@@ -13,6 +13,7 @@ export interface WorkIssueRecord {
   readonly approvalDigest?: Sha256;
   readonly rootIssueNumber: number;
   readonly attempt: 1 | 2 | 3;
+  readonly claimRecorded?: boolean;
 }
 
 export interface StateTransitionCommand {

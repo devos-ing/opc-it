@@ -20,6 +20,13 @@ function recoveryMarker(rootIssueNumber: number, fingerprint: Sha256): string {
   return `<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=${fingerprint} -->`;
 }
 
+function hasRecoveryRootMarker(body: string, rootIssueNumber: number): boolean {
+  return new RegExp(
+    `^<!-- opc-recovery root_issue=${String(rootIssueNumber)} fingerprint=sha256:[0-9a-f]{64} -->$`,
+    "m",
+  ).test(body);
+}
+
 export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
   private readonly stateStore: GitHubStateStore;
 
@@ -48,11 +55,11 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
       labels: "opc:recovery",
       per_page: 100,
     });
-    const marker = recoveryMarker(input.rootIssueNumber, input.fingerprint);
     for (const issue of issues) {
       if (
         issue.user?.login !== "github-actions[bot]" ||
-        !issue.body?.includes(marker)
+        !issue.body ||
+        !hasRecoveryRootMarker(issue.body, input.rootIssueNumber)
       ) {
         continue;
       }
@@ -63,9 +70,7 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
           contract.root_work_id === input.workId &&
           contract.parent_issue === input.parentIssueNumber &&
           contract.approval_digest === input.approvalDigest &&
-          contract.error_fingerprint === input.fingerprint &&
-          contract.attempt === input.attempt &&
-          contract.failure_type === input.category
+          contract.attempt === input.attempt
         ) {
           return issue.number;
         }

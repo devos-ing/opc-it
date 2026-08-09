@@ -65,11 +65,15 @@ function claimComment(actor: string, runId: string, claimedAt: string) {
   );
 }
 
-it("ignores a newer forged claim heartbeat from a collaborator", async () => {
+it("ignores a forged claim and clears a prior outage after a real heartbeat", async () => {
   const api = createGitHubApi([
     {
       path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
-      response: [{ number: 7 }],
+      response: [{ number: 6 }, { number: 7 }],
+    },
+    {
+      path: "/repos/acme/app/issues/6/comments?per_page=100",
+      response: [],
     },
     {
       path: "/repos/acme/app/issues/7/comments?per_page=100",
@@ -104,11 +108,55 @@ it("ignores a newer forged claim heartbeat from a collaborator", async () => {
     {
       issueNumber: 7,
       lastHeartbeat: new Date("2026-08-08T09:10:00Z"),
-      outageStarted: new Date("2026-08-07T09:00:00Z"),
       cancelledByOwner: false,
     },
   ]);
   expect(api.requests).toContain("/repos/acme/app/actions/runs/123");
   expect(api.requests).not.toContain("/repos/acme/app/actions/runs/999");
+  expect(api.isDone()).toBe(true);
+});
+
+it("preserves the original outage when a reclaimed run has no later heartbeat", async () => {
+  const api = createGitHubApi([
+    {
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Aclaimed&per_page=100",
+      response: [{ number: 7 }],
+    },
+    {
+      path: "/repos/acme/app/issues/7/comments?per_page=100",
+      response: [
+        claimComment("github-actions[bot]", "111", "2026-08-07T09:00:00Z"),
+        transitionComment(
+          "github-actions[bot]",
+          "lease-expired",
+          { outage_started: "2026-08-07T09:00:00.000Z" },
+          "2026-08-07T09:31:00Z",
+        ),
+        claimComment("github-actions[bot]", "123", "2026-08-08T09:00:00Z"),
+      ],
+    },
+    {
+      path: "/repos/acme/app/actions/runs/123",
+      response: {
+        updated_at: "2026-08-08T09:00:00Z",
+        conclusion: null,
+      },
+    },
+  ]);
+  const reconciler = new GitHubReconciler(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    "acme",
+  );
+
+  expect(await reconciler.listActiveClaims()).toEqual([
+    {
+      issueNumber: 7,
+      lastHeartbeat: new Date("2026-08-08T09:00:00Z"),
+      outageStarted: new Date("2026-08-07T09:00:00Z"),
+      cancelledByOwner: false,
+    },
+  ]);
   expect(api.isDone()).toBe(true);
 });

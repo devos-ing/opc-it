@@ -23,7 +23,7 @@ export interface PlanQueuePort {
   loadDefaultBranchSha(): Promise<string>;
   findOpenWorkById(
     workId: string,
-    trustedAuthor: string,
+    trustedAuthors: readonly string[],
   ): Promise<ExistingWork | undefined>;
   ensureControlLabels(): Promise<void>;
   createNeedsApprovalIssue(body: string): Promise<number>;
@@ -77,7 +77,10 @@ export async function queueApprovedPlan(
   if (digest !== input.approvedDigest) {
     throw new DomainError("APPROVAL_DIGEST_MISMATCH", input.approvedDigest);
   }
-  const existing = await port.findOpenWorkById(input.contract.work_id, actor);
+  const existing = await port.findOpenWorkById(
+    input.contract.work_id,
+    policy.approvers,
+  );
   if (existing) {
     if (existing.approvalDigest !== digest) {
       throw new DomainError("WORK_ID_CONFLICT", input.contract.work_id);

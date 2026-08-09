@@ -41,9 +41,7 @@ export interface RecoveryLookup {
   readonly parentIssueNumber: number;
   readonly workId: string;
   readonly approvalDigest: Sha256;
-  readonly fingerprint: Sha256;
   readonly attempt: 2 | 3;
-  readonly category: FailureCategory;
 }
 
 export type RecoveryResult =
@@ -109,9 +107,7 @@ export async function createRecovery(
     parentIssueNumber: input.issueNumber,
     workId: input.workId,
     approvalDigest: input.approvalDigest,
-    fingerprint: input.fingerprint,
     attempt: decision.nextAttempt,
-    category: input.category,
   });
   if (existing !== undefined) {
     return { outcome: "deduplicated", issueNumber: existing };

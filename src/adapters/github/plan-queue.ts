@@ -74,7 +74,7 @@ export class GitHubPlanQueue implements PlanQueuePort {
 
   async findOpenWorkById(
     workId: string,
-    trustedAuthor: string,
+    trustedAuthors: readonly string[],
   ): Promise<ExistingWork | undefined> {
     const issues = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
@@ -85,7 +85,8 @@ export class GitHubPlanQueue implements PlanQueuePort {
     });
     for (const issue of issues) {
       if (
-        issue.user?.login !== trustedAuthor ||
+        !issue.user?.login ||
+        !trustedAuthors.includes(issue.user.login) ||
         issue.body === null ||
         issue.body === undefined
       ) {
