@@ -116,7 +116,7 @@ it("does not treat queued Mac jobs as runner liveness", async () => {
   expect(uploads).toEqual([]);
 });
 
-it("keeps watching through queue lease plus the full legal execute and review window", async () => {
+it("keeps watching through separate execute and review queues plus both job windows", async () => {
   let poll = 0;
   const result = await monitorHeartbeat(
     {
@@ -130,17 +130,34 @@ it("keeps watching through queue lease plus the full legal execute and review wi
     {
       listJobs: () => {
         poll += 1;
-        return Promise.resolve(
-          poll < 31
-            ? [
-                { name: "execute", status: "in_progress" },
-                { name: "review", status: "queued" },
-              ]
-            : [
-                { name: "execute", status: "completed" },
-                { name: "review", status: "completed" },
-              ],
-        );
+        if (poll <= 5) {
+          return Promise.resolve([
+            { name: "execute", status: "queued" },
+            { name: "review", status: "queued" },
+          ]);
+        }
+        if (poll <= 24) {
+          return Promise.resolve([
+            { name: "execute", status: "in_progress" },
+            { name: "review", status: "queued" },
+          ]);
+        }
+        if (poll <= 29) {
+          return Promise.resolve([
+            { name: "execute", status: "completed" },
+            { name: "review", status: "queued" },
+          ]);
+        }
+        if (poll <= 33) {
+          return Promise.resolve([
+            { name: "execute", status: "completed" },
+            { name: "review", status: "in_progress" },
+          ]);
+        }
+        return Promise.resolve([
+          { name: "execute", status: "completed" },
+          { name: "review", status: "completed" },
+        ]);
       },
       upload: () => Promise.resolve(),
       now: () => new Date("2026-08-08T10:00:00Z"),
@@ -149,7 +166,7 @@ it("keeps watching through queue lease plus the full legal execute and review wi
     },
   );
 
-  expect(result).toEqual({ status: "stopped", polls: 31 });
+  expect(result).toEqual({ status: "stopped", polls: 34 });
 });
 
 it("writes one-line heartbeat JSON only under runner temp before upload", async () => {

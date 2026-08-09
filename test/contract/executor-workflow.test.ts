@@ -83,7 +83,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   expect(codex).not.toHaveProperty("run");
 
   expect(heartbeat["runs-on"]).toBe("ubuntu-latest");
-  expect(heartbeat["timeout-minutes"]).toBe(165);
+  expect(heartbeat["timeout-minutes"]).toBe(195);
   expect(record(heartbeat.permissions, "heartbeat.permissions")).toEqual({
     contents: "read",
     actions: "read",

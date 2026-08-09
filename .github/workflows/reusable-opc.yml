@@ -40,7 +40,7 @@ jobs:
     needs: dispatch-and-claim
     if: needs.dispatch-and-claim.outputs.claimed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 165
+    timeout-minutes: 195
     permissions:
       contents: read
       actions: read
