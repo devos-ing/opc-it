@@ -33,6 +33,7 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   expect(record(execute.outputs, "execute.outputs")).toHaveProperty("artifact_sha256");
   expect(review.needs).toEqual(["dispatch-and-claim", "execute"]);
   expect(review.if).toContain("needs.execute.result == 'success'");
+  expect(review.if).toContain("vars.OPC_ENABLED == 'true'");
   expect(review["runs-on"]).toEqual(["self-hosted", "macOS", "ARM64", "opc"]);
   expect(review["timeout-minutes"]).toBe(20);
   expect(record(review.permissions, "review.permissions")).toEqual({ contents: "read" });
@@ -57,6 +58,7 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
     "timeout-seconds": 900,
   });
   expect(codex).not.toHaveProperty("run");
+  expect(decision.if).toContain("codex-review.outputs['codex-outcome'] == 'completed'");
 
   expect(source).not.toMatch(/repository:\s+0xroylee\/OPC|executor_transcript|CODEX_HOME/);
   expect(source).not.toMatch(/OPENAI_API_KEY|CODEX_API_KEY|ACTIONS_RUNTIME_TOKEN/);

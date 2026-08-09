@@ -1,6 +1,7 @@
 import { expect, it } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
+import { trustedFailureStepNames } from "../../src/adapters/github/run-outcome.js";
 
 function record(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -86,8 +87,9 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     group: "opc-control-${{ github.repository }}",
     "cancel-in-progress": false,
   });
-  expect(conclude.needs).toEqual(["dispatch-and-claim", "execute", "review"]);
+  expect(conclude.needs).toEqual(["dispatch-and-claim", "heartbeat", "execute", "review"]);
   expect(conclude.if).toContain("always()");
+  expect(conclude.if).toContain("vars.OPC_ENABLED == 'true'");
   const concludeStep = record(
     (conclude.steps as Record<string, unknown>[])[0],
     "conclude step",
@@ -95,5 +97,9 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   expect(record(concludeStep.with, "conclude.with")).toMatchObject({
     command: "complete-run",
     "payload-b64": "${{ needs.dispatch-and-claim.outputs.envelope_b64 }}",
+    enabled: "${{ vars.OPC_ENABLED }}",
   });
+  for (const name of Object.values(trustedFailureStepNames)) {
+    expect(source).toContain(`name: ${name}`);
+  }
 });

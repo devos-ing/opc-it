@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Claim or reconcile
         id: opc
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: ${{ inputs.event_name == 'schedule' && 'reconcile' || 'claim' }}
           repository: ${{ github.repository }}
@@ -40,13 +40,13 @@ jobs:
     needs: dispatch-and-claim
     if: needs.dispatch-and-claim.outputs.claimed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 130
     permissions:
       contents: read
       actions: read
     steps:
       - name: Watch executor and reviewer liveness
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: heartbeat
           repository: ${{ github.repository }}
@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0
       - name: Prepare workspace and run network-denied bootstrap
         id: prepare
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: prepare-execution
           repository: ${{ github.repository }}
@@ -85,7 +85,7 @@ jobs:
           enabled: ${{ vars.OPC_ENABLED }}
       - name: Execute approved milestone
         id: codex
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: run-codex
           repository: ${{ github.repository }}
@@ -94,17 +94,33 @@ jobs:
           prompt-file: ${{ steps.prepare.outputs['prompt-file'] }}
           output-file: ${{ runner.temp }}/opc-executor-output.json
           schema-file: ${{ steps.prepare.outputs['executor-schema-file'] }}
-          timeout-seconds: ${{ steps.prepare.outputs['timeout-seconds'] }}
+          deadline-epoch-ms: ${{ steps.prepare.outputs['deadline-epoch-ms'] }}
       - name: Build Candidate Result
-        if: always()
+        if: always() && steps.prepare.outcome == 'success'
         id: finalize
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: finalize-execution
           repository: ${{ github.repository }}
           issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           input-file: ${{ runner.temp }}/opc-executor-output.json
+          codex-outcome: ${{ steps.codex.outputs['codex-outcome'] || 'run-incident' }}
+          deadline-epoch-ms: ${{ steps.prepare.outputs['deadline-epoch-ms'] }}
+      - name: Record Executor Failure
+        if: always() && steps.finalize.outputs['finalize-outcome'] == 'work-failure'
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: execution
+      - name: Record Executor Run Incident
+        if: always() && steps.finalize.outputs['finalize-outcome'] == 'run-incident'
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: infrastructure
       - name: Upload Candidate Result
         if: always() && steps.finalize.outputs['bundle-ready'] == 'true'
         uses: actions/upload-artifact@v4
@@ -116,7 +132,7 @@ jobs:
 
   review:
     needs: [dispatch-and-claim, execute]
-    if: needs.execute.result == 'success'
+    if: needs.execute.result == 'success' && vars.OPC_ENABLED == 'true'
     runs-on: [self-hosted, macOS, ARM64, opc]
     timeout-minutes: 20
     permissions:
@@ -130,7 +146,7 @@ jobs:
           path: ${{ runner.temp }}/opc-review-input
       - name: Verify bundle and prepare review input
         id: prepare-review
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: prepare-review
           repository: ${{ github.repository }}
@@ -139,7 +155,8 @@ jobs:
           input-file: ${{ runner.temp }}/opc-review-input
           artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
       - name: Review candidate independently
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        id: codex-review
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: run-codex
           repository: ${{ github.repository }}
@@ -149,9 +166,24 @@ jobs:
           output-file: ${{ runner.temp }}/opc-result-review.json
           schema-file: ${{ steps.prepare-review.outputs['review-schema-file'] }}
           timeout-seconds: 900
+      - name: Record Review Failure
+        if: always() && steps.codex-review.outputs['codex-outcome'] == 'work-failure'
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: review
+      - name: Record Reviewer Run Incident
+        if: always() && steps.codex-review.outputs['codex-outcome'] == 'run-incident'
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: infrastructure
       - name: Apply deterministic Evidence Gate
+        if: steps.codex-review.outputs['codex-outcome'] == 'completed'
         id: decision
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: decide-result
           repository: ${{ github.repository }}
@@ -171,8 +203,8 @@ jobs:
           retention-days: 30
 
   conclude:
-    needs: [dispatch-and-claim, execute, review]
-    if: always() && needs.dispatch-and-claim.outputs.claimed == 'true'
+    needs: [dispatch-and-claim, heartbeat, execute, review]
+    if: always() && needs.dispatch-and-claim.outputs.claimed == 'true' && vars.OPC_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -180,10 +212,11 @@ jobs:
       actions: write
     steps:
       - name: Persist verified result or bounded Recovery
-        uses: "0xroylee/OPC@143ab832b66ab1b32fa1ae4f713fb08a86e7b0d2"
+        uses: "0xroylee/OPC@fd474f9c651420d70e5e7e0108de67ec739dc173"
         with:
           command: complete-run
           repository: ${{ github.repository }}
           issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           github-token: ${{ github.token }}
+          enabled: ${{ vars.OPC_ENABLED }}

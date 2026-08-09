@@ -40,7 +40,7 @@ jobs:
     needs: dispatch-and-claim
     if: needs.dispatch-and-claim.outputs.claimed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 130
     permissions:
       contents: read
       actions: read
@@ -94,9 +94,9 @@ jobs:
           prompt-file: ${{ steps.prepare.outputs['prompt-file'] }}
           output-file: ${{ runner.temp }}/opc-executor-output.json
           schema-file: ${{ steps.prepare.outputs['executor-schema-file'] }}
-          timeout-seconds: ${{ steps.prepare.outputs['timeout-seconds'] }}
+          deadline-epoch-ms: ${{ steps.prepare.outputs['deadline-epoch-ms'] }}
       - name: Build Candidate Result
-        if: always()
+        if: always() && steps.prepare.outcome == 'success'
         id: finalize
         uses: "{{control_owner}}/OPC@{{control_action_sha}}"
         with:
@@ -105,6 +105,22 @@ jobs:
           issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           input-file: ${{ runner.temp }}/opc-executor-output.json
+          codex-outcome: ${{ steps.codex.outputs['codex-outcome'] || 'run-incident' }}
+          deadline-epoch-ms: ${{ steps.prepare.outputs['deadline-epoch-ms'] }}
+      - name: Record Executor Failure
+        if: always() && steps.finalize.outputs['finalize-outcome'] == 'work-failure'
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: execution
+      - name: Record Executor Run Incident
+        if: always() && steps.finalize.outputs['finalize-outcome'] == 'run-incident'
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: infrastructure
       - name: Upload Candidate Result
         if: always() && steps.finalize.outputs['bundle-ready'] == 'true'
         uses: actions/upload-artifact@v4
@@ -116,7 +132,7 @@ jobs:
 
   review:
     needs: [dispatch-and-claim, execute]
-    if: needs.execute.result == 'success'
+    if: needs.execute.result == 'success' && vars.OPC_ENABLED == 'true'
     runs-on: [self-hosted, macOS, ARM64, opc]
     timeout-minutes: 20
     permissions:
@@ -139,6 +155,7 @@ jobs:
           input-file: ${{ runner.temp }}/opc-review-input
           artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
       - name: Review candidate independently
+        id: codex-review
         uses: "{{control_owner}}/OPC@{{control_action_sha}}"
         with:
           command: run-codex
@@ -149,7 +166,22 @@ jobs:
           output-file: ${{ runner.temp }}/opc-result-review.json
           schema-file: ${{ steps.prepare-review.outputs['review-schema-file'] }}
           timeout-seconds: 900
+      - name: Record Review Failure
+        if: always() && steps.codex-review.outputs['codex-outcome'] == 'work-failure'
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: review
+      - name: Record Reviewer Run Incident
+        if: always() && steps.codex-review.outputs['codex-outcome'] == 'run-incident'
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: report-run-failure
+          repository: ${{ github.repository }}
+          reported-outcome: infrastructure
       - name: Apply deterministic Evidence Gate
+        if: steps.codex-review.outputs['codex-outcome'] == 'completed'
         id: decision
         uses: "{{control_owner}}/OPC@{{control_action_sha}}"
         with:
@@ -171,8 +203,8 @@ jobs:
           retention-days: 30
 
   conclude:
-    needs: [dispatch-and-claim, execute, review]
-    if: always() && needs.dispatch-and-claim.outputs.claimed == 'true'
+    needs: [dispatch-and-claim, heartbeat, execute, review]
+    if: always() && needs.dispatch-and-claim.outputs.claimed == 'true' && vars.OPC_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -187,3 +219,4 @@ jobs:
           issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           github-token: ${{ github.token }}
+          enabled: ${{ vars.OPC_ENABLED }}

@@ -60,17 +60,18 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     expect(step.uses).toMatch(/^0xroylee\/OPC@[0-9a-f]{40}$/);
     expect(record(step.with, "local.with")).not.toHaveProperty("github-token");
   }
-  expect(finalize.if).toBe("always()");
+  expect(finalize.if).toContain("always()");
+  expect(finalize.if).toContain("steps.prepare.outcome == 'success'");
   expect(record(prepare.with, "prepare.with").enabled).toBe("${{ vars.OPC_ENABLED }}");
   expect(record(codex.with, "codex.with")).toMatchObject({
     command: "run-codex",
     "permission-profile": "opc-executor",
-    "timeout-seconds": "${{ steps.prepare.outputs['timeout-seconds'] }}",
+    "deadline-epoch-ms": "${{ steps.prepare.outputs['deadline-epoch-ms'] }}",
   });
   expect(codex).not.toHaveProperty("run");
 
   expect(heartbeat["runs-on"]).toBe("ubuntu-latest");
-  expect(heartbeat["timeout-minutes"]).toBe(110);
+  expect(heartbeat["timeout-minutes"]).toBe(130);
   expect(record(heartbeat.permissions, "heartbeat.permissions")).toEqual({
     contents: "read",
     actions: "read",
@@ -86,7 +87,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     (match) => match[1],
   );
   expect(new Set(opcActionRefs).size).toBe(1);
-  expect(opcActionRefs).toHaveLength(9);
+  expect(opcActionRefs).toHaveLength(13);
 });
 
 it("keeps executor route selection outside the generated Target caller", async () => {
