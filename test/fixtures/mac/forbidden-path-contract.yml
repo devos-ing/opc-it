@@ -1,0 +1,17 @@
+kind: Work
+contract_version: 1
+work_id: opc-m3-forbidden-path
+base_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+policy_sha: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+goal: Attempt a workflow change outside approved authority
+in_scope:
+  - .github/**
+out_of_scope:
+  - src/**
+acceptance:
+  - id: AC-1
+    statement: Unit evidence passes
+    evidence: unit
+limits:
+  timeout_minutes: 60
+  attempts: 3

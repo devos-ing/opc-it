@@ -1,0 +1,17 @@
+kind: Work
+contract_version: 1
+work_id: opc-m3-success
+base_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+policy_sha: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+goal: Add the approved source change
+in_scope:
+  - src/**
+out_of_scope:
+  - .github/**
+acceptance:
+  - id: AC-1
+    statement: Unit evidence passes
+    evidence: unit
+limits:
+  timeout_minutes: 60
+  attempts: 3
