@@ -1,5 +1,7 @@
 # OPC 无人值守交付系统设计
 
+> Superseded for v2 scheduling and host identity by [OPC 当前用户 Daemon 设计](2026-08-10-opc-current-user-daemon-design.md). Its immutable-contract, verification, recovery, and repository-policy decisions remain applicable unless the v2 design says otherwise.
+
 - 状态：已完成逐节设计批准，等待最终文档审阅
 - 日期：2026-08-08
 - 版本：v1 设计
