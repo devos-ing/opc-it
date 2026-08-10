@@ -202,7 +202,7 @@ Standards reviews report 0 findings.
 - Modify: `src/features/planning/index.ts`
 - Test: `test/integration/submit-work-v2.test.ts`
 
-- [ ] **Step 1: Write failing idempotency tests**
+- [x] **Step 1: Write failing idempotency tests**
 
 ```ts
 import { expect, test } from "bun:test";
@@ -224,28 +224,37 @@ test("rejects the same work id with a different digest", async () => {
 });
 ```
 
-- [ ] **Step 2: Run and observe the missing use case**
+- [x] **Step 2: Run and observe the missing use case**
 
 Run: `rtk bun test test/integration/submit-work-v2.test.ts`
 
 Expected: FAIL because `submitWork` and the fixture do not exist.
 
-- [ ] **Step 3: Implement canonical structured submission**
+- [x] **Step 3: Implement canonical structured submission**
 
 Create `test/fixtures/v2-contract.ts` with the exact valid contract from M1. Implement `submitWork(value, github)` to validate, digest, call `findWork`, return the existing same-digest Issue, reject a different digest with `WORK_ID_CONFLICT`, or create one `opc:awaiting-approval` Issue. Encode the contract body as a versioned base64url JSON marker with byte length and digest; decode it with one closed parser in the same feature.
 
-- [ ] **Step 4: Verify round-trip and idempotency**
+- [x] **Step 4: Verify round-trip and idempotency**
 
 Run: `rtk bun test test/integration/submit-work-v2.test.ts`
 
 Expected: PASS, 2 tests and 0 failures.
 
-- [ ] **Step 5: Commit submission**
+- [x] **Step 5: Commit submission**
 
 ```bash
 rtk git add src/features/planning test/fixtures/v2-contract.ts test/integration/submit-work-v2.test.ts
 rtk git commit -m "feat: submit immutable daemon work"
 ```
+
+**Task 3 evidence (2026-08-10):** The first tracer failed because the planning
+public interface did not export `submitWork`. The completed focused suite passes
+19/19 cases, including sequential and concurrent idempotency, stable Work ID
+conflicts, canonical base64url/UTF-8 byte-length round trips, hostile body and
+Issue-view rejection, strict timestamps, bounded payloads, conditional lock
+cleanup, and post-create duplicate detection. The fresh full suite passes
+527/527 tests with 1,096 assertions; lint, typecheck, build, and diff-check exit
+0. Final independent Spec and Standards reviews report 0 findings.
 
 ### Task 4: Claim exactly one eligible Work
 
