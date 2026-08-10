@@ -28,6 +28,10 @@ export interface SignedTransition {
 }
 
 const canonicalHmacPattern = /^[0-9a-f]{64}$/;
+const signedTransitionFieldNames = ["payload", "hmac_sha256"] as const;
+const signedTransitionFieldSet: ReadonlySet<string> = new Set(
+  signedTransitionFieldNames,
+);
 const payloadFieldNames = [
   "version",
   "installation_id",
@@ -99,6 +103,16 @@ function hasExactPayloadFields(
   );
 }
 
+function hasExactSignedTransitionFields(
+  value: Readonly<Record<string, unknown>>,
+): value is Record<(typeof signedTransitionFieldNames)[number], unknown> {
+  const keys = Object.keys(value);
+  return (
+    keys.length === signedTransitionFieldNames.length &&
+    keys.every((key) => signedTransitionFieldSet.has(key))
+  );
+}
+
 function assertTransitionSemantics(
   payload: unknown,
 ): asserts payload is TransitionPayload {
@@ -154,16 +168,16 @@ export function verifyTransition(
   record: unknown,
   keys: Readonly<Record<string, string>>,
 ): TransitionPayload {
-  if (typeof record !== "object" || record === null) {
+  if (
+    !isPlainDataObject(record) ||
+    !hasExactSignedTransitionFields(record)
+  ) {
     throw new DomainError("INVALID_TRANSITION", "malformed transition record");
   }
-  const candidate = record as Partial<SignedTransition>;
-  const payload = candidate.payload;
+  const payload = record.payload;
+  const hmac = record.hmac_sha256;
   assertTransitionSemantics(payload);
-  if (
-    typeof candidate.hmac_sha256 !== "string" ||
-    !canonicalHmacPattern.test(candidate.hmac_sha256)
-  ) {
+  if (typeof hmac !== "string" || !canonicalHmacPattern.test(hmac)) {
     throw new DomainError(
       "INVALID_TRANSITION_SIGNATURE",
       payload.work_id,
@@ -176,7 +190,7 @@ export function verifyTransition(
     digest(payload, requireSecret(keyId, secret)),
     "hex",
   );
-  const actual = Buffer.from(candidate.hmac_sha256, "hex");
+  const actual = Buffer.from(hmac, "hex");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     throw new DomainError(
       "INVALID_TRANSITION_SIGNATURE",

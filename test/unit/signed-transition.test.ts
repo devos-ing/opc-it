@@ -252,6 +252,34 @@ test("rejects accessor authority without executing getters", () => {
   expect(getterCalls).toBe(0);
 });
 
+test("rejects inherited, hidden, and accessor outer record fields", () => {
+  const valid = signTransition(payload, "secret-a");
+  const inherited = Object.create(valid) as SignedTransition;
+  const hidden: Record<string, unknown> = {};
+  Object.defineProperties(hidden, {
+    payload: { enumerable: false, value: valid.payload },
+    hmac_sha256: { enumerable: false, value: valid.hmac_sha256 },
+  });
+  let getterCalls = 0;
+  const accessor = { payload: valid.payload } as Record<string, unknown>;
+  Object.defineProperty(accessor, "hmac_sha256", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return getterCalls < 3
+        ? valid.hmac_sha256
+        : `${valid.hmac_sha256}garbage`;
+    },
+  });
+
+  for (const record of [inherited, hidden, accessor]) {
+    expect(() =>
+      verifyTransition(record as SignedTransition, { "key-1": "secret-a" }),
+    ).toThrow(/^INVALID_TRANSITION:/);
+  }
+  expect(getterCalls).toBe(0);
+});
+
 test("rejects payload and signature tampering", () => {
   const record = signTransition(payload, "secret-a");
 
