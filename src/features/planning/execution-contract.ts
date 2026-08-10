@@ -128,12 +128,17 @@ function deepFreeze(value: unknown): void {
 }
 
 export function validateExecutionContract(value: unknown): ValidatedExecutionContract {
-  if (!validator(value)) {
+  let detached: unknown;
+  try {
+    detached = structuredClone(value);
+  } catch {
+    throw new DomainError("INVALID_CONTRACT", "contract cannot be snapshotted");
+  }
+  if (!validator(detached)) {
     throw new DomainError("INVALID_CONTRACT", JSON.stringify(validator.errors));
   }
-  assertUniqueIds(value.acceptance, "acceptance");
-  assertUniqueIds(value.commands.evidence, "commands.evidence");
-  const detached = structuredClone(value);
+  assertUniqueIds(detached.acceptance, "acceptance");
+  assertUniqueIds(detached.commands.evidence, "commands.evidence");
   deepFreeze(detached);
   return detached as unknown as ValidatedExecutionContract;
 }

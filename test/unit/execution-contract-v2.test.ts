@@ -127,6 +127,24 @@ describe("v2 execution contract identity", () => {
     expect(Reflect.set(validated.codex.executor, "model", "runtime tamper")).toBe(false);
     expect(executionContractDigest(validated)).toBe(digest);
   });
+
+  test("validation snapshots a nested enumerable getter exactly once before validating", () => {
+    const source = createContract();
+    let reads = 0;
+    Object.defineProperty(first(source.acceptance), "statement", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return reads === 1 ? "doctor reports healthy" : "";
+      },
+    });
+
+    const validated = validateExecutionContract(source);
+
+    expect(reads).toBe(1);
+    expect(first(validated.acceptance).statement).toBe("doctor reports healthy");
+  });
 });
 
 const extraPropertyCases: ReadonlyArray<{
