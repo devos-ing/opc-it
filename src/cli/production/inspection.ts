@@ -159,7 +159,9 @@ async function requirePrivateSandboxPaths(onboarding: OnboardingPreview): Promis
       !stats.isDirectory() ||
       stats.isSymbolicLink() ||
       stats.uid !== uid ||
-      (directory === home ? (mode & 0o022) !== 0 : (mode & 0o077) !== 0)
+      (directory === home || directory === `${home}/Library`
+        ? (mode & 0o022) !== 0
+        : (mode & 0o077) !== 0)
     ) throw new Error("INVALID_SANDBOX_PATH");
   }
 }

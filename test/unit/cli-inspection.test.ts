@@ -38,9 +38,16 @@ async function fixture(): Promise<{
 }> {
   const root = await mkdtemp(join(tmpdir(), "opc-inspection-"));
   temporaryDirectories.push(root);
-  const support = join(root, "support");
-  const logs = join(root, "logs");
+  const library = join(root, "Library");
+  const applicationSupport = join(library, "Application Support");
+  const support = join(applicationSupport, "OPC");
+  const logsParent = join(library, "Logs");
+  const logs = join(logsParent, "OPC");
+  await mkdir(library, { mode: 0o700 });
+  await chmod(library, 0o755);
+  await mkdir(applicationSupport, { mode: 0o700 });
   await mkdir(support, { mode: 0o700 });
+  await mkdir(logsParent, { mode: 0o700 });
   await mkdir(logs, { mode: 0o700 });
   const statePath = join(support, "state.sqlite");
   const state = new Database(statePath, { create: true });
@@ -115,7 +122,31 @@ describe("CLI operational inspection", () => {
   it("rejects public sandbox descendants while allowing a non-private home", async () => {
     const setup = await fixture();
     await chmod(setup.home, 0o755);
+
+    const healthy = await inspectOperationalState(
+      setup.onboarding,
+      github(),
+      credentials(),
+      new Date("2026-08-11T01:00:00.000Z"),
+    );
+    expect(healthy.sandboxHealthy).toBe(true);
+
     await chmod(setup.support, 0o755);
+
+    const snapshot = await inspectOperationalState(
+      setup.onboarding,
+      github(),
+      credentials(),
+      new Date("2026-08-11T01:00:00.000Z"),
+    );
+
+    expect(snapshot.sandboxHealthy).toBe(false);
+    expect(snapshot.sqliteHealthy).toBe(false);
+  });
+
+  it("rejects a group-writable trusted Library parent", async () => {
+    const setup = await fixture();
+    await chmod(join(setup.home, "Library"), 0o775);
 
     const snapshot = await inspectOperationalState(
       setup.onboarding,

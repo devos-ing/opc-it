@@ -198,7 +198,10 @@ async function runProductionApprovalScenario(
               : {
                   kind: "directory" as const,
                   uid: config.install.manifest.currentUid,
-                  mode: path === config.install.manifest.currentHome ? 0o755 : 0o700,
+                  mode: path === config.install.manifest.currentHome ||
+                      path === `${config.install.manifest.currentHome}/Library`
+                    ? 0o755
+                    : 0o700,
                 },
           ),
           writeFileExclusive: (path) => {
@@ -778,6 +781,9 @@ describe("current-user lifecycle CLI", () => {
       [support, { kind: "symlink" as const, uid, mode: 0o700 }],
       [health, { kind: "file" as const, uid, mode: 0o644 }],
       [logs, { kind: "directory" as const, uid, mode: 0o755 }],
+      [`${config.install.manifest.currentHome}/Library`, {
+        kind: "directory" as const, uid, mode: 0o775,
+      }],
     ]);
     for (const [invalidPath, invalidEntry] of invalidEntries) {
       let opens = 0;

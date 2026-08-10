@@ -95,7 +95,7 @@ interface FakeEntry extends LaunchAgentFileEntry {
 function fakeFileSystem() {
   const entries = new Map<string, FakeEntry>([
     [currentHome, { kind: "directory", uid: 501, mode: 0o755 }],
-    [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o700 }],
+    [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o755 }],
     [`${currentHome}/Library/Application Support`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Application Support/OPC`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Application Support/OPC/dist`, { kind: "directory", uid: 501, mode: 0o700 }],
@@ -105,6 +105,7 @@ function fakeFileSystem() {
     ],
     [`${currentHome}/Library/Logs`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Logs/OPC`, { kind: "directory", uid: 501, mode: 0o700 }],
+    [`${currentHome}/Library/LaunchAgents`, { kind: "directory", uid: 501, mode: 0o755 }],
   ]);
   const operations: string[] = [];
   const fileSystem: LaunchAgentFileSystem = {
@@ -519,6 +520,39 @@ describe("current-user LaunchAgent lifecycle", () => {
       activation,
     });
     expect(enabledContents).toBe(encodeDaemonConfig(enabledConfig));
+  });
+
+  test("creates a missing LaunchAgents directory privately and rejects post-create drift", async () => {
+    const launchAgents = `${currentHome}/Library/LaunchAgents`;
+    const preview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const created = productionAdapterFixture();
+    created.entries.delete(launchAgents);
+
+    await applyInstall(
+      { preview, approvedDigest: preview.digest },
+      { launchAgent: created.adapter },
+    );
+
+    expect(created.operations).toContain(`mkdir:${launchAgents}:700`);
+    expect(created.entries.get(launchAgents)).toMatchObject({
+      kind: "directory", uid: 501, mode: 0o700,
+    });
+
+    const drifted = productionAdapterFixture(exclusiveLifecycleLock(), (fileSystem) => {
+      const makeDirectory = fileSystem.makeDirectory.bind(fileSystem);
+      fileSystem.makeDirectory = async (path, mode) => {
+        await makeDirectory(path, mode);
+        if (path === launchAgents) await fileSystem.chmod(path, 0o775);
+      };
+    });
+    drifted.entries.delete(launchAgents);
+    const error = await applyInstall(
+      { preview, approvedDigest: preview.digest },
+      { launchAgent: drifted.adapter },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "UNSAFE_LAUNCH_AGENT_PERMISSIONS" });
+    expect(drifted.operations.some((operation) => operation.startsWith("write:"))).toBe(false);
   });
 
   test("atomic write cleans exclusive temp files and preserves primary plus cleanup failures", async () => {
@@ -1023,6 +1057,8 @@ describe("current-user LaunchAgent lifecycle", () => {
       [installPreview.manifest.paths.program, { kind: "missing" }],
       [installPreview.manifest.paths.program, { kind: "file", uid: 501, mode: 0o722 }],
       [installPreview.manifest.paths.config, { kind: "symlink", uid: 501, mode: 0o600 }],
+      [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o775 }],
+      [`${currentHome}/Library/LaunchAgents`, { kind: "directory", uid: 501, mode: 0o775 }],
       [`${currentHome}/Library/Logs/OPC`, { kind: "directory", uid: 502, mode: 0o700 }],
       [installPreview.manifest.paths.stdout, { kind: "symlink", uid: 501, mode: 0o600 }],
     ];

@@ -547,7 +547,7 @@ async function validatePathAuthority(
   const opcLogs = `${logs}/OPC`;
 
   requireEntry(await inspect(fileSystem, currentHome), ["directory"], uid);
-  requirePrivateDirectory(await inspect(fileSystem, library), uid);
+  requireEntry(await inspect(fileSystem, library), ["directory"], uid);
   requirePrivateDirectory(await inspect(fileSystem, applicationSupport), uid);
   requirePrivateDirectory(await inspect(fileSystem, opcSupport), uid);
   if (
@@ -566,7 +566,6 @@ async function validatePathAuthority(
 
   const launchAgentsEntry = await inspect(fileSystem, launchAgents);
   requireEntry(launchAgentsEntry, ["missing", "directory"], uid);
-  if (launchAgentsEntry.kind === "directory") requirePrivateDirectory(launchAgentsEntry, uid);
   requireEntry(await inspect(fileSystem, launchAgentPath), ["missing", "file"], uid);
 
   if (launchAgentsEntry.kind === "missing") {

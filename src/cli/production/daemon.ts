@@ -276,6 +276,7 @@ async function validateDaemonRuntimePaths(
   fileSystem: ProductionDaemonFileSystem,
 ): Promise<void> {
   const home = input.config.install.manifest.currentHome;
+  const trustedLibrary = `${home}/Library`;
   const uid = input.config.install.manifest.currentUid;
   const logs = input.config.onboarding.manifest.paths.logs;
   const files = [
@@ -296,7 +297,7 @@ async function validateDaemonRuntimePaths(
   }
   for (const directory of directories) {
     const entry = await fileSystem.inspect(directory);
-    if (directory === home) requireOwnedHomeDirectory(entry, uid);
+    if (directory === home || directory === trustedLibrary) requireOwnedHomeDirectory(entry, uid);
     else requirePrivateDirectory(entry, uid);
   }
   for (const file of files) {
