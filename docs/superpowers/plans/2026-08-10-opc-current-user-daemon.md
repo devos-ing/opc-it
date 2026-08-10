@@ -33,11 +33,11 @@ M1 must preserve the legacy production path. M2 must remain disabled and use fak
 
 ## Execution checkpoints
 
-- [ ] **Checkpoint 1: Complete M1 and review the architecture diff**
+- [x] **Checkpoint 1: Complete M1 and review the architecture diff**
 
 Evidence: five focused commits; lint, typecheck, tests, build, and diff check pass; no host mutation.
 
-- [ ] **Checkpoint 2: Complete M2 and review daemon durability**
+- [x] **Checkpoint 2: Complete M2 and review daemon durability**
 
 Evidence: SQLite/in-memory adapter parity; same-digest submit idempotency; one-winner claim; exact lease boundaries; disabled loop has zero GitHub calls.
 

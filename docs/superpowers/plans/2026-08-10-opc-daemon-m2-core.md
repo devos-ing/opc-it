@@ -29,9 +29,12 @@
 - Create `test/integration/daemon-claim.test.ts`: claim/race/terminal cases.
 - Create `test/integration/daemon-reconcile.test.ts`: sleep/offline/stale cases.
 - Create `src/runtime/daemon.ts`: poll loop, jitter, cancellation, and health timestamp.
+- Create `src/runtime/process-lock.ts`: required single-process lock seam.
+- Create `src/platform/lock/sqlite-process-lock-adapter.ts`: crash-released exclusive lock on a dedicated SQLite file.
 - Create `src/runtime/run-enabled-tick.ts`: composes queue feature interfaces.
 - Modify `src/runtime/delivery-loop.ts`: inject the enabled tick.
 - Create `test/unit/daemon-loop.test.ts`: virtual-clock behavior.
+- Create `test/contract/process-lock-adapter.test.ts`: two-connection ownership, handoff, and crash-release behavior.
 
 ### Task 1: Implement the local journal seam
 
@@ -149,7 +152,7 @@ Expected: FAIL with missing in-memory GitHub adapter.
 
 - [x] **Step 3: Add the port and adapters**
 
-Add a `QueueRepository` port with exactly `createWork`, `findWork`, `listReady`, `listJournalCandidates`, `listTransitions`, `appendTransition`, and `setStateLabel`. The in-memory adapter implements it with Maps. `listJournalCandidates` returns every open OPC Work/Recovery candidate so feature code derives active authority from the signed journal rather than mutable labels. `opc:work` is the queue umbrella label on both root Work and child Recovery Issues; Recovery may additionally carry `opc:recovery`, but its priority comes only from a trusted `recovering -> retry -> ready` journal.
+Add a `QueueRepository` port with exactly `createWork`, `findWork`, `listReady`, `listJournalCandidates`, `listTransitions`, `appendTransition`, and `setStateLabel`. The in-memory adapter implements it with Maps. `listJournalCandidates` scans all Issue states and discovers Work/Recovery candidates from the exact `<!-- opc-queue:` marker family, independent of mutable eligibility labels, so feature code derives active authority from the signed journal. Ordinary Issues and near-prefix comments are ignored; marker-family records that fail closed parsing are returned as diagnostics. If an Issue still carries the queue umbrella, the Recovery projection, or any OPC queue-state label after its marker is deleted, it is also returned as a diagnostic with its Issue number. For Issues stripped of both marker and every queue label, the production adapter performs one bounded, explicitly paginated repository-wide comment scan per journal sweep; an exact OPC transition marker tied to the same repository makes the Issue a diagnostic candidate. Claim/reconcile then replay and verify its signed transition comments before assigning authority. `opc:work` remains the queue umbrella projection on both root Work and child Recovery Issues; Recovery may additionally carry `opc:recovery`. Bodies, labels, and unverified comment markers are discovery hints only: none may hide or grant a signed active lease. Recovery priority comes only from a trusted `recovering -> retry -> ready` journal.
 
 Child Recovery queue IDs are canonical
 `opc-recovery:<sha256(root_work_id)>:<next_attempt>` values (64 lower-case hex;
@@ -196,12 +199,17 @@ rtk git commit -m "feat: add gh issue queue adapter"
 GitHub adapter module did not exist. The completed contract passes 18/18 queue
 cases plus 4/4 bounded-process cases. It covers all seven port operations,
 fixed `gh api` argv, controlled cwd/environment, stdin JSON, closed response
-records, comment IDs, complete Issue/comment pagination, duplicate Work IDs,
-malformed-Issue isolation, and ETag behavior at 100/101-item and diagnostic
-boundaries. Credential scanning finds no token command or token environment
-variable. The fresh full suite passes 508/508 tests with 1,045 assertions;
-lint, typecheck, build, and diff-check exit 0. Final independent Spec and
-Standards reviews report 0 findings.
+records, comment IDs, explicit bounded Issue/comment pagination with per-page
+HTTP and Retry-After parsing, duplicate Work IDs, malformed-marker isolation,
+and ETag behavior at 100/101-item and diagnostic boundaries. Root lookup and
+journal discovery continue to find open or closed queue markers after the
+umbrella label is removed; queue-labelled Issues with a deleted marker remain
+diagnosable by Issue number so their signed comments are still authoritative,
+while Ready eligibility remains a mutable label projection. Credential scanning
+finds no token command or token environment
+variable. The focused, full, lint, typecheck, build, and diff-check gates exit
+with zero failures. Final independent Spec and Standards reviews report 0
+findings.
 
 ### Task 3: Submit an immutable Work Issue
 
@@ -290,7 +298,7 @@ Expected: FAIL with missing `pollAndClaim`.
 
 - [x] **Step 3: Implement signed claim and deterministic winner selection**
 
-`pollAndClaim` must check trusted active transitions before mutable labels, sort eligible Recovery before Work then by creation time/Issue number, append a signed claim, re-read all claim transitions, select the smallest GitHub server-assigned `comment_id` (`occurred_at` remains audit evidence only), and relabel only if the current installation won. Malformed Issues are isolated and returned as diagnostics; transport errors abort the tick.
+`pollAndClaim` must check the repository-wide trusted transition timeline before mutable labels, sort eligible Recovery before Work then by creation time/Issue number, append a signed claim, re-read all journal candidates, select the smallest GitHub server-assigned `comment_id` for the active epoch (`occurred_at` remains audit evidence only), and relabel only if the current installation won. A root Work in `recovering` releases its old execution lease but establishes a pending-Recovery barrier. Only its canonical, signed root/digest/attempt-bound child Recovery may take the slot; a missing or malformed child keeps unrelated Ready Work waiting. A trusted non-recovering root transition clears the barrier. Malformed Issues are isolated and returned as diagnostics; transport errors abort the tick.
 
 - [x] **Step 4: Verify claim, terminal, and malformed isolation cases**
 
@@ -309,10 +317,12 @@ rtk git commit -m "feat: claim daemon work safely"
 because the queue public interface did not export `pollAndClaim`. The completed
 integration suite passes 17/17 claim cases and the shared queue adapter contract
 passes 19/19 cases. Coverage includes Recovery-first FIFO selection, two-installation
-race resolution by monotonic GitHub `comment_id`, hidden active claims after hostile
-relabeling, terminal non-revival, complete signed claim authority, immutable v2
-contract/digest validation, reserved Recovery IDs and root submit idempotency,
-the Work/Recovery umbrella-label invariant,
+race resolution by repository-wide monotonic GitHub `comment_id`, hidden active
+claims after hostile relabeling or closure, terminal non-revival, complete signed
+claim authority, immutable v2 contract/digest validation, reserved Recovery IDs
+and root submit idempotency, recovering-root to child-Recovery slot handoff,
+the crash-safe pending-Recovery barrier when the child is not yet available,
+immutable-marker discovery independent of the Work/Recovery umbrella projection,
 malformed-Issue isolation, replay and signature
 rejection, transport aborts, and candidate-page deduplication. The fresh full
 suite passes 546/546 tests with 1,138 assertions; lint, typecheck, build, and
@@ -374,8 +384,11 @@ findings.
 **Files:**
 - Create: `src/runtime/run-enabled-tick.ts`
 - Create: `src/runtime/daemon.ts`
+- Create: `src/runtime/process-lock.ts`
+- Create: `src/platform/lock/sqlite-process-lock-adapter.ts`
 - Modify: `src/runtime/delivery-loop.ts`
 - Test: `test/unit/daemon-loop.test.ts`
+- Test: `test/contract/process-lock-adapter.test.ts`
 
 - [x] **Step 1: Write failing virtual-clock tests**
 
@@ -389,11 +402,11 @@ Expected: FAIL with missing daemon runtime.
 
 - [x] **Step 3: Implement the loop without hidden dependencies**
 
-Export `runDaemon({ loop, sleep, random, now, signal, onHealth })`. Keep retry state inside `runDaemon`, call `loop.tick(now())`, publish the last successful poll timestamp through `onHealth`, and never call `process.exit`. `runEnabledTick` must process onboarded repositories sequentially and perform `reconcileRepository` before `pollAndClaim` for each repository.
+Export `runDaemon({ loop, processLock, ownerId, sleep, random, now, signal, onHealth })`. The process lock is required: acquire it before the first tick and release it only after the current tick settles, on success, cancellation, or failure. Use a dedicated SQLite lock database so an OS-closed connection releases a crashed daemon's exclusive transaction without locking the journal database. Keep retry state inside `runDaemon`, call `loop.tick(now(), signal)`, publish the last successful poll timestamp through `onHealth`, and never call `process.exit`. `runEnabledTick` must process onboarded repositories sequentially and perform `reconcileRepository` before `pollAndClaim` for each repository.
 
 - [x] **Step 4: Run the M2 gate**
 
-Run: `rtk bun test test/unit/daemon-loop.test.ts test/contract/journal-adapter.test.ts test/contract/queue-repository-adapter.test.ts test/integration/submit-work-v2.test.ts test/integration/daemon-claim.test.ts test/integration/daemon-reconcile.test.ts`
+Run: `rtk bun test test/unit/daemon-loop.test.ts test/contract/process-lock-adapter.test.ts test/contract/journal-adapter.test.ts test/contract/queue-repository-adapter.test.ts test/integration/submit-work-v2.test.ts test/integration/daemon-claim.test.ts test/integration/daemon-reconcile.test.ts`
 
 Expected: all M2 tests pass with 0 failures.
 
@@ -410,13 +423,14 @@ Expected: each command exits 0.
 - [x] **Step 5: Commit daemon core**
 
 ```bash
-rtk git add src/runtime test/unit/daemon-loop.test.ts
+rtk git add src/runtime src/platform/lock test/unit/daemon-loop.test.ts test/contract/process-lock-adapter.test.ts
 rtk git commit -m "feat: add durable daemon poll loop"
 ```
 
 **Task 6 evidence (2026-08-10):** The first virtual-clock tracer failed during
-module loading because the daemon runtime did not exist. The completed daemon
-loop suite passes 20/20 cases, and the combined M2 gate passes 116/116. Coverage
+module loading because the daemon runtime did not exist. The process-lock
+contract first failed because no lock seam existed. The completed daemon loop,
+process-lock contract, and combined M2 gate pass with zero failures. Coverage
 includes the disabled zero-GitHub boundary, successful-poll health, bounded
 jitter, validated `Retry-After` seconds and HTTP dates, capped exponential
 backoff with reset, production `gh` transport classification, cooperative
@@ -424,10 +438,29 @@ tick/sleep cancellation without orphan work, hostile dependency rejection,
 configuration snapshots, duplicate-repository rejection before effects,
 sequential reconcile-before-poll composition, per-repository gates, diagnostic
 aggregation, cursor commit-after-success, transport aborts, and active-claim
-isolation across repositories. The fresh full suite passes 595/595 tests with
-1,277 assertions; lint, typecheck, build, and diff-check exit 0. Final
-independent Spec and Standards reviews report 0 findings.
+isolation across repositories. Two SQLite connections prove one local winner,
+owner-bound idempotent release, handoff after release, and crash-like connection
+close recovery. The process lock is a required runtime dependency, uses a
+dedicated database, and preserves both the primary daemon error and a concurrent
+release error. The fresh full suite, lint, typecheck, build, and diff-check exit
+with zero failures. Final independent Spec and Standards reviews report 0
+findings.
 
 ## M2 completion evidence
 
 Run `rtk git status --short` and confirm the worktree is clean. Demonstrate the daemon only with in-memory or temporary SQLite adapters; `OPC_ENABLED=false` must produce zero GitHub calls. Do not create a LaunchAgent, Keychain item, Telegram bot, Codex home, or repository worktree in M2.
+
+**Final durability review (2026-08-10):** The completed M2 uses a required,
+crash-released SQLite process lock; fail-closed queue identity discovery across
+open, closed, relabelled, and fully stripped Issues through one bounded
+repository-wide journal scan without per-Issue N+1 calls; repository-wide
+signed-journal arbitration; deterministic child
+Recovery identity and crash-safe pending-Recovery slot handoff; exact heartbeat,
+lease, and 24-hour outage
+boundaries; bounded explicit GitHub pagination; stable transport backoff; and
+cooperative cancellation that preserves both primary and cleanup failures. All
+tests use in-memory or temporary storage. No LaunchAgent, Keychain item,
+Telegram bot, Codex home, repository worktree, network mutation, or real Issue
+was created. The final M2 gate passes 140/140 focused tests and the full suite
+passes 619/619; lint, typecheck, build, credential scan, and both diff checks
+pass. Independent final Spec and Standards reviews report 0 findings.
