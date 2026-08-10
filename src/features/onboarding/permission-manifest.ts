@@ -165,6 +165,7 @@ function validateCurrentUserPaths(input: OnboardingInput): void {
   if (
     !posix.isAbsolute(currentHome) ||
     currentHome.includes("\0") ||
+    /[\r\n]/.test(currentHome) ||
     posix.normalize(currentHome) !== currentHome ||
     components.length !== 2 ||
     components[0] !== "Users" ||
@@ -232,4 +233,77 @@ export function previewOnboarding(input: OnboardingInput): OnboardingPreview {
   const result: OnboardingPreview = { manifest, digest: digestCanonical(manifest) };
   deepFreeze(result);
   return result;
+}
+
+export function validateOnboardingPreview(value: unknown): OnboardingPreview {
+  assertCanonicalDigestBoundary();
+  assertPlainDataGraph(value);
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(value);
+  } catch {
+    invalidInput("onboarding preview cannot be snapshotted");
+  }
+  if (
+    !isRecord(snapshot) ||
+    !hasExactKeys(snapshot, ["digest", "manifest"]) ||
+    typeof snapshot.digest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(snapshot.digest) ||
+    !isRecord(snapshot.manifest) ||
+    !hasExactKeys(snapshot.manifest, [
+      "enabled",
+      "githubLogin",
+      "networkDefault",
+      "paths",
+      "repositories",
+      "version",
+    ]) ||
+    snapshot.manifest.version !== 1 ||
+    typeof snapshot.manifest.githubLogin !== "string" ||
+    !Array.isArray(snapshot.manifest.repositories) ||
+    !snapshot.manifest.repositories.every((repository) => typeof repository === "string") ||
+    !isRecord(snapshot.manifest.paths) ||
+    !hasExactKeys(snapshot.manifest.paths, [
+      "applicationSupport",
+      "binary",
+      "codexHome",
+      "launchAgent",
+      "logs",
+    ]) ||
+    !Object.values(snapshot.manifest.paths).every((path) => typeof path === "string") ||
+    snapshot.manifest.networkDefault !== "deny" ||
+    snapshot.manifest.enabled !== false
+  ) {
+    invalidInput("onboarding preview must match the closed schema");
+  }
+  const manifest = snapshot.manifest as unknown as PermissionManifest;
+  const binary = manifest.paths.binary;
+  if (typeof binary !== "string" || !binary.endsWith("/.local/bin/opc")) {
+    invalidInput("onboarding preview binary path is not canonical");
+  }
+  const currentHome = binary.slice(0, -"/.local/bin/opc".length);
+  const canonical = previewOnboarding({
+    githubLogin: manifest.githubLogin,
+    currentHome,
+    repositories: manifest.repositories.map((name) => ({
+      name,
+      private: true,
+      fork: false,
+      owner: manifest.githubLogin,
+    })),
+    paths: {
+      binary: manifest.paths.binary,
+      applicationSupport: manifest.paths.applicationSupport,
+      logs: manifest.paths.logs,
+      launchAgent: manifest.paths.launchAgent,
+      codexHome: manifest.paths.codexHome,
+    },
+  });
+  if (
+    canonical.digest !== snapshot.digest ||
+    digestCanonical(manifest) !== snapshot.digest
+  ) {
+    invalidInput("onboarding preview digest does not match canonical authority");
+  }
+  return canonical;
 }

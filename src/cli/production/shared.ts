@@ -1,13 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { types } from "node:util";
+import { homedir } from "node:os";
+import { posix } from "node:path";
 import { runBounded } from "../../adapters/local/process-runner.js";
 import {
   previewInstall,
   previewOnboarding,
+  createDisabledDaemonConfig,
+  createEnabledDaemonConfig,
+  decodeDaemonConfig,
+  encodeDaemonConfig,
+  validateActivationPreview,
   type ActivationPreview,
   type CodexIdentity,
   type CredentialStore,
+  type DaemonConfig,
   type GitHubIdentity,
   type InstallPreview,
   type LaunchAgentLifecycle,
@@ -24,6 +31,12 @@ import {
   type LaunchAgentFileEntry,
   type LaunchAgentFileSystem,
 } from "../../platform/macos/launch-agent.js";
+import {
+  createSqliteLifecycleConfigLock,
+  type LifecycleConfigLock,
+} from "../../platform/macos/lifecycle-config-lock.js";
+import type { OperationalSnapshot } from "./inspection.js";
+import type { ProductionDaemonRuntime } from "./daemon.js";
 
 export const trustedPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 
@@ -42,6 +55,15 @@ export interface ProductionCliAdapterFactories {
   readonly credentials?: (preview: OnboardingPreview) => CredentialStore;
   readonly queue?: (preview: OnboardingPreview) => QueueRepository;
   readonly launchAgent?: (preview: OnboardingPreview) => LaunchAgentLifecycle;
+  readonly loadDaemonConfig?: (path: string) => Promise<DaemonConfig>;
+  readonly writeDaemonConfig?: (config: DaemonConfig, enabled: boolean) => Promise<DaemonConfig>;
+  readonly inspectOperational?: (
+    onboarding: OnboardingPreview,
+    github: QueueRepository,
+    credentialStore: CredentialStore,
+    now?: Date,
+  ) => Promise<OperationalSnapshot>;
+  readonly daemonRuntime?: ProductionDaemonRuntime;
 }
 
 export function environmentValue(name: string): string {
@@ -82,6 +104,12 @@ export function currentUid(): number {
     throw new Error("INVALID_PRODUCTION_CURRENT_UID");
   }
   return uid;
+}
+
+export function requireDaemonConfigCurrentUid(config: DaemonConfig, uid: number): void {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || config.install.manifest.currentUid !== uid) {
+    throw new Error("DAEMON_CONFIG_UID_CHANGED");
+  }
 }
 
 export function currentOnboardingStagePreview(): OnboardingPreview | InstallPreview {
@@ -134,17 +162,12 @@ export function loadActivationPreview(): ActivationPreview {
     environmentValue(activationPreviewVariable),
     "INVALID_PRODUCTION_ACTIVATION_PREVIEW",
   );
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    types.isProxy(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  ) {
+  try {
+    deepFreeze(value);
+    return validateActivationPreview(value);
+  } catch {
     throw new Error("INVALID_PRODUCTION_ACTIVATION_PREVIEW");
   }
-  deepFreeze(value);
-  return value as ActivationPreview;
 }
 
 export function currentHome(preview: OnboardingPreview): string {
@@ -172,7 +195,12 @@ export function credentials(preview: OnboardingPreview): CredentialStore {
 }
 
 export function queue(preview: OnboardingPreview): QueueRepository {
-  return createGhCliGitHubAdapter({ cwd: currentHome(preview), trustedPath });
+  const home = currentHome(preview);
+  return createGhCliGitHubAdapter({
+    cwd: home,
+    trustedPath,
+    githubConfigDir: `${home}/.config/gh`,
+  });
 }
 
 function fileKind(stats: Awaited<ReturnType<typeof lstat>>): LaunchAgentFileEntry["kind"] {
@@ -213,62 +241,118 @@ const nodeLaunchAgentFileSystem: LaunchAgentFileSystem = {
 Object.freeze(nodeLaunchAgentFileSystem);
 
 export function launchAgent(preview: OnboardingPreview): LaunchAgentLifecycle {
+  const home = currentHome(preview);
+  const uid = currentUid();
   return createLaunchAgentAdapter({
-    currentHome: currentHome(preview),
-    currentUid: currentUid(),
+    currentHome: home,
+    currentUid: uid,
     trustedPath,
     fileSystem: nodeLaunchAgentFileSystem,
     run: runBounded,
+    lifecycleLock: lifecycleConfigLock(home, uid),
   });
 }
 
-export interface EnabledAuthority {
-  readonly version: 1;
-  readonly enabled: boolean;
-  readonly installDigest: string;
-  readonly activationDigest: string;
+const lifecycleConfigLocks = new Map<string, LifecycleConfigLock>();
+
+function lifecycleConfigLock(home: string, uid: number): LifecycleConfigLock {
+  const identity = `${home}\0${String(uid)}`;
+  const existing = lifecycleConfigLocks.get(identity);
+  if (existing !== undefined) return existing;
+  const created = createSqliteLifecycleConfigLock({
+    currentHome: home,
+    currentUid: uid,
+  });
+  lifecycleConfigLocks.set(identity, created);
+  return created;
 }
 
-export function activationConfigPath(preview: ActivationPreview): string {
-  return preview.manifest.install.paths.config;
+export function defaultDaemonConfigPath(): string {
+  const home = homedir();
+  if (!posix.isAbsolute(home) || posix.normalize(home) !== home || home.includes("\0")) {
+    throw new Error("INVALID_DAEMON_CONFIG_PATH");
+  }
+  return `${home}/Library/Application Support/OPC/config.json`;
 }
 
-export async function readEnabledAuthority(preview: ActivationPreview): Promise<EnabledAuthority> {
-  const text = await readFile(activationConfigPath(preview), "utf8");
-  if (text.length > 65_536) throw new Error("INVALID_ENABLED_AUTHORITY");
-  const value = parseJson(text, "INVALID_ENABLED_AUTHORITY");
+function requireDaemonConfigPath(path: string): string {
   if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  ) throw new Error("INVALID_ENABLED_AUTHORITY");
-  const keys = Object.keys(value).sort();
-  if (
-    keys.join(",") !== "activationDigest,enabled,installDigest,version" ||
-    !("version" in value) || value.version !== 1 ||
-    !("enabled" in value) || typeof value.enabled !== "boolean" ||
-    !("installDigest" in value) || value.installDigest !== preview.manifest.installDigest ||
-    !("activationDigest" in value) || value.activationDigest !== preview.digest
-  ) throw new Error("INVALID_ENABLED_AUTHORITY");
-  return { version: 1, enabled: value.enabled, installDigest: value.installDigest, activationDigest: value.activationDigest };
+    !posix.isAbsolute(path) ||
+    posix.normalize(path) !== path ||
+    path.length > 4_096 ||
+    path.includes("\0")
+  ) {
+    throw new Error("INVALID_DAEMON_CONFIG_PATH");
+  }
+  return path;
 }
 
-export async function writeEnabledAuthority(preview: ActivationPreview, enabled: boolean): Promise<void> {
-  const path = activationConfigPath(preview);
+export async function readDaemonConfig(pathValue: string): Promise<DaemonConfig> {
+  const path = requireDaemonConfigPath(pathValue);
   const stats = await lstat(path);
-  const uid = process.getuid?.();
-  if (uid === undefined || !stats.isFile() || stats.isSymbolicLink() || stats.uid !== uid || (stats.mode & 0o077) !== 0) {
-    throw new Error("INVALID_ENABLED_AUTHORITY");
+  const uid = currentUid();
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.uid !== uid ||
+    (stats.mode & 0o077) !== 0
+  ) {
+    throw new Error("INVALID_DAEMON_CONFIG");
   }
-  const contents = `${JSON.stringify({ version: 1, enabled, installDigest: preview.manifest.installDigest, activationDigest: preview.digest })}\n`;
-  const temporary = `${path}.${randomBytes(16).toString("hex")}.tmp`;
-  try {
-    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    await rename(temporary, path);
-    await chmod(path, 0o600);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
+  const config = decodeDaemonConfig(await readFile(path, "utf8"));
+  requireDaemonConfigCurrentUid(config, uid);
+  if (config.install.manifest.paths.config !== path) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
   }
+  return config;
+}
+
+export async function writeDaemonConfig(
+  config: DaemonConfig,
+  enabled: boolean,
+): Promise<DaemonConfig> {
+  const uid = currentUid();
+  requireDaemonConfigCurrentUid(config, uid);
+  const path = requireDaemonConfigPath(config.install.manifest.paths.config);
+  const next = enabled
+    ? config.activation === undefined
+      ? (() => { throw new Error("ACTIVATION_REQUIRED"); })()
+      : createEnabledDaemonConfig(config.activation)
+    : createDisabledDaemonConfig(config.install, config.activation);
+  await lifecycleConfigLock(currentHome(config.onboarding), uid).withLock(path, async () => {
+    const stats = await lstat(path);
+    if (
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      stats.uid !== uid ||
+      (stats.mode & 0o077) !== 0
+    ) {
+      throw new Error("INVALID_DAEMON_CONFIG");
+    }
+    requireCurrentDaemonConfig(config, await readFile(path, "utf8"));
+    const contents = encodeDaemonConfig(next);
+    const temporary = `${path}.${randomBytes(16).toString("hex")}.tmp`;
+    try {
+      await writeFile(temporary, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await rename(temporary, path);
+      await chmod(path, 0o600);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  });
+  return next;
+}
+
+export function requireCurrentDaemonConfig(
+  expected: DaemonConfig,
+  currentContents: string,
+): DaemonConfig {
+  const current = decodeDaemonConfig(currentContents);
+  if (encodeDaemonConfig(current) !== encodeDaemonConfig(expected)) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+  }
+  return current;
 }
 
 export function requireActivationMatchesOnboarding(onboarding: OnboardingPreview, activation: ActivationPreview): void {

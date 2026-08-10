@@ -3,12 +3,22 @@ import { digestCanonical } from "../../src/domain/identity.js";
 import {
   activate,
   applyInstall,
+  decodeDaemonConfig,
+  encodeDaemonConfig,
   previewInstall,
   previewOnboarding,
+  validateDaemonConfig,
   type InstallPreview,
   type LaunchAgentInstallManifest,
 } from "../../src/features/onboarding/index.js";
 import { createInMemoryLaunchAgent } from "../../src/platform/macos/in-memory-launch-agent.js";
+import {
+  LifecycleConfigLockUnavailableError,
+  createSqliteLifecycleConfigLock,
+  lifecycleConfigLockPath,
+  type LifecycleConfigLock,
+  type LifecycleConfigLockDatabase,
+} from "../../src/platform/macos/lifecycle-config-lock.js";
 import {
   createLaunchAgentAdapter,
   type LaunchAgentFileEntry,
@@ -133,7 +143,22 @@ function fakeFileSystem() {
   return { entries, operations, fileSystem };
 }
 
-function productionAdapterFixture() {
+function exclusiveLifecycleLock(): LifecycleConfigLock {
+  let active = false;
+  return Object.freeze({
+    async withLock<T>(_configPath: string, operation: () => Promise<T>): Promise<T> {
+      if (active) throw new LifecycleConfigLockUnavailableError();
+      active = true;
+      try {
+        return await operation();
+      } finally {
+        active = false;
+      }
+    },
+  });
+}
+
+function productionAdapterFixture(lifecycleLock = exclusiveLifecycleLock()) {
   const fake = fakeFileSystem();
   const commands: CommandRequest[] = [];
   const adapter = createLaunchAgentAdapter({
@@ -141,6 +166,7 @@ function productionAdapterFixture() {
     currentUid: 501,
     trustedPath: "/usr/bin:/bin",
     fileSystem: fake.fileSystem,
+    lifecycleLock,
     run(request) {
       commands.push(request);
       return Promise.resolve(request.args[0] === "print" ? missingService() : passed());
@@ -265,16 +291,18 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect([...fixture.entries.keys()].filter((entry) => entry.endsWith(".plist"))).toEqual([path]);
     expect(fixture.entries.get(path)).toMatchObject({ kind: "file", uid: 501, mode: 0o600 });
     const configPath = installPreview.manifest.paths.config;
-    expect(fixture.entries.get(configPath)).toMatchObject({
-      kind: "file",
-      uid: 501,
-      mode: 0o600,
-      contents: `${JSON.stringify({
-        version: 1,
-        enabled: false,
-        installDigest: installPreview.digest,
-      })}\n`,
+    const disabledContents = fixture.entries.get(configPath)?.contents;
+    if (disabledContents === undefined) throw new Error("missing disabled config");
+    const disabledConfig = decodeDaemonConfig(disabledContents);
+    expect(fixture.entries.get(configPath)).toMatchObject({ kind: "file", uid: 501, mode: 0o600 });
+    expect(disabledConfig).toMatchObject({
+      version: 1,
+      enabled: false,
+      onboarding: onboardingPreview(),
+      install: installPreview,
     });
+    expect("activation" in disabledConfig).toBe(false);
+    expect(disabledContents).toBe(encodeDaemonConfig(disabledConfig));
     expect(fixture.entries.get(installPreview.manifest.paths.stdout)).toMatchObject({
       kind: "file",
       uid: 501,
@@ -322,14 +350,17 @@ describe("current-user LaunchAgent lifecycle", () => {
         outputLimitBytes: 65_536,
       },
     ]);
-    expect(fixture.entries.get(configPath)?.contents).toBe(
-      `${JSON.stringify({
-        version: 1,
-        enabled: true,
-        installDigest: installPreview.digest,
-        activationDigest: activationPreview.digest,
-      })}\n`,
-    );
+    const enabledContents = fixture.entries.get(configPath)?.contents;
+    if (enabledContents === undefined) throw new Error("missing enabled config");
+    const enabledConfig = decodeDaemonConfig(enabledContents);
+    expect(enabledConfig).toEqual({
+      version: 1,
+      enabled: true,
+      onboarding: onboardingPreview(),
+      install: installPreview,
+      activation: activationPreview,
+    });
+    expect(enabledContents).toBe(encodeDaemonConfig(enabledConfig));
   });
 
   test("fails closed on symlinks, uid drift, and mutated argv", async () => {
@@ -413,6 +444,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       currentUid: 501,
       trustedPath: "/usr/bin:/bin",
       fileSystem: fakeFileSystem().fileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
       run: () => Promise.resolve(passed()),
     })) {
       Object.defineProperty(hostileOptions, key, { enumerable: true, value });
@@ -516,6 +548,7 @@ describe("current-user LaunchAgent lifecycle", () => {
         currentUid: 501,
         trustedPath: "/usr/bin:/bin",
         fileSystem: fake.fileSystem,
+        lifecycleLock: exclusiveLifecycleLock(),
         run(request) {
           if (request.args[0] === "print") {
             return Promise.resolve(
@@ -583,6 +616,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       currentUid: 501,
       trustedPath: "/usr/bin:/bin",
       fileSystem: hostileFileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
       run: () => Promise.resolve(passed()),
       nonce: () => "03".repeat(16),
     });
@@ -613,6 +647,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       currentUid: 501,
       trustedPath: "/usr/bin:/bin",
       fileSystem: normal.fileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
       run: (request) =>
         Promise.resolve(request.args[0] === "print" ? missingService() : failedBootstrap),
       nonce: () => "04".repeat(16),
@@ -630,21 +665,27 @@ describe("current-user LaunchAgent lifecycle", () => {
       code: "LAUNCH_AGENT_BOOTSTRAP_FAILED",
       result: failedBootstrap,
     });
-    expect(normal.entries.get(installPreview.manifest.paths.config)?.contents).toBe(
-      `${JSON.stringify({
-        version: 1,
-        enabled: false,
-        installDigest: installPreview.digest,
-      })}\n`,
-    );
+    const rolledBack = normal.entries.get(installPreview.manifest.paths.config)?.contents;
+    if (rolledBack === undefined) throw new Error("missing rollback config");
+    expect(decodeDaemonConfig(rolledBack)).toMatchObject({
+      enabled: false,
+      onboarding: onboardingPreview(),
+      install: installPreview,
+    });
 
     const rollback = fakeFileSystem();
     let rejectDisabledWrite = false;
     const rollbackFileSystem: LaunchAgentFileSystem = {
       ...rollback.fileSystem,
       writeFileExclusive(path, contents, mode) {
-        if (rejectDisabledWrite && contents.includes('"enabled":false')) {
-          return Promise.reject(new Error("ROLLBACK_WRITE_FAILED"));
+        if (rejectDisabledWrite) {
+          try {
+            if (!decodeDaemonConfig(contents).enabled) {
+              return Promise.reject(new Error("ROLLBACK_WRITE_FAILED"));
+            }
+          } catch {
+            // Non-config writes belong to the underlying fake filesystem.
+          }
         }
         return rollback.fileSystem.writeFileExclusive(path, contents, mode);
       },
@@ -654,6 +695,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       currentUid: 501,
       trustedPath: "/usr/bin:/bin",
       fileSystem: rollbackFileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
       run: (request) =>
         Promise.resolve(request.args[0] === "print" ? missingService() : failedBootstrap),
       nonce: () => "05".repeat(16),
@@ -676,5 +718,338 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect((aggregate as AggregateError).errors[1]).toMatchObject({
       message: "ROLLBACK_WRITE_FAILED",
     });
+  });
+
+  test("apply rejects a frozen digest-valid install that is detached from Task 1 authority", async () => {
+    const expected = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const forgedHome = "/tmp/roy";
+    const forgedProgram = `${forgedHome}/Library/Application Support/OPC/dist/cli.js`;
+    const forgedConfig = `${forgedHome}/Library/Application Support/OPC/config.json`;
+    const manifest = {
+      ...expected.manifest,
+      currentHome: forgedHome,
+      paths: {
+        launchAgent: `${forgedHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`,
+        program: forgedProgram,
+        config: forgedConfig,
+        stdout: `${forgedHome}/Library/Logs/OPC/daemon.stdout.log`,
+        stderr: `${forgedHome}/Library/Logs/OPC/daemon.stderr.log`,
+      },
+      programArguments: [forgedProgram, "daemon", "--config", forgedConfig],
+      keepAlive: { successfulExit: false },
+    } as unknown as LaunchAgentInstallManifest;
+    freezeGraph(manifest);
+    const forged = { manifest, digest: digestCanonical(manifest) } as InstallPreview;
+    freezeGraph(forged);
+    let calls = 0;
+
+    expect(
+      await applyInstall(
+        { preview: forged, approvedDigest: forged.digest },
+        {
+          launchAgent: {
+            install: () => {
+              calls += 1;
+              return Promise.resolve();
+            },
+            activate: () => Promise.resolve(),
+          },
+        },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "INSTALL_DIGEST_NOT_APPROVED" });
+    expect(calls).toBe(0);
+  });
+
+  test("apply returns canonical authority instead of leaking a partially frozen approval graph", async () => {
+    const canonical = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const partiallyFrozen = structuredClone(canonical);
+    Object.freeze(partiallyFrozen.manifest.onboarding);
+    Object.freeze(partiallyFrozen.manifest.paths);
+    Object.freeze(partiallyFrozen.manifest.programArguments);
+    Object.freeze(partiallyFrozen.manifest.keepAlive);
+    Object.freeze(partiallyFrozen.manifest);
+    Object.freeze(partiallyFrozen);
+    let installed: LaunchAgentInstallManifest | undefined;
+
+    await applyInstall(
+      { preview: partiallyFrozen, approvedDigest: partiallyFrozen.digest },
+      {
+        launchAgent: {
+          install(manifest) {
+            installed = manifest;
+            return Promise.resolve();
+          },
+          activate: () => Promise.resolve(),
+        },
+      },
+    );
+    if (installed === undefined) throw new Error("missing canonical install");
+    expect(installed).not.toBe(partiallyFrozen.manifest);
+    expect(Object.isFrozen(installed.onboarding.manifest.paths)).toBe(true);
+
+    Object.defineProperty(partiallyFrozen.manifest.onboarding.manifest, "githubLogin", {
+      value: "attacker",
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    expect(installed.onboarding.manifest.githubLogin).toBe("roy");
+  });
+
+  test("activation preserves the closed decoder error when on-disk config authority is corrupt", async () => {
+    const fixture = productionAdapterFixture();
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const activation = await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    const entry = fixture.entries.get(install.manifest.paths.config);
+    if (entry === undefined) throw new Error("missing config fixture");
+    fixture.entries.set(install.manifest.paths.config, {
+      ...entry,
+      contents: '{"enabled":false}\n',
+    });
+
+    expect(
+      await activate(
+        { preview: activation, approvedDigest: activation.digest },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({
+      message: "DAEMON_CONFIG_AUTHORITY_CHANGED",
+      cause: { message: "INVALID_DAEMON_CONFIG" },
+    });
+  });
+
+  test("daemon config validation rejects proxies without invoking their traps", () => {
+    let traps = 0;
+    const hostile = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          traps += 1;
+          return Object.prototype;
+        },
+      },
+    );
+    expect(() => validateDaemonConfig(hostile)).toThrow("INVALID_DAEMON_CONFIG");
+    expect(traps).toBe(0);
+
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const nestedProxy = new Proxy(install.manifest.onboarding, {
+      isExtensible() {
+        traps += 1;
+        return false;
+      },
+    });
+    const nestedHostile = Object.freeze({
+      version: 1,
+      enabled: false,
+      onboarding: nestedProxy,
+      install,
+    });
+    expect(() => validateDaemonConfig(nestedHostile)).toThrow("INVALID_DAEMON_CONFIG");
+    expect(traps).toBe(0);
+  });
+
+  test("daemon config decoder accepts disabled authority and rejects non-canonical or open input", () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const disabled = Object.freeze({
+      version: 1,
+      enabled: false,
+      onboarding: install.manifest.onboarding,
+      install,
+    } as const);
+    const encoded = encodeDaemonConfig(disabled);
+
+    expect(decodeDaemonConfig(encoded)).toEqual(disabled);
+    expect(() => decodeDaemonConfig(JSON.stringify(disabled))).toThrow("INVALID_DAEMON_CONFIG");
+
+    const enabledWithoutActivation = { ...disabled, enabled: true };
+    freezeGraph(enabledWithoutActivation);
+    expect(() => validateDaemonConfig(enabledWithoutActivation)).toThrow("INVALID_DAEMON_CONFIG");
+
+    const openConfig = { ...disabled, unexpected: false };
+    freezeGraph(openConfig);
+    expect(() => validateDaemonConfig(openConfig)).toThrow("INVALID_DAEMON_CONFIG");
+  });
+
+  test("one lifecycle lock prevents stale resume and reinstall from overwriting activation", async () => {
+    const fake = fakeFileSystem();
+    const lifecycleLock = exclusiveLifecycleLock();
+    let enteredPrint: (() => void) | undefined;
+    const printStarted = new Promise<void>((resolve) => {
+      enteredPrint = resolve;
+    });
+    let releasePrint: (() => void) | undefined;
+    const printResult = new Promise<CommandResult>((resolve) => {
+      releasePrint = () => {
+        resolve(missingService());
+      };
+    });
+    const adapter = createLaunchAgentAdapter({
+      currentHome,
+      currentUid: 501,
+      trustedPath: "/usr/bin:/bin",
+      fileSystem: fake.fileSystem,
+      lifecycleLock,
+      run(request) {
+        if (request.args[0] === "print") {
+          enteredPrint?.();
+          return printResult;
+        }
+        return Promise.resolve(passed());
+      },
+      nonce: () => "06".repeat(16),
+    });
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const activation = await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: adapter },
+    );
+    const configPath = install.manifest.paths.config;
+    const staleContents = fake.entries.get(configPath)?.contents;
+    if (staleContents === undefined) throw new Error("missing stale config");
+    const staleConfig = decodeDaemonConfig(staleContents);
+
+    const activating = activate(
+      { preview: activation, approvedDigest: activation.digest },
+      { launchAgent: adapter },
+    );
+    await printStarted;
+
+    expect(
+      await lifecycleLock
+        .withLock(configPath, () => Promise.resolve())
+        .catch((error: unknown) => error),
+    ).toBeInstanceOf(LifecycleConfigLockUnavailableError);
+    expect(
+      await applyInstall(
+        { preview: install, approvedDigest: install.digest },
+        { launchAgent: adapter },
+      ).catch((error: unknown) => error),
+    ).toBeInstanceOf(LifecycleConfigLockUnavailableError);
+
+    releasePrint?.();
+    await activating;
+    const enabledContents = fake.entries.get(configPath)?.contents;
+    if (enabledContents === undefined) throw new Error("missing enabled config");
+    expect(decodeDaemonConfig(enabledContents).enabled).toBe(true);
+
+    const staleResume = await lifecycleLock
+      .withLock(configPath, () => {
+        const current = fake.entries.get(configPath)?.contents;
+        if (
+          current === undefined ||
+          encodeDaemonConfig(decodeDaemonConfig(current)) !== encodeDaemonConfig(staleConfig)
+        ) {
+          throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+        }
+        return Promise.resolve();
+      })
+      .catch((error: unknown) => error);
+    expect(staleResume).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+    expect(fake.entries.get(configPath)?.contents).toBe(enabledContents);
+
+    expect(
+      await applyInstall(
+        { preview: install, approvedDigest: install.digest },
+        { launchAgent: adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+    expect(fake.entries.get(configPath)?.contents).toBe(enabledContents);
+  });
+
+  test("SQLite lifecycle lock is private, fail-fast, reentrant-safe, and releases after failure", async () => {
+    const fake = fakeFileSystem();
+    const fileSystem = {
+      inspect: (path: string) => fake.fileSystem.inspect(path),
+      writeFileExclusive: (path: string, contents: string, mode: number) =>
+        fake.fileSystem.writeFileExclusive(path, contents, mode),
+      chmod: (path: string, mode: number) => fake.fileSystem.chmod(path, mode),
+    };
+    let databaseLocked = false;
+    let closes = 0;
+    const openDatabase = (): LifecycleConfigLockDatabase => {
+      let transaction = false;
+      return {
+        run(sql) {
+          if (sql === "BEGIN EXCLUSIVE") {
+            if (databaseLocked) {
+              const error = new Error("busy") as Error & { code: string };
+              error.code = "SQLITE_BUSY";
+              throw error;
+            }
+            databaseLocked = true;
+            transaction = true;
+          }
+          if ((sql === "COMMIT" || sql === "ROLLBACK") && transaction) {
+            transaction = false;
+            databaseLocked = false;
+          }
+        },
+        close() {
+          closes += 1;
+          if (transaction) databaseLocked = false;
+        },
+      };
+    };
+    const options = {
+      currentHome,
+      currentUid: 501,
+      fileSystem,
+      openDatabase,
+    } as const;
+    const first = createSqliteLifecycleConfigLock(options);
+    const second = createSqliteLifecycleConfigLock(options);
+    const configPath = `${currentHome}/Library/Application Support/OPC/config.json`;
+    const lockPath = lifecycleConfigLockPath(configPath);
+
+    await first.withLock(configPath, async () => {
+      expect(
+        await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+      ).toBeInstanceOf(LifecycleConfigLockUnavailableError);
+      expect(
+        await second.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+      ).toBeInstanceOf(LifecycleConfigLockUnavailableError);
+    });
+    expect(fake.entries.get(lockPath)).toMatchObject({ kind: "file", uid: 501, mode: 0o600 });
+
+    expect(
+      await first
+        .withLock(configPath, () => Promise.reject(new Error("SIMULATED_CRASH")))
+        .catch((error: unknown) => error),
+    ).toMatchObject({ message: "SIMULATED_CRASH" });
+    await second.withLock(configPath, () => Promise.resolve());
+    expect(databaseLocked).toBe(false);
+    expect(closes).toBe(4);
+
+    const privateEntry = fake.entries.get(lockPath);
+    if (privateEntry === undefined) throw new Error("missing lock file");
+    fake.entries.set(lockPath, { ...privateEntry, mode: 0o644 });
+    expect(
+      await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+    ).toMatchObject({ message: "UNSAFE_LIFECYCLE_LOCK_PERMISSIONS" });
+    fake.entries.set(lockPath, { kind: "symlink", uid: 501, mode: 0o600 });
+    expect(
+      await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+    ).toMatchObject({ message: "UNSAFE_LIFECYCLE_LOCK_PATH" });
+    fake.entries.set(lockPath, { kind: "file", uid: 502, mode: 0o600, contents: "" });
+    expect(
+      await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+    ).toMatchObject({ message: "LIFECYCLE_LOCK_OWNERSHIP_CHANGED" });
+
+    expect(() =>
+      createSqliteLifecycleConfigLock({
+        ...options,
+        currentHome: "/tmp/roy",
+      }),
+    ).toThrow("INVALID_LIFECYCLE_LOCK_HOME");
+    expect(() =>
+      createSqliteLifecycleConfigLock({
+        ...options,
+        currentHome: "/Users/roy\n",
+      }),
+    ).toThrow("INVALID_LIFECYCLE_LOCK_HOME");
   });
 });

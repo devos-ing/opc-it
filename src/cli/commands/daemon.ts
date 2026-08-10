@@ -3,7 +3,7 @@ import {
   booleanOutput,
   objectOutput,
   outputCodec,
-  pathOutput,
+  stringOutput,
   type OutputCodec,
 } from "./output.js";
 
@@ -19,7 +19,15 @@ export interface DaemonCommandService {
 export type DaemonCommandFactory = () => DaemonCommandService;
 
 export const daemonOutputCodec: OutputCodec<DaemonCommandResult> = outputCodec(
-  objectOutput({ stopped: booleanOutput, configPath: pathOutput }),
+  objectOutput({
+    stopped: booleanOutput,
+    configPath: stringOutput(
+      (value) =>
+        posix.isAbsolute(value) &&
+        posix.normalize(value) === value &&
+        !/[\0\r\n]/.test(value),
+    ),
+  }),
 );
 
 export function parseDaemonArguments(argv: readonly string[]): string {

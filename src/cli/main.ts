@@ -84,6 +84,7 @@ interface CommandRegistration {
 }
 
 const allowedErrorCodes = new Set([
+  "ACTIVATION_REQUIRED",
   "ACTIVATION_DIGEST_NOT_APPROVED",
   "ACTIVATION_IDENTITY_CHANGED",
   "INVALID_ACTIVATION_ARGUMENTS",
@@ -161,7 +162,7 @@ const legacyCommandNames: ReadonlySet<string> = new Set([
   "heartbeat",
 ]);
 
-const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.freeze({
+const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.freeze(Object.assign(Object.create(null) as Record<string, CommandRegistration>, {
   help: command(
     (argv) => {
       parseNoArguments(argv, "INVALID_HELP_ARGUMENTS");
@@ -241,7 +242,7 @@ const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.fr
     "daemon",
     daemonOutputCodec as OutputCodec<unknown>,
   ),
-});
+}));
 
 function successResult(
   commandName: string,
@@ -293,6 +294,9 @@ export async function runCli(
     return commandErrorResult(new Error("INVALID_CLI_ARGUMENT"));
   }
   const commandName = argv[0] ?? "help";
+  if (!Object.hasOwn(commandRegistry, commandName)) {
+    return { exitCode: 2, message: JSON.stringify({ ok: false, error: "UNKNOWN_COMMAND" }) };
+  }
   const registration = commandRegistry[commandName];
   if (registration === undefined) {
     return { exitCode: 2, message: JSON.stringify({ ok: false, error: "UNKNOWN_COMMAND" }) };

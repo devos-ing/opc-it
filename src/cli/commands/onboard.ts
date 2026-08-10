@@ -76,10 +76,23 @@ const installPathsSchema = objectOutput({
   stdout: pathOutput,
   stderr: pathOutput,
 });
+const onboardingManifestSchema = objectOutput({
+  version: numberOutput,
+  githubLogin: stringOutput((value) => /^(?!.*--)[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(value)),
+  repositories: arrayOutput(repositoryOutput),
+  paths: onboardingPathsSchema,
+  networkDefault: literal("deny"),
+  enabled: booleanOutput,
+});
+const onboardingPreviewSchema = objectOutput({
+  digest: digestOutput,
+  manifest: onboardingManifestSchema,
+});
 const installManifestSchema = objectOutput({
   version: numberOutput,
   operation: literal("install"),
   onboardingDigest: digestOutput,
+  onboarding: onboardingPreviewSchema,
   currentHome: pathOutput,
   currentUid: numberOutput,
   label: literal("com.getsuperpower.opc"),
@@ -87,14 +100,6 @@ const installManifestSchema = objectOutput({
   programArguments: arrayOutput(unionOutput(pathOutput, literal("daemon", "--config"))),
   runAtLoad: booleanOutput,
   keepAlive: objectOutput({ successfulExit: booleanOutput }),
-  enabled: booleanOutput,
-});
-const onboardingManifestSchema = objectOutput({
-  version: numberOutput,
-  githubLogin: stringOutput((value) => /^(?!.*--)[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(value)),
-  repositories: arrayOutput(repositoryOutput),
-  paths: onboardingPathsSchema,
-  networkDefault: literal("deny"),
   enabled: booleanOutput,
 });
 const activationManifestSchema = objectOutput({

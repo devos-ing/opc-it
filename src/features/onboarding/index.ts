@@ -1,5 +1,6 @@
 export {
   previewOnboarding,
+  validateOnboardingPreview,
   type OnboardingInput,
   type OnboardingPreview,
   type OnboardingRepositoryInput,
@@ -32,7 +33,14 @@ export {
 } from "./lifecycle.js";
 export {
   activate,
+  createDisabledDaemonConfig,
+  createEnabledDaemonConfig,
+  decodeDaemonConfig,
+  encodeDaemonConfig,
+  validateActivationPreview,
+  validateDaemonConfig,
   type ActivateDependencies,
   type ActivateInput,
   type ActivatedLaunchAgent,
+  type DaemonConfig,
 } from "./activate.js";

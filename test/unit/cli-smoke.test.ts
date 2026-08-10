@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../../src/cli/main.js";
-import { closeDaemonDatabases } from "../../src/cli/production/daemon.js";
+import {
+  closeDaemonDatabases,
+  isApprovalUnavailable,
+  runProductionEnabledTick,
+  telegramHttpRequest,
+} from "../../src/cli/production/daemon.js";
 
 function onboardingPreview(digit: string) {
   return {
@@ -42,6 +47,93 @@ function statusSnapshot(enabled = false) {
 }
 
 describe("runCli", () => {
+  it("runs approvals before repository work in each enabled production tick", async () => {
+    const events: string[] = [];
+    const controller = new AbortController();
+    const result = await runProductionEnabledTick(
+      new Date("2026-08-11T00:00:00.000Z"),
+      controller.signal,
+      {
+        runApprovalTick: () => {
+          events.push("approval");
+          return Promise.resolve();
+        },
+        runWorkTick: () => {
+          events.push("work");
+          return Promise.resolve({ status: "worked", repositoriesChecked: 1 });
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: "worked", repositoriesChecked: 1 });
+    expect(events).toEqual(["approval", "work"]);
+  });
+
+  it("continues authorized work when approval delivery is not configured", async () => {
+    let worked = 0;
+    const result = await runProductionEnabledTick(
+      new Date("2026-08-11T00:00:00.000Z"),
+      new AbortController().signal,
+      {
+        runApprovalTick: () => Promise.reject(new Error("TELEGRAM_NOT_PAIRED")),
+        continueAfterApprovalError: isApprovalUnavailable,
+        runWorkTick: () => {
+          worked += 1;
+          return Promise.resolve({ status: "worked", repositoriesChecked: 1 });
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: "worked", repositoriesChecked: 1 });
+    expect(worked).toBe(1);
+
+    const authorityError = await runProductionEnabledTick(
+      new Date("2026-08-11T00:00:01.000Z"),
+      new AbortController().signal,
+      {
+        runApprovalTick: () => Promise.reject(new Error("TRANSITION_KEY_IDENTITY_CHANGED")),
+        continueAfterApprovalError: isApprovalUnavailable,
+        runWorkTick: () => {
+          worked += 1;
+          return Promise.resolve({ status: "worked", repositoriesChecked: 1 });
+        },
+      },
+    ).catch((error: unknown) => error);
+    expect(authorityError).toMatchObject({ message: "TRANSITION_KEY_IDENTITY_CHANGED" });
+    expect(worked).toBe(1);
+  });
+
+  it("cancels a chunked Telegram response as soon as it exceeds one MiB", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls <= 10) controller.enqueue(new Uint8Array(600_000));
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const error = await telegramHttpRequest(
+      {
+        method: "POST",
+        url: "https://api.telegram.org/bot-redacted/getUpdates",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+        timeoutMs: 30_000,
+        maxResponseBytes: 1_048_576,
+      },
+      () => Promise.resolve(new Response(stream, { status: 200 })),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "TELEGRAM_RESPONSE_TOO_LARGE" });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(10);
+  });
+
   it("closes both daemon databases while preserving primary and cleanup failures", () => {
     const closes: string[] = [];
     const primary = new Error("startup failed");

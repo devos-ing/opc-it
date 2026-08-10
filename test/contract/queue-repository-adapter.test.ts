@@ -5,6 +5,7 @@ import type {
 } from "../../src/adapters/local/process-runner.js";
 import { QueueTransportError } from "../../src/features/queue/index.js";
 import { createGhCliGitHubAdapter } from "../../src/platform/github/gh-cli-github-adapter.js";
+import { createGhIdentityAdapter } from "../../src/platform/github/gh-identity-adapter.js";
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 
 function result(stdout: string): CommandResult {
@@ -77,6 +78,7 @@ test("creates Work through fixed gh argv, controlled environment, and stdin", as
   const github = createGhCliGitHubAdapter({
     cwd: "/opt/opc",
     trustedPath: "/usr/local/bin:/usr/bin:/bin",
+    githubConfigDir: "/opt/opc/.config/gh",
     run,
   });
 
@@ -112,6 +114,7 @@ test("creates Work through fixed gh argv, controlled environment, and stdin", as
       env: {
         PATH: "/usr/local/bin:/usr/bin:/bin",
         GH_PROMPT_DISABLED: "1",
+        GH_CONFIG_DIR: "/opt/opc/.config/gh",
       },
       input: JSON.stringify({
         title: "[OPC] w-1",
@@ -122,6 +125,47 @@ test("creates Work through fixed gh argv, controlled environment, and stdin", as
       outputLimitBytes: 1_048_576,
     },
   ]);
+});
+
+test("uses one canonical GH_CONFIG_DIR for identity and every queue command", async () => {
+  const requests: CommandRequest[] = [];
+  const githubConfigDir = "/Users/roy/.config/gh";
+  const identity = createGhIdentityAdapter({
+    cwd: "/Users/roy",
+    trustedPath: "/usr/bin:/bin",
+    githubConfigDir,
+    run: (request) => {
+      requests.push(request);
+      return Promise.resolve({
+        status: "pass",
+        exitCode: 0,
+        stdout: '{"hosts":{"github.com":[{"login":"roy","active":true}]}}',
+        stderr: "",
+        durationMs: 1,
+      });
+    },
+  });
+  const queue = createGhCliGitHubAdapter({
+    cwd: "/Users/roy",
+    trustedPath: "/usr/bin:/bin",
+    githubConfigDir,
+    run: (request) => {
+      requests.push(request);
+      return Promise.resolve(result(JSON.stringify([])));
+    },
+  });
+
+  await identity.inspect();
+  await queue.listJournalCandidates("roy/app");
+
+  expect(requests.length).toBeGreaterThan(1);
+  for (const request of requests) {
+    expect(request.env).toEqual({
+      PATH: "/usr/bin:/bin",
+      GH_PROMPT_DISABLED: "1",
+      GH_CONFIG_DIR: githubConfigDir,
+    });
+  }
 });
 
 test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () => {

@@ -5,6 +5,7 @@ import {
   applyInstall,
   applyOnboardingIdentityGrants,
   previewInstall,
+  validateDaemonConfig,
 } from "../features/onboarding/index.js";
 import { submitWork } from "../features/planning/index.js";
 import type { CliFactories } from "./main.js";
@@ -15,6 +16,7 @@ import {
   credentials,
   currentOnboardingStagePreview,
   currentUid,
+  defaultDaemonConfigPath,
   githubIdentity,
   isInstallPreview,
   launchAgent,
@@ -22,10 +24,10 @@ import {
   loadOnboardingPreview,
   parseJson,
   queue,
-  readEnabledAuthority,
+  readDaemonConfig,
   repositoryApprovals,
   requireActivationMatchesOnboarding,
-  writeEnabledAuthority,
+  writeDaemonConfig,
   type ProductionCliAdapterFactories,
 } from "./production/shared.js";
 import { applyProductionUninstall, uninstallPreview } from "./production/uninstall.js";
@@ -40,6 +42,17 @@ export function createProductionCliFactories(
   const resolveCredentials = injected.credentials ?? credentials;
   const resolveQueue = injected.queue ?? queue;
   const resolveLaunchAgent = injected.launchAgent ?? launchAgent;
+  const resolveDaemonConfig = injected.loadDaemonConfig ?? readDaemonConfig;
+  const persistDaemonConfig = injected.writeDaemonConfig ?? writeDaemonConfig;
+  const inspectState = injected.inspectOperational ?? inspectOperationalState;
+  const loadCurrentConfig = async () => {
+    const path = defaultDaemonConfigPath();
+    const config = validateDaemonConfig(await resolveDaemonConfig(path));
+    if (config.install.manifest.paths.config !== path) {
+      throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+    }
+    return config;
+  };
   const factories: CliFactories = {
     onboard: () => ({
       preview: () => Promise.resolve(currentOnboardingStagePreview()),
@@ -114,27 +127,27 @@ export function createProductionCliFactories(
         return parseJson(await readFile(path, "utf8"), "INVALID_JSON");
       },
       submit(contract) {
-        return submitWork(contract, resolveQueue(loadOnboardingPreview())).then((submitted) => ({
-          repository: submitted.repository,
-          number: submitted.number,
-          workId: submitted.workId,
-          digest: submitted.digest,
-          created: submitted.created,
-          stateLabel: submitted.stateLabel,
-          createdAt: submitted.createdAt,
-        }));
+        return loadCurrentConfig().then((config) =>
+          submitWork(contract, resolveQueue(config.onboarding)).then((submitted) => ({
+            repository: submitted.repository,
+            number: submitted.number,
+            workId: submitted.workId,
+            digest: submitted.digest,
+            created: submitted.created,
+            stateLabel: submitted.stateLabel,
+            createdAt: submitted.createdAt,
+          })),
+        );
       },
     }),
     status: () => ({
       async status() {
-        const onboarding = loadOnboardingPreview();
-        const activation = loadActivationPreview();
-        requireActivationMatchesOnboarding(onboarding, activation);
-        const authority = await readEnabledAuthority(activation);
+        const config = await loadCurrentConfig();
+        const onboarding = config.onboarding;
         const [github, codex, operational] = await Promise.all([
           resolveGitHubIdentity(onboarding).inspect(),
           resolveCodexIdentity(onboarding).inspect(onboarding.manifest.paths.codexHome),
-          inspectOperationalState(
+          inspectState(
             onboarding,
             resolveQueue(onboarding),
             resolveCredentials(onboarding),
@@ -142,7 +155,7 @@ export function createProductionCliFactories(
         ]);
         return {
           version: "0.1.0",
-          enabled: authority.enabled,
+          enabled: config.enabled,
           githubLogin: github.login,
           githubHost: github.host,
           repositories: onboarding.manifest.repositories,
@@ -156,25 +169,25 @@ export function createProductionCliFactories(
     }),
     doctor: () => ({
       async doctor() {
-        const onboarding = loadOnboardingPreview();
-        const activation = loadActivationPreview();
-        requireActivationMatchesOnboarding(onboarding, activation);
-        const authority = await readEnabledAuthority(activation);
+        const config = await loadCurrentConfig();
+        const onboarding = config.onboarding;
         const [github, codex, operational] = await Promise.all([
           resolveGitHubIdentity(onboarding).inspect(),
           resolveCodexIdentity(onboarding).inspect(onboarding.manifest.paths.codexHome),
-          inspectOperationalState(onboarding, resolveQueue(onboarding), resolveCredentials(onboarding)),
+          inspectState(onboarding, resolveQueue(onboarding), resolveCredentials(onboarding)),
         ]);
-        const githubMatches = github.login.toLowerCase() === onboarding.manifest.githubLogin;
+        const githubMatches =
+          github.host === "github.com" &&
+          github.login.toLowerCase() === onboarding.manifest.githubLogin;
         const codexMatches = codex.authenticated && codex.home === onboarding.manifest.paths.codexHome;
-        const stalePoll = authority.enabled && (
+        const stalePoll = config.enabled && (
           operational.lastPollAt === null || Date.now() - Date.parse(operational.lastPollAt) > 10 * 60_000
         );
         return {
           healthy: githubMatches && codexMatches && operational.telegramPaired &&
             operational.sqliteHealthy && operational.repositoryAccess && operational.sandboxHealthy &&
             !stalePoll && !operational.stuckLease && operational.outboxCount === 0,
-          enabled: authority.enabled,
+          enabled: config.enabled,
           checks: [
             { name: "github-identity", healthy: githubMatches },
             { name: "codex-identity", healthy: codexMatches },
@@ -192,27 +205,35 @@ export function createProductionCliFactories(
     }),
     pause: () => ({
       async pause() {
-        const onboarding = loadOnboardingPreview();
-        const preview = loadActivationPreview();
-        requireActivationMatchesOnboarding(onboarding, preview);
-        await readEnabledAuthority(preview);
-        await writeEnabledAuthority(preview, false);
-        return { paused: true, digest: preview.digest };
+        const config = await loadCurrentConfig();
+        const persisted = await persistDaemonConfig(config, false);
+        return {
+          paused: true,
+          digest: persisted.activation?.digest ?? persisted.install.digest,
+        };
       },
     }),
     resume: () => ({
       async resume() {
-        const onboarding = loadOnboardingPreview();
-        const preview = loadActivationPreview();
-        requireActivationMatchesOnboarding(onboarding, preview);
-        await readEnabledAuthority(preview);
-        await writeEnabledAuthority(preview, true);
-        return { resumed: true, digest: preview.digest };
+        const config = await loadCurrentConfig();
+        if (config.activation === undefined) throw new Error("ACTIVATION_REQUIRED");
+        const persisted = await persistDaemonConfig(config, true);
+        if (persisted.activation === undefined) throw new Error("INVALID_DAEMON_CONFIG");
+        return { resumed: true, digest: persisted.activation.digest };
       },
     }),
     daemon: () => ({
       async run(configPath) {
-        await runProductionDaemon(configPath);
+        await runProductionDaemon(configPath, {
+          loadConfig: resolveDaemonConfig,
+          githubIdentity: resolveGitHubIdentity,
+          codexIdentity: resolveCodexIdentity,
+          credentials: resolveCredentials,
+          queue: resolveQueue,
+          ...(injected.daemonRuntime === undefined
+            ? {}
+            : { runtime: injected.daemonRuntime }),
+        });
         return { stopped: true, configPath };
       },
     }),

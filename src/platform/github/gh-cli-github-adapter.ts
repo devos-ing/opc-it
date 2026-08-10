@@ -3,6 +3,7 @@ import {
   type CommandRequest,
   type CommandResult,
 } from "../../adapters/local/process-runner.js";
+import { requireAbsoluteCommandPath } from "../../adapters/local/command-boundary.js";
 import {
   queueWorkStates,
   QueueTransportError,
@@ -24,6 +25,7 @@ import {
 export interface GhCliGitHubAdapterOptions {
   readonly cwd: string;
   readonly trustedPath: string;
+  readonly githubConfigDir?: string;
   readonly run?: (request: CommandRequest) => Promise<CommandResult>;
 }
 
@@ -391,6 +393,10 @@ export function createGhCliGitHubAdapter(
 ): QueueRepository {
   const cwd = requireControlledCwd(options.cwd);
   const trustedPath = requireTrustedPath(options.trustedPath);
+  const githubConfigDir = requireAbsoluteCommandPath(
+    options.githubConfigDir ?? `${cwd}/.config/gh`,
+    "INVALID_GH_CONFIG_DIR",
+  );
   const run = options.run ?? runBounded;
 
   async function invoke(args: readonly string[], input?: string): Promise<CommandResult> {
@@ -398,7 +404,11 @@ export function createGhCliGitHubAdapter(
       command: "gh",
       args,
       cwd,
-      env: { PATH: trustedPath, GH_PROMPT_DISABLED: "1" },
+      env: {
+        PATH: trustedPath,
+        GH_PROMPT_DISABLED: "1",
+        GH_CONFIG_DIR: githubConfigDir,
+      },
       ...(input === undefined ? {} : { input }),
       timeoutMs: 30_000,
       outputLimitBytes: 1_048_576,

@@ -2,9 +2,8 @@ import { types } from "node:util";
 import { posix } from "node:path";
 import { digestCanonical, type Sha256 } from "../../domain/identity.js";
 import {
-  previewOnboarding,
+  validateOnboardingPreview,
   type OnboardingPreview,
-  type PermissionManifest,
 } from "./permission-manifest.js";
 
 export const launchAgentLabel = "com.getsuperpower.opc";
@@ -13,6 +12,7 @@ export interface LaunchAgentInstallManifest {
   readonly version: 1;
   readonly operation: "install";
   readonly onboardingDigest: Sha256;
+  readonly onboarding: OnboardingPreview;
   readonly currentHome: string;
   readonly currentUid: number;
   readonly label: typeof launchAgentLabel;
@@ -141,76 +141,24 @@ function deepFreeze(value: unknown): void {
   Object.freeze(value);
 }
 
-function currentHomeFromPermissionManifest(manifest: PermissionManifest): string {
+function currentHomeFromOnboarding(onboarding: OnboardingPreview): string {
   const suffix = "/.local/bin/opc";
-  if (!manifest.paths.binary.endsWith(suffix)) return fail("INVALID_ONBOARDING_PREVIEW");
-  return manifest.paths.binary.slice(0, -suffix.length);
-}
-
-function requireCanonicalOnboarding(value: unknown): OnboardingPreview {
-  const preview = exactDataRecord(value, ["manifest", "digest"], "INVALID_ONBOARDING_PREVIEW");
-  if (!Object.isFrozen(value) || typeof preview.digest !== "string" || !sha256Pattern.test(preview.digest)) {
-    return fail("INVALID_ONBOARDING_PREVIEW");
-  }
-  const manifest = exactDataRecord(
-    preview.manifest,
-    ["version", "githubLogin", "repositories", "paths", "networkDefault", "enabled"],
-    "INVALID_ONBOARDING_PREVIEW",
-  );
-  const paths = exactDataRecord(
-    manifest.paths,
-    ["binary", "applicationSupport", "logs", "launchAgent", "codexHome"],
-    "INVALID_ONBOARDING_PREVIEW",
-  );
-  if (
-    !Object.isFrozen(preview.manifest) ||
-    !Object.isFrozen(manifest.paths) ||
-    !Array.isArray(manifest.repositories) ||
-    !Object.isFrozen(manifest.repositories)
-  ) {
-    return fail("INVALID_ONBOARDING_PREVIEW");
-  }
-  const repositories = exactFrozenStringArray(
-    manifest.repositories,
-    manifest.repositories.length,
-    "INVALID_ONBOARDING_PREVIEW",
-  );
-  try {
-    const typedManifest = {
-      ...manifest,
-      paths,
-      repositories,
-    } as unknown as PermissionManifest;
-    const currentHome = currentHomeFromPermissionManifest(typedManifest);
-    const canonical = previewOnboarding({
-      githubLogin: typedManifest.githubLogin,
-      currentHome,
-      repositories: typedManifest.repositories.map((name) => ({
-        name,
-        private: true,
-        fork: false,
-        owner: typedManifest.githubLogin,
-      })),
-      paths: { ...typedManifest.paths },
-    });
-    if (canonical.digest !== preview.digest) return fail("INVALID_ONBOARDING_PREVIEW");
-  } catch {
-    return fail("INVALID_ONBOARDING_PREVIEW");
-  }
-  return value as OnboardingPreview;
+  if (!onboarding.manifest.paths.binary.endsWith(suffix)) return fail("INVALID_ONBOARDING_PREVIEW");
+  return onboarding.manifest.paths.binary.slice(0, -suffix.length);
 }
 
 function expectedInstallManifest(
   onboarding: OnboardingPreview,
   currentUid: number,
 ): LaunchAgentInstallManifest {
-  const currentHome = currentHomeFromPermissionManifest(onboarding.manifest);
+  const currentHome = currentHomeFromOnboarding(onboarding);
   const program = `${onboarding.manifest.paths.applicationSupport}/dist/cli.js`;
   const config = `${onboarding.manifest.paths.applicationSupport}/config.json`;
   return {
     version: 1,
     operation: "install",
     onboardingDigest: onboarding.digest,
+    onboarding,
     currentHome,
     currentUid,
     label: launchAgentLabel,
@@ -230,7 +178,12 @@ function expectedInstallManifest(
 
 export function previewInstall(input: PreviewInstallInput): InstallPreview {
   const fields = exactDataRecord(input, ["onboarding", "currentUid"], "INVALID_INSTALL_PREVIEW_INPUT");
-  const onboarding = requireCanonicalOnboarding(fields.onboarding);
+  let onboarding: OnboardingPreview;
+  try {
+    onboarding = validateOnboardingPreview(fields.onboarding);
+  } catch {
+    return fail("INVALID_ONBOARDING_PREVIEW");
+  }
   if (
     typeof fields.currentUid !== "number" ||
     !Number.isSafeInteger(fields.currentUid) ||
@@ -252,6 +205,7 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
       "version",
       "operation",
       "onboardingDigest",
+      "onboarding",
       "currentHome",
       "currentUid",
       "label",
@@ -278,6 +232,12 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     4,
     "INSTALL_DIGEST_NOT_APPROVED",
   );
+  let onboarding: OnboardingPreview;
+  try {
+    onboarding = validateOnboardingPreview(manifest.onboarding);
+  } catch {
+    return fail("INSTALL_DIGEST_NOT_APPROVED");
+  }
   if (
     !Object.isFrozen(value) ||
     !Object.isFrozen(preview.manifest) ||
@@ -291,6 +251,8 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     manifest.operation !== "install" ||
     typeof manifest.onboardingDigest !== "string" ||
     !sha256Pattern.test(manifest.onboardingDigest) ||
+    !Object.isFrozen(manifest.onboarding) ||
+    manifest.onboardingDigest !== onboarding.digest ||
     typeof manifest.currentHome !== "string" ||
     typeof manifest.currentUid !== "number" ||
     !Number.isSafeInteger(manifest.currentUid) ||
@@ -303,15 +265,10 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
   ) {
     return fail("INSTALL_DIGEST_NOT_APPROVED");
   }
-  const home = manifest.currentHome;
-  const appSupport = `${home}/Library/Application Support/OPC`;
-  const expectedPaths = {
-    launchAgent: `${home}/Library/LaunchAgents/${launchAgentLabel}.plist`,
-    program: `${appSupport}/dist/cli.js`,
-    config: `${appSupport}/config.json`,
-    stdout: `${home}/Library/Logs/OPC/daemon.stdout.log`,
-    stderr: `${home}/Library/Logs/OPC/daemon.stderr.log`,
-  };
+  const currentUid = manifest.currentUid;
+  const expected = expectedInstallManifest(onboarding, currentUid);
+  const home = expected.currentHome;
+  const expectedPaths = expected.paths;
   if (
     !posix.isAbsolute(home) ||
     posix.normalize(home) !== home ||
@@ -321,6 +278,7 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     home === "/Users/." ||
     home === "/Users/.." ||
     home.toLowerCase() === "/users/opc-runner" ||
+    manifest.currentHome !== expected.currentHome ||
     Object.entries(expectedPaths).some(([key, path]) => paths[key] !== path) ||
     argv[0] !== expectedPaths.program ||
     argv[1] !== "daemon" ||
@@ -328,11 +286,17 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     argv[3] !== expectedPaths.config ||
     Object.getOwnPropertyDescriptor(Object.prototype, "toJSON") !== undefined ||
     Object.getOwnPropertyDescriptor(Array.prototype, "toJSON") !== undefined ||
-    digestCanonical(preview.manifest) !== preview.digest
+    digestCanonical(preview.manifest) !== preview.digest ||
+    digestCanonical(expected) !== preview.digest
   ) {
     return fail("INSTALL_DIGEST_NOT_APPROVED");
   }
-  return value as InstallPreview;
+  const result: InstallPreview = {
+    manifest: expected,
+    digest: digestCanonical(expected),
+  };
+  deepFreeze(result);
+  return result;
 }
 
 export function createActivationPreview(install: InstallPreview): ActivationPreview {

@@ -5,12 +5,24 @@ import type {
   LaunchAgentActivationManifest,
   LaunchAgentInstallManifest,
   LaunchAgentLifecycle,
+  ActivationPreview,
+  InstallPreview,
+  OnboardingPreview,
+} from "../../features/onboarding/index.js";
+import {
+  createDisabledDaemonConfig,
+  createEnabledDaemonConfig,
+  decodeDaemonConfig,
+  encodeDaemonConfig,
+  validateOnboardingPreview,
+  type DaemonConfig,
 } from "../../features/onboarding/index.js";
 import type {
   CommandRequest,
   CommandResult,
 } from "../../adapters/local/process-runner.js";
 import { digestCanonical } from "../../domain/identity.js";
+import type { LifecycleConfigLock } from "./lifecycle-config-lock.js";
 
 export interface LaunchAgentFileEntry {
   readonly kind: "missing" | "file" | "directory" | "symlink" | "other";
@@ -32,6 +44,7 @@ export interface LaunchAgentAdapterOptions {
   readonly currentUid: number;
   readonly trustedPath: string;
   readonly fileSystem: LaunchAgentFileSystem;
+  readonly lifecycleLock: LifecycleConfigLock;
   readonly run: (request: CommandRequest) => Promise<CommandResult>;
   readonly nonce?: () => string;
 }
@@ -57,7 +70,14 @@ function snapshotAdapterOptions(value: unknown): LaunchAgentAdapterOptions {
   ) {
     throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
   }
-  const required = ["currentHome", "currentUid", "trustedPath", "fileSystem", "run"];
+  const required = [
+    "currentHome",
+    "currentUid",
+    "trustedPath",
+    "fileSystem",
+    "lifecycleLock",
+    "run",
+  ];
   const keys = Reflect.ownKeys(value);
   if (
     keys.some(
@@ -84,22 +104,39 @@ function snapshotAdapterOptions(value: unknown): LaunchAgentAdapterOptions {
     typeof snapshot.trustedPath !== "string" ||
     typeof snapshot.fileSystem !== "object" ||
     snapshot.fileSystem === null ||
+    typeof snapshot.lifecycleLock !== "object" ||
+    snapshot.lifecycleLock === null ||
     typeof snapshot.run !== "function" ||
     (snapshot.nonce !== undefined && typeof snapshot.nonce !== "function")
   ) {
     throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
   }
   const fileSystem = snapshotFileSystem(snapshot.fileSystem);
+  const lifecycleLock = snapshotLifecycleLock(snapshot.lifecycleLock);
   return {
     currentHome: snapshot.currentHome,
     currentUid: snapshot.currentUid,
     trustedPath: snapshot.trustedPath,
     fileSystem,
+    lifecycleLock,
     run: snapshot.run as LaunchAgentAdapterOptions["run"],
     ...(snapshot.nonce === undefined
       ? {}
       : { nonce: snapshot.nonce as NonNullable<LaunchAgentAdapterOptions["nonce"]> }),
   };
+}
+
+function snapshotLifecycleLock(value: unknown): LifecycleConfigLock {
+  const fields = plainDataFields(
+    value,
+    ["withLock"],
+    [],
+    "INVALID_LIFECYCLE_CONFIG_LOCK",
+  );
+  if (typeof fields.withLock !== "function") {
+    throw new Error("INVALID_LIFECYCLE_CONFIG_LOCK");
+  }
+  return fields as unknown as LifecycleConfigLock;
 }
 
 function plainDataFields(
@@ -212,6 +249,7 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
       "version",
       "operation",
       "onboardingDigest",
+      "onboarding",
       "currentHome",
       "currentUid",
       "label",
@@ -237,6 +275,12 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
     "INVALID_LAUNCH_AGENT_MANIFEST",
   );
   const argv = snapshotStringArray(manifest.programArguments);
+  let onboarding: OnboardingPreview;
+  try {
+    onboarding = validateOnboardingPreview(manifest.onboarding);
+  } catch {
+    throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
+  }
   if (
     !Object.isFrozen(value) ||
     !Object.isFrozen(manifest.paths) ||
@@ -245,6 +289,8 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
     manifest.operation !== "install" ||
     typeof manifest.onboardingDigest !== "string" ||
     !/^sha256:[a-f0-9]{64}$/.test(manifest.onboardingDigest) ||
+    !Object.isFrozen(manifest.onboarding) ||
+    manifest.onboardingDigest !== onboarding.digest ||
     typeof manifest.currentHome !== "string" ||
     typeof manifest.currentUid !== "number" ||
     !Number.isSafeInteger(manifest.currentUid) ||
@@ -264,6 +310,7 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
   }
   const result = {
     ...manifest,
+    onboarding,
     paths: { ...paths },
     programArguments: [...argv],
     keepAlive: { successfulExit: false },
@@ -593,16 +640,45 @@ async function isAlreadyLoaded(
   return true;
 }
 
-function renderEnabledConfig(
-  installDigest: string,
-  activationDigest?: string,
-): string {
-  return `${JSON.stringify({
-    version: 1,
-    enabled: activationDigest !== undefined,
-    installDigest,
-    ...(activationDigest === undefined ? {} : { activationDigest }),
-  })}\n`;
+function installPreview(manifest: LaunchAgentInstallManifest): InstallPreview {
+  return Object.freeze({ manifest, digest: digestCanonical(manifest) });
+}
+
+function activationPreview(manifest: LaunchAgentActivationManifest): ActivationPreview {
+  return Object.freeze({ manifest, digest: digestCanonical(manifest) });
+}
+
+async function readCurrentConfig(
+  fileSystem: LaunchAgentFileSystem,
+  configPath: string,
+  uid: number,
+): Promise<{ readonly config: DaemonConfig; readonly contents: string }> {
+  requireEntry(await inspect(fileSystem, configPath), ["file"], uid);
+  const contents = await fileSystem.readFile(configPath);
+  let config: DaemonConfig;
+  try {
+    config = decodeDaemonConfig(contents);
+  } catch (error) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED", { cause: error });
+  }
+  if (config.install.manifest.paths.config !== configPath) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+  }
+  return Object.freeze({ config, contents });
+}
+
+function requireActivationConfig(
+  current: DaemonConfig,
+  install: InstallPreview,
+  activation: ActivationPreview,
+): void {
+  if (
+    current.onboarding.digest !== install.manifest.onboardingDigest ||
+    current.install.digest !== install.digest ||
+    (current.activation !== undefined && current.activation.digest !== activation.digest)
+  ) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+  }
 }
 
 async function writeAtomic(
@@ -662,87 +738,117 @@ export function createLaunchAgentAdapter(
       requireAuthority(install, { ...snapshot, currentHome: home });
       const path = install.paths.launchAgent;
       await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid);
-      const plist = renderLaunchAgentPlist(install);
-      const installDigest = digestCanonical(install);
-      await writeAtomic(
-        snapshot.fileSystem,
-        install.paths.config,
-        renderEnabledConfig(installDigest),
-        snapshot.currentUid,
-        nonce,
-      );
-      await ensurePrivateFile(
-        snapshot.fileSystem,
-        install.paths.stdout,
-        snapshot.currentUid,
-        nonce,
-      );
-      await ensurePrivateFile(
-        snapshot.fileSystem,
-        install.paths.stderr,
-        snapshot.currentUid,
-        nonce,
-      );
-      await writeAtomic(snapshot.fileSystem, path, plist, snapshot.currentUid, nonce);
+      const preview = installPreview(install);
+      const disabledContents = encodeDaemonConfig(createDisabledDaemonConfig(preview));
+      await snapshot.lifecycleLock.withLock(install.paths.config, async () => {
+        await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid);
+        const configEntry = await inspect(snapshot.fileSystem, install.paths.config);
+        requireEntry(configEntry, ["missing", "file"], snapshot.currentUid);
+        if (
+          configEntry.kind === "file" &&
+          (await snapshot.fileSystem.readFile(install.paths.config)) !== disabledContents
+        ) {
+          throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+        }
+        await writeAtomic(
+          snapshot.fileSystem,
+          install.paths.config,
+          disabledContents,
+          snapshot.currentUid,
+          nonce,
+        );
+        await ensurePrivateFile(
+          snapshot.fileSystem,
+          install.paths.stdout,
+          snapshot.currentUid,
+          nonce,
+        );
+        await ensurePrivateFile(
+          snapshot.fileSystem,
+          install.paths.stderr,
+          snapshot.currentUid,
+          nonce,
+        );
+        await writeAtomic(
+          snapshot.fileSystem,
+          path,
+          renderLaunchAgentPlist(install),
+          snapshot.currentUid,
+          nonce,
+        );
+      });
     },
     async activate(manifest: LaunchAgentActivationManifest) {
       const activation = snapshotActivationManifest(manifest);
       requireAuthority(activation.install, { ...snapshot, currentHome: home });
       await validatePathAuthority(snapshot.fileSystem, activation.install, snapshot.currentUid);
-      const entry = await inspect(snapshot.fileSystem, activation.install.paths.launchAgent);
-      requireEntry(entry, ["file"], snapshot.currentUid);
-      if (
-        (await snapshot.fileSystem.readFile(activation.install.paths.launchAgent)) !==
-        renderLaunchAgentPlist(activation.install)
-      ) {
-        throw new Error("LAUNCH_AGENT_INSTALLATION_CHANGED");
-      }
-      const activationDigest = digestCanonical(activation);
-      const alreadyLoaded = await isAlreadyLoaded(
-        snapshot.run,
-        activation.install,
-        home,
-        trustedPath,
-      );
-      await writeAtomic(
-        snapshot.fileSystem,
-        activation.install.paths.config,
-        renderEnabledConfig(activation.installDigest, activationDigest),
-        snapshot.currentUid,
-        nonce,
-      );
-      if (alreadyLoaded) return;
-      try {
-        const result = await snapshot.run({
-          command: "/bin/launchctl",
-          args: [
-            "bootstrap",
-            `gui/${String(snapshot.currentUid)}`,
-            activation.install.paths.launchAgent,
-          ],
-          cwd: home,
-          env: { PATH: trustedPath },
-          timeoutMs: 10_000,
-          outputLimitBytes: 65_536,
-        });
-        requireCommandResult(result);
-      } catch (bootstrapError) {
+      const preview = activationPreview(activation);
+      const install = installPreview(activation.install);
+      await snapshot.lifecycleLock.withLock(activation.install.paths.config, async () => {
+        await validatePathAuthority(snapshot.fileSystem, activation.install, snapshot.currentUid);
+        const entry = await inspect(snapshot.fileSystem, activation.install.paths.launchAgent);
+        requireEntry(entry, ["file"], snapshot.currentUid);
+        if (
+          (await snapshot.fileSystem.readFile(activation.install.paths.launchAgent)) !==
+          renderLaunchAgentPlist(activation.install)
+        ) {
+          throw new Error("LAUNCH_AGENT_INSTALLATION_CHANGED");
+        }
+        const current = await readCurrentConfig(
+          snapshot.fileSystem,
+          activation.install.paths.config,
+          snapshot.currentUid,
+        );
+        requireActivationConfig(current.config, install, preview);
+        const alreadyLoaded = await isAlreadyLoaded(
+          snapshot.run,
+          activation.install,
+          home,
+          trustedPath,
+        );
         try {
           await writeAtomic(
             snapshot.fileSystem,
             activation.install.paths.config,
-            renderEnabledConfig(activation.installDigest),
+            encodeDaemonConfig(createEnabledDaemonConfig(preview)),
             snapshot.currentUid,
             nonce,
           );
-        } catch (rollbackError) {
-          throw new AggregateError(
-            [bootstrapError, rollbackError],
-            "LAUNCH_AGENT_BOOTSTRAP_AND_ROLLBACK_FAILED",
-          );
+          if (alreadyLoaded) return;
+          const result = await snapshot.run({
+            command: "/bin/launchctl",
+            args: [
+              "bootstrap",
+              `gui/${String(snapshot.currentUid)}`,
+              activation.install.paths.launchAgent,
+            ],
+            cwd: home,
+            env: { PATH: trustedPath },
+            timeoutMs: 10_000,
+            outputLimitBytes: 65_536,
+          });
+          requireCommandResult(result);
+        } catch (activationError) {
+          const rollback = current.config.enabled
+            ? createDisabledDaemonConfig(install, preview)
+            : current.config;
+          try {
+            await writeAtomic(
+              snapshot.fileSystem,
+              activation.install.paths.config,
+              encodeDaemonConfig(rollback),
+              snapshot.currentUid,
+              nonce,
+            );
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [activationError, rollbackError],
+              "LAUNCH_AGENT_BOOTSTRAP_AND_ROLLBACK_FAILED",
+            );
+          }
+          throw activationError;
         }
-        throw bootstrapError;
-      }
+      });
     },
   };
 }
