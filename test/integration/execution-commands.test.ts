@@ -10,7 +10,7 @@ import { prepareExecution, type LocalExecutionRuntime } from "../../src/commands
 import { approvedExecutionDeadline } from "../../src/commands/execution-deadline.js";
 import { sha256Bytes } from "../../src/security/content.js";
 
-async function executionFixture(): Promise<{
+async function executionFixture(probeExitCode = 1): Promise<{
   runtime: LocalExecutionRuntime;
   payloadB64: string;
   issueNumber: number;
@@ -59,7 +59,7 @@ async function executionFixture(): Promise<{
       "  esac",
       "done",
       "for path in $denied; do",
-      "  case \" $* \" in *\"$path\"*) exit 126 ;; esac",
+      `  case " $* " in *"$path"*) exit ${String(probeExitCode)} ;; esac`,
       "done",
       "exec \"$@\"",
       "",
@@ -262,4 +262,19 @@ it("keeps repository-controlled commands outside the Codex credential boundary",
 
   expect(error).toMatchObject({ code: "BOOTSTRAP_FAILED" });
   expect(await readFile(fixture.authPath, "utf8")).toBe("secret");
+});
+
+it("fails closed when the repository permission probe command does not execute", async () => {
+  const fixture = await executionFixture(127);
+  const error = await prepareExecution(
+    {
+      enabled: true,
+      issueNumber: fixture.issueNumber,
+      payloadB64: fixture.payloadB64,
+      deadlineEpochMs: 1_060_000,
+    },
+    fixture.runtime,
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "INVALID_CODEX_RUNNER" });
 });

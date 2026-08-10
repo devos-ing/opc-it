@@ -269,7 +269,7 @@ export async function prepareExecution(
         command: runner.networkDenyCommand,
         args: [
           ...sandboxPrefix,
-          "/usr/bin/test",
+          "/bin/test",
           access,
           join(runner.codexHome, "auth.json"),
         ],
@@ -278,7 +278,7 @@ export async function prepareExecution(
         timeoutMs: Math.min(10_000, remainingExecutionMilliseconds(deadlineEpochMs, now())),
         outputLimitBytes: 1_024,
       });
-      if (probe.status !== "fail") {
+      if (probe.status !== "fail" || probe.exitCode !== 1) {
         throw new DomainError("INVALID_CODEX_RUNNER", `sandbox credential probe:${access}`);
       }
     }

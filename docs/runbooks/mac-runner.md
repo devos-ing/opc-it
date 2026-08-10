@@ -87,7 +87,7 @@ rtk stat -f '%Su %Sp %N' /Users/opc-runner/.codex/auth.json
 - `network_deny.command` 必须是 OS 强制执行的 wrapper，owner/mode/digest 与 manifest 相同；不能用提示词或普通环境变量代替网络隔离。
 - wrapper 的固定接口是 `--workspace <worktree> --temp <job-temp> --deny <codex-home> --deny <manifest-dir> -- <command> ...`；bootstrap 和 Evidence command 只能经该接口执行。
 - 每个 job 都由 `verify-codex-runner` 重新检查当前用户、owner、mode、版本、实际 `$CODEX_HOME` 下的 config/profile 路径、非 credential 文件 digest，以及 ChatGPT 登录状态；验证过程只检查 `auth.json` 元数据。
-- `run-codex` 在启动模型前，使用同一 config profile 与 managed permission profile 执行四个 OS sandbox probe：读取/写入 `auth.json` 与 runner manifest 都必须被拒绝。随后 Codex 固定 `permission_profile="opc-executor|opc-reviewer"`、approval policy `never`、忽略 repository exec rules；任一 probe 可访问受保护路径即 fail closed。
+- `run-codex` 在启动模型前，使用同一 config profile 与 managed permission profile 执行四个 OS sandbox probe：读取/写入 `auth.json` 与 runner manifest 必须由真实 `/bin/test` 以 exit code `1` 拒绝；命令不存在或其他 probe 故障同样 fail closed。随后 Codex 固定 `default_permissions="opc-executor|opc-reviewer"`、approval policy `never`、忽略 repository exec rules。
 
 ## 3. Bun cache 与 fail-closed bootstrap
 

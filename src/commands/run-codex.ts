@@ -122,7 +122,7 @@ export async function runPinnedCodex(
           "--include-managed-config",
           "--cd",
           workspace,
-          "/usr/bin/test",
+          "/bin/test",
           access,
           protectedPath,
         ],
@@ -131,7 +131,7 @@ export async function runPinnedCodex(
         timeoutMs: 10_000,
         outputLimitBytes: 1_024,
       });
-      if (probe.status !== "fail") {
+      if (probe.status !== "fail" || probe.exitCode !== 1) {
         throw new DomainError("INVALID_CODEX_RUNNER", `permission probe:${access}`);
       }
     }

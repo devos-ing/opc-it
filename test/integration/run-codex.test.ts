@@ -106,6 +106,12 @@ it.each([
     ["-w", fixture.runnerManifestPath],
   ]);
   expect(requests.slice(0, 4).every((probe) => probe.args.includes(profile))).toBe(true);
+  expect(requests.slice(0, 4).map((probe) => probe.args.at(-3))).toEqual([
+    "/bin/test",
+    "/bin/test",
+    "/bin/test",
+    "/bin/test",
+  ]);
   expect(request.command).toBe("/host/codex");
   expect(request.timeoutMs).toBe(timeoutMs);
   expect(request.input).toBe("approved prompt");
@@ -209,6 +215,33 @@ it("fails closed when the active permission profile can read persistent auth", a
           runnerManifestPath: fixture.runnerManifestPath,
         }),
       run: () => Promise.resolve(passed()),
+      now: () => 1_000_000,
+    },
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "INVALID_CODEX_RUNNER" });
+});
+
+it("fails closed when the permission probe command does not execute", async () => {
+  const fixture = await invocationFixture("opc-executor");
+  const error = await runPinnedCodex(
+    {
+      permissionProfile: "opc-executor",
+      workspace: fixture.workspace,
+      promptFile: fixture.promptFile,
+      outputFile: fixture.outputFile,
+      schemaFile: fixture.schemaFile,
+      deadlineEpochMs: 1_060_000,
+    },
+    { runnerTemp: fixture.runnerTemp, actionPath: fixture.actionPath, sourceEnvironment: {} },
+    {
+      verify: () =>
+        Promise.resolve({
+          codexBin: "/host/codex",
+          codexHome: fixture.codexHome,
+          runnerManifestPath: fixture.runnerManifestPath,
+        }),
+      run: () => Promise.resolve(passed({ status: "fail", exitCode: 127 })),
       now: () => 1_000_000,
     },
   ).catch((caught: unknown) => caught);
