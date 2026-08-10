@@ -1,5 +1,9 @@
 import { types } from "node:util";
 import {
+  validateTelegramChatId,
+  validateTelegramUserId,
+} from "../../features/approvals/index.js";
+import {
   arrayOutput,
   booleanOutput,
   digestOutput,
@@ -17,7 +21,11 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 
 export type OnboardCommandArguments =
   | { readonly mode: "preview" }
-  | { readonly mode: "apply"; readonly approvedDigest: string };
+  | {
+      readonly mode: "apply";
+      readonly approvedDigest: string;
+      readonly secretInput?: "telegram-token-stdin";
+    };
 
 export interface DigestBoundPreview {
   readonly digest: string;
@@ -39,6 +47,11 @@ export type OnboardCommandResult =
       readonly next: DigestBoundPreview;
     }
   | { readonly installed: boolean; readonly digest: string }
+  | {
+      readonly installed: true;
+      readonly challenge: { readonly code: string; readonly expiresAt: string };
+      readonly next: DigestBoundPreview;
+    }
   | { readonly applied: boolean };
 
 export interface ActivateCommandResult {
@@ -51,6 +64,7 @@ export interface OnboardCommandService {
   apply(input: {
     readonly preview: DigestBoundPreview;
     readonly approvedDigest: string;
+    readonly secretInput?: "telegram-token-stdin";
   }): Promise<OnboardCommandResult>;
   activationPreview(): Promise<OnboardPreviewResult>;
   activate(input: {
@@ -102,16 +116,47 @@ const installManifestSchema = objectOutput({
   keepAlive: objectOutput({ successfulExit: booleanOutput }),
   enabled: booleanOutput,
 });
+function canonicalTelegramId(
+  validate: (value: unknown) => string,
+): ReturnType<typeof stringOutput> {
+  return stringOutput((value) => {
+    try {
+      return validate(value) === value;
+    } catch {
+      return false;
+    }
+  });
+}
+const telegramIdentitySchema = objectOutput({
+  userId: canonicalTelegramId(validateTelegramUserId),
+  chatId: canonicalTelegramId(validateTelegramChatId),
+});
 const activationManifestSchema = objectOutput({
   version: numberOutput,
   operation: literal("activate"),
   installDigest: digestOutput,
   install: installManifestSchema,
+  telegram: telegramIdentitySchema,
   enabled: booleanOutput,
+});
+const pairingManifestSchema = objectOutput({
+  version: numberOutput,
+  operation: literal("pair-telegram"),
+  installDigest: digestOutput,
+  challengeDigest: digestOutput,
+  expiresAt: stringOutput((value) => {
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+  }),
 });
 const previewSchema = objectOutput({
   digest: digestOutput,
-  manifest: unionOutput(onboardingManifestSchema, installManifestSchema, activationManifestSchema),
+  manifest: unionOutput(
+    onboardingManifestSchema,
+    installManifestSchema,
+    pairingManifestSchema,
+    activationManifestSchema,
+  ),
 });
 
 export const onboardOutputCodec: OutputCodec<OnboardCommandResult> = outputCodec(
@@ -126,6 +171,17 @@ export const onboardOutputCodec: OutputCodec<OnboardCommandResult> = outputCodec
       next: previewSchema,
     }),
     objectOutput({ installed: booleanOutput, digest: digestOutput }),
+    objectOutput({
+      installed: booleanOutput,
+      challenge: objectOutput({
+        code: stringOutput((value) => /^[A-Za-z0-9_-]{43}$/.test(value)),
+        expiresAt: stringOutput((value) => {
+          const milliseconds = Date.parse(value);
+          return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+        }),
+      }),
+      next: previewSchema,
+    }),
     objectOutput({ applied: booleanOutput }),
   ),
 );
@@ -149,6 +205,17 @@ export function parseOnboardArguments(argv: readonly string[]): OnboardCommandAr
   if (argv.length === 1 && argv[0] === "--preview") return { mode: "preview" };
   if (argv.length === 2 && argv[0] === "--apply") {
     return { mode: "apply", approvedDigest: parseApprovedDigest(argv[1]) };
+  }
+  if (
+    argv.length === 3 &&
+    argv[0] === "--apply" &&
+    argv[2] === "--telegram-token-stdin"
+  ) {
+    return {
+      mode: "apply",
+      approvedDigest: parseApprovedDigest(argv[1]),
+      secretInput: "telegram-token-stdin",
+    };
   }
   return invalidArguments();
 }
@@ -190,7 +257,11 @@ export async function runOnboardCommand(
   if (preview.digest !== input.approvedDigest) {
     throw new Error("ONBOARDING_DIGEST_NOT_APPROVED");
   }
-  return service.apply({ preview, approvedDigest: input.approvedDigest });
+  return service.apply({
+    preview,
+    approvedDigest: input.approvedDigest,
+    ...(input.secretInput === undefined ? {} : { secretInput: input.secretInput }),
+  });
 }
 
 export async function runActivateCommand(

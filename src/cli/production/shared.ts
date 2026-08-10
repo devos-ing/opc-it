@@ -8,6 +8,7 @@ import {
   previewOnboarding,
   createDisabledDaemonConfig,
   createEnabledDaemonConfig,
+  createPausedDaemonConfig,
   decodeDaemonConfig,
   encodeDaemonConfig,
   validateActivationPreview,
@@ -20,6 +21,7 @@ import {
   type LaunchAgentLifecycle,
   type OnboardingInput,
   type OnboardingPreview,
+  type TelegramIdentity,
 } from "../../features/onboarding/index.js";
 import type { QueueRepository } from "../../features/queue/index.js";
 import { createCodexCliIdentityAdapter } from "../../platform/codex/codex-cli-adapter.js";
@@ -37,6 +39,16 @@ import {
 } from "../../platform/macos/lifecycle-config-lock.js";
 import type { OperationalSnapshot } from "./inspection.js";
 import type { ProductionDaemonRuntime } from "./daemon.js";
+import { preserveAtomicWriteFailure } from "./atomic-file.js";
+import {
+  validateTelegramPairingStagePreview,
+  type TelegramPairingStagePreview,
+} from "./telegram-onboarding.js";
+import type { Database } from "bun:sqlite";
+import type {
+  TelegramHttpRequest,
+  TelegramHttpResponse,
+} from "../../platform/approvals/telegram-approval-adapter.js";
 
 export const trustedPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 
@@ -46,6 +58,7 @@ export function transitionKeyId(key: string): string {
 const onboardingInputVariable = "OPC_ONBOARDING_INPUT";
 const activationPreviewVariable = "OPC_ACTIVATION_PREVIEW";
 const onboardingStageVariable = "OPC_ONBOARDING_STAGE";
+const telegramPairingPreviewVariable = "OPC_TELEGRAM_PAIRING_PREVIEW";
 const approvedIdentityVariable = "OPC_APPROVED_GITHUB_IDENTITY";
 const approvedRepositoriesVariable = "OPC_APPROVED_REPOSITORIES";
 
@@ -55,6 +68,15 @@ export interface ProductionCliAdapterFactories {
   readonly credentials?: (preview: OnboardingPreview) => CredentialStore;
   readonly queue?: (preview: OnboardingPreview) => QueueRepository;
   readonly launchAgent?: (preview: OnboardingPreview) => LaunchAgentLifecycle;
+  readonly telegramIdentity?: (install: InstallPreview) => Promise<TelegramIdentity>;
+  readonly readSecret?: (name: "telegram-token") => Promise<string>;
+  readonly openApprovalDatabase?: (path: string) => Database;
+  readonly prepareApprovalDatabase?: (path: string) => Promise<void>;
+  readonly validateApprovalDatabase?: (path: string) => Promise<void>;
+  readonly telegramLifecycleLock?: (install: InstallPreview) => LifecycleConfigLock;
+  readonly telegramRequest?: (request: TelegramHttpRequest) => Promise<TelegramHttpResponse>;
+  readonly now?: () => Date;
+  readonly sleep?: (delayMs: number) => Promise<void>;
   readonly loadDaemonConfig?: (path: string) => Promise<DaemonConfig>;
   readonly writeDaemonConfig?: (config: DaemonConfig, enabled: boolean) => Promise<DaemonConfig>;
   readonly inspectOperational?: (
@@ -106,18 +128,108 @@ export function currentUid(): number {
   return uid;
 }
 
+export async function preparePrivateSqliteFile(
+  path: string,
+  uid: number = currentUid(),
+): Promise<void> {
+  try {
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.uid !== uid) {
+      throw new Error("INVALID_PRIVATE_SQLITE_PATH");
+    }
+  } catch (error) {
+    if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+    try {
+      await writeFile(path, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (createError) {
+      if (!(typeof createError === "object" && createError !== null && "code" in createError && createError.code === "EEXIST")) {
+        throw createError;
+      }
+    }
+  }
+  await chmod(path, 0o600);
+  const after = await lstat(path);
+  if (
+    !after.isFile() ||
+    after.isSymbolicLink() ||
+    after.uid !== uid ||
+    (after.mode & 0o077) !== 0
+  ) throw new Error("INVALID_PRIVATE_SQLITE_PATH");
+  await validatePrivateSqliteArtifacts(path, uid);
+}
+
+export async function validatePrivateSqliteArtifacts(
+  path: string,
+  uid: number = currentUid(),
+): Promise<void> {
+  for (const artifact of [path, `${path}-wal`, `${path}-shm`]) {
+    try {
+      const stats = await lstat(artifact);
+      if (
+        !stats.isFile() ||
+        stats.isSymbolicLink() ||
+        stats.uid !== uid ||
+        (stats.mode & 0o077) !== 0
+      ) throw new Error("INVALID_PRIVATE_SQLITE_PATH");
+    } catch (error) {
+      const missing = typeof error === "object" && error !== null &&
+        "code" in error && error.code === "ENOENT";
+      if (artifact === path || !missing) throw error;
+    }
+  }
+}
+
 export function requireDaemonConfigCurrentUid(config: DaemonConfig, uid: number): void {
   if (!Number.isSafeInteger(uid) || uid <= 0 || config.install.manifest.currentUid !== uid) {
     throw new Error("DAEMON_CONFIG_UID_CHANGED");
   }
 }
 
-export function currentOnboardingStagePreview(): OnboardingPreview | InstallPreview {
+export function currentOnboardingStagePreview():
+  | OnboardingPreview
+  | InstallPreview
+  | TelegramPairingStagePreview {
   const onboarding = loadOnboardingPreview();
   const stage = process.env[onboardingStageVariable] ?? "identity";
   if (stage === "identity") return onboarding;
   if (stage === "install") return previewInstall({ onboarding, currentUid: currentUid() });
+  if (stage === "pairing") {
+    return validateTelegramPairingStagePreview(parseJson(
+      environmentValue(telegramPairingPreviewVariable),
+      "INVALID_TELEGRAM_PAIRING_PREVIEW",
+    ));
+  }
   throw new Error("INVALID_PRODUCTION_ONBOARDING_STAGE");
+}
+
+export function isTelegramPairingStagePreview(
+  value: unknown,
+): value is TelegramPairingStagePreview {
+  try {
+    validateTelegramPairingStagePreview(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readTelegramTokenFromStdin(): Promise<string> {
+  if (process.stdin.isTTY) throw new Error("TELEGRAM_SECRET_INPUT_REQUIRED");
+  process.stdin.setEncoding("utf8");
+  let value = "";
+  for await (const chunk of process.stdin) {
+    const text: unknown = chunk;
+    if (typeof text !== "string") throw new Error("INVALID_TELEGRAM_TOKEN");
+    value += text;
+    if (value.length > 256) throw new Error("INVALID_TELEGRAM_TOKEN");
+  }
+  const token = value.replace(/\r?\n$/, "");
+  if (token.includes("\n") || token.includes("\r") || token.includes("\0")) {
+    throw new Error("INVALID_TELEGRAM_TOKEN");
+  }
+  return token;
 }
 
 export function isInstallPreview(value: unknown): value is InstallPreview {
@@ -237,6 +349,16 @@ const nodeLaunchAgentFileSystem: LaunchAgentFileSystem = {
   async chmod(path, mode) {
     await chmod(path, mode);
   },
+  async removeFile(path) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+  },
 };
 Object.freeze(nodeLaunchAgentFileSystem);
 
@@ -249,7 +371,7 @@ export function launchAgent(preview: OnboardingPreview): LaunchAgentLifecycle {
     trustedPath,
     fileSystem: nodeLaunchAgentFileSystem,
     run: runBounded,
-    lifecycleLock: lifecycleConfigLock(home, uid),
+    lifecycleLock: lifecycleConfigLockForOnboarding(preview),
   });
 }
 
@@ -265,6 +387,12 @@ function lifecycleConfigLock(home: string, uid: number): LifecycleConfigLock {
   });
   lifecycleConfigLocks.set(identity, created);
   return created;
+}
+
+export function lifecycleConfigLockForOnboarding(
+  preview: OnboardingPreview,
+): LifecycleConfigLock {
+  return lifecycleConfigLock(currentHome(preview), currentUid());
 }
 
 export function defaultDaemonConfigPath(): string {
@@ -315,10 +443,12 @@ export async function writeDaemonConfig(
   requireDaemonConfigCurrentUid(config, uid);
   const path = requireDaemonConfigPath(config.install.manifest.paths.config);
   const next = enabled
-    ? config.activation === undefined
-      ? (() => { throw new Error("ACTIVATION_REQUIRED"); })()
-      : createEnabledDaemonConfig(config.activation)
-    : createDisabledDaemonConfig(config.install, config.activation);
+    ? "activation" in config
+      ? createEnabledDaemonConfig(config.activation)
+      : (() => { throw new Error("ACTIVATION_REQUIRED"); })()
+    : "activation" in config
+      ? createPausedDaemonConfig(config.activation)
+      : createDisabledDaemonConfig(config.install);
   await lifecycleConfigLock(currentHome(config.onboarding), uid).withLock(path, async () => {
     const stats = await lstat(path);
     if (
@@ -332,13 +462,21 @@ export async function writeDaemonConfig(
     requireCurrentDaemonConfig(config, await readFile(path, "utf8"));
     const contents = encodeDaemonConfig(next);
     const temporary = `${path}.${randomBytes(16).toString("hex")}.tmp`;
+    let created = false;
+    let moved = false;
     try {
       await writeFile(temporary, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      created = true;
       await rename(temporary, path);
+      moved = true;
       await chmod(path, 0o600);
     } catch (error) {
-      await unlink(temporary).catch(() => undefined);
-      throw error;
+      if (!created || moved) throw error;
+      await preserveAtomicWriteFailure(
+        error,
+        () => unlink(temporary),
+        "DAEMON_CONFIG_WRITE_FAILED",
+      );
     }
   });
   return next;

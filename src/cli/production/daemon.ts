@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { chmod, lstat, rename, unlink, writeFile } from "node:fs/promises";
+import { posix } from "node:path";
 import { Database } from "bun:sqlite";
 import { approvalTick } from "../../features/approvals/index.js";
 import {
@@ -26,6 +27,7 @@ import {
   type TelegramHttpResponse,
 } from "../../platform/approvals/telegram-approval-adapter.js";
 import { createProductionApprovalQueue } from "./approval-queue.js";
+import { preserveAtomicWriteFailure } from "./atomic-file.js";
 import {
   codexIdentity,
   credentials,
@@ -160,6 +162,182 @@ export interface ProductionDaemonRuntimeDependencies {
   readonly runLoop?: (dependencies: RunDaemonDependencies) => Promise<void>;
   readonly writeHealth?: (path: string, contents: string) => Promise<void>;
   readonly telegramRequest?: (request: TelegramHttpRequest) => Promise<TelegramHttpResponse>;
+  readonly fileSystem?: ProductionDaemonFileSystem;
+}
+
+export interface ProductionDaemonFileEntry {
+  readonly kind: "missing" | "file" | "directory" | "symlink" | "other";
+  readonly uid?: number;
+  readonly mode?: number;
+}
+
+export interface ProductionDaemonFileSystem {
+  inspect(path: string): Promise<ProductionDaemonFileEntry>;
+  writeFileExclusive(path: string, contents: string, mode: number): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
+  removeFile(path: string): Promise<void>;
+}
+
+function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+}
+
+const nodeDaemonFileSystem: ProductionDaemonFileSystem = Object.freeze({
+  async inspect(path: string): Promise<ProductionDaemonFileEntry> {
+    try {
+      const stats = await lstat(path);
+      return {
+        kind: stats.isSymbolicLink()
+          ? "symlink"
+          : stats.isFile()
+            ? "file"
+            : stats.isDirectory()
+              ? "directory"
+              : "other",
+        uid: stats.uid,
+        mode: stats.mode & 0o777,
+      };
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return { kind: "missing" };
+      throw error;
+    }
+  },
+  writeFileExclusive(path: string, contents: string, mode: number) {
+    return writeFile(path, contents, { encoding: "utf8", flag: "wx", mode });
+  },
+  rename,
+  chmod,
+  async removeFile(path: string) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  },
+});
+
+function requirePrivateDirectory(entry: ProductionDaemonFileEntry, uid: number): void {
+  if (
+    entry.kind !== "directory" ||
+    entry.uid !== uid ||
+    typeof entry.mode !== "number" ||
+    (entry.mode & 0o077) !== 0
+  ) {
+    throw new Error("INVALID_DAEMON_RUNTIME_PATH");
+  }
+}
+
+function requirePrivateFileOrMissing(entry: ProductionDaemonFileEntry, uid: number): void {
+  if (entry.kind === "missing") return;
+  if (
+    entry.kind !== "file" ||
+    entry.uid !== uid ||
+    typeof entry.mode !== "number" ||
+    (entry.mode & 0o077) !== 0
+  ) {
+    throw new Error("INVALID_DAEMON_RUNTIME_PATH");
+  }
+}
+
+function runtimeSqlitePaths(input: ProductionDaemonRuntimeInput): readonly string[] {
+  const support = input.config.onboarding.manifest.paths.applicationSupport;
+  return [
+    `${support}/state.sqlite`,
+    `${support}/process-lock.sqlite`,
+    `${support}/approvals.sqlite`,
+  ];
+}
+
+function runtimeSqliteArtifacts(input: ProductionDaemonRuntimeInput): readonly string[] {
+  return runtimeSqlitePaths(input).flatMap((path) => [path, `${path}-wal`, `${path}-shm`]);
+}
+
+async function validateDaemonRuntimePaths(
+  input: ProductionDaemonRuntimeInput,
+  fileSystem: ProductionDaemonFileSystem,
+): Promise<void> {
+  const home = input.config.install.manifest.currentHome;
+  const uid = input.config.install.manifest.currentUid;
+  const logs = input.config.onboarding.manifest.paths.logs;
+  const files = [
+    ...runtimeSqliteArtifacts(input),
+    `${logs}/health.json`,
+  ];
+  const directories = new Set<string>();
+  for (const file of files) {
+    if (!file.startsWith(`${home}/`) || posix.normalize(file) !== file) {
+      throw new Error("INVALID_DAEMON_RUNTIME_PATH");
+    }
+    let current = home;
+    directories.add(current);
+    for (const component of posix.dirname(file).slice(home.length + 1).split("/")) {
+      current = `${current}/${component}`;
+      directories.add(current);
+    }
+  }
+  for (const directory of directories) {
+    requirePrivateDirectory(await fileSystem.inspect(directory), uid);
+  }
+  for (const file of files) {
+    requirePrivateFileOrMissing(await fileSystem.inspect(file), uid);
+  }
+}
+
+async function preparePrivateRuntimeDatabases(
+  input: ProductionDaemonRuntimeInput,
+  fileSystem: ProductionDaemonFileSystem,
+): Promise<void> {
+  const uid = input.config.install.manifest.currentUid;
+  for (const path of runtimeSqlitePaths(input)) {
+    const before = await fileSystem.inspect(path);
+    if (before.kind === "missing") {
+      await fileSystem.writeFileExclusive(path, "", 0o600);
+    }
+    requirePrivateFileOrMissing(await fileSystem.inspect(path), uid);
+    const after = await fileSystem.inspect(path);
+    if (after.kind === "missing") throw new Error("INVALID_DAEMON_RUNTIME_PATH");
+  }
+}
+
+async function requireApprovedTelegramPairing(
+  store: ReturnType<typeof createSqliteApprovalStore>,
+  config: ProductionDaemonRuntimeInput["config"],
+): Promise<void> {
+  const pairing = await store.loadPairing();
+  if (
+    pairing === undefined ||
+    pairing.userId !== config.activation.manifest.telegram.userId ||
+    pairing.chatId !== config.activation.manifest.telegram.chatId
+  ) {
+    throw new Error("TELEGRAM_IDENTITY_CHANGED");
+  }
+}
+
+async function writeHealthAtomically(
+  fileSystem: ProductionDaemonFileSystem,
+  path: string,
+  contents: string,
+): Promise<void> {
+  const temporary = `${path}.${randomBytes(16).toString("hex")}.tmp`;
+  let created = false;
+  let moved = false;
+  try {
+    await fileSystem.writeFileExclusive(temporary, contents, 0o600);
+    created = true;
+    await fileSystem.rename(temporary, path);
+    moved = true;
+    await fileSystem.chmod(path, 0o600);
+  } catch (primary) {
+    if (!created || moved) throw primary;
+    await preserveAtomicWriteFailure(
+      primary,
+      () => fileSystem.removeFile(temporary),
+      "DAEMON_HEALTH_WRITE_FAILED",
+    );
+  }
 }
 
 export interface ProductionEnabledTickDependencies {
@@ -218,11 +396,15 @@ function requireEnabledConfig(config: DaemonConfig): DaemonConfig & { readonly e
   return config;
 }
 
-function requireSameAuthority(expected: DaemonConfig, current: DaemonConfig): void {
+function requireSameAuthority(
+  expected: DaemonConfig & { readonly enabled: true },
+  current: DaemonConfig,
+): void {
   if (
     current.onboarding.digest !== expected.onboarding.digest ||
     current.install.digest !== expected.install.digest ||
-    current.activation?.digest !== expected.activation?.digest
+    !("activation" in current) ||
+    current.activation.digest !== expected.activation.digest
   ) {
     throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
   }
@@ -262,12 +444,12 @@ export async function runProductionDaemonRuntime(
 ): Promise<void> {
   const onboarding = input.config.onboarding;
   const support = onboarding.manifest.paths.applicationSupport;
+  const fileSystem = dependencies.fileSystem ?? nodeDaemonFileSystem;
   const openDatabase = dependencies.openDatabase ??
-    ((path: string) => new Database(path, { create: true }));
+    ((path: string) => new Database(path, { create: false }));
   const runLoop = dependencies.runLoop ?? runDaemon;
   const writeHealth = dependencies.writeHealth ??
-    ((path: string, contents: string) =>
-      writeFile(path, contents, { encoding: "utf8", mode: 0o600 }));
+    ((path: string, contents: string) => writeHealthAtomically(fileSystem, path, contents));
   let journalDatabase: Database | undefined;
   let lockDatabase: Database | undefined;
   let approvalDatabase: Database | undefined;
@@ -276,11 +458,15 @@ export async function runProductionDaemonRuntime(
   let primaryError: unknown;
   let failed = false;
   try {
+    await validateDaemonRuntimePaths(input, fileSystem);
+    await preparePrivateRuntimeDatabases(input, fileSystem);
     journalDatabase = openDatabase(`${support}/state.sqlite`);
     lockDatabase = openDatabase(`${support}/process-lock.sqlite`);
     approvalDatabase = openDatabase(`${support}/approvals.sqlite`);
     const journal = createSqliteJournal(journalDatabase);
     const approvalStore = createSqliteApprovalStore(approvalDatabase);
+    await validateDaemonRuntimePaths(input, fileSystem);
+    await requireApprovedTelegramPairing(approvalStore, input.config);
     let installation = await journal.loadInstallation();
     if (installation === undefined) {
       installation = { id: randomUUID(), keyId: input.keyId };
@@ -317,6 +503,7 @@ export async function runProductionDaemonRuntime(
       runEnabledTick: (now, signal) => runProductionEnabledTick(now, signal, {
         runApprovalTick: async () => {
           await input.revalidateIdentity();
+          await requireApprovedTelegramPairing(approvalStore, input.config);
           const currentTransitionKey = await input.credentialStore.read("transition-key");
           if (currentTransitionKey !== input.transitionKey) {
             throw new Error("TRANSITION_KEY_IDENTITY_CHANGED");

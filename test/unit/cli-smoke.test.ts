@@ -10,6 +10,7 @@ import {
   runProductionEnabledTick,
   telegramHttpRequest,
 } from "../../src/cli/production/daemon.js";
+import { preserveAtomicWriteFailure } from "../../src/cli/production/atomic-file.js";
 
 function onboardingPreview(digit: string) {
   return {
@@ -161,6 +162,20 @@ describe("runCli", () => {
     expect((thrown as AggregateError).errors[0]).toBe(primary);
   });
 
+  it("preserves atomic-write primary and temporary cleanup failures", async () => {
+    const primary = new Error("rename failed");
+    const cleanup = new Error("unlink failed");
+    const thrown = await preserveAtomicWriteFailure(
+      primary,
+      () => Promise.reject(cleanup),
+      "DAEMON_CONFIG_WRITE_FAILED",
+    ).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([primary, cleanup]);
+    expect((thrown as Error).message).toBe("DAEMON_CONFIG_WRITE_FAILED");
+  });
+
   it("previews onboarding through a lazily constructed command factory", async () => {
     let constructions = 0;
     const result = await runCli(["onboard", "--preview"], {
@@ -267,10 +282,17 @@ describe("runCli", () => {
     const result = await runCli(["uninstall", "--preview"], {
       uninstall: () => ({
         preview: (selection) =>
-          Promise.resolve(Object.freeze({ digest: `sha256:${"2".repeat(64)}`, selection })),
+          Promise.resolve(Object.freeze({
+            digest: `sha256:${"2".repeat(64)}`,
+            selection,
+            preserved: { lifecycleLock: "preserved" as const },
+          })),
         apply: (input) => {
           writes += 1;
-          return Promise.resolve({ removed: input.selection });
+          return Promise.resolve({
+            removed: input.selection,
+            preserved: { lifecycleLock: "preserved" as const },
+          });
         },
       }),
     });
@@ -286,6 +308,7 @@ describe("runCli", () => {
           telegramToken: false,
           transitionKey: false,
         },
+        preserved: { lifecycleLock: "preserved" },
       },
     });
     expect(writes).toBe(0);

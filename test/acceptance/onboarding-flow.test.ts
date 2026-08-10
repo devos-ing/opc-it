@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -8,16 +8,21 @@ import { createProductionCliFactories } from "../../src/cli/production.js";
 import {
   requireCurrentDaemonConfig,
   requireDaemonConfigCurrentUid,
+  preparePrivateSqliteFile,
+  validatePrivateSqliteArtifacts,
   writeDaemonConfig,
 } from "../../src/cli/production/shared.js";
 import {
   createDisabledDaemonConfig,
   createEnabledDaemonConfig,
+  createPausedDaemonConfig,
   decodeDaemonConfig,
   encodeDaemonConfig,
   applyInstall,
+  previewActivation,
   previewInstall,
   previewOnboarding,
+  type DaemonConfig,
 } from "../../src/features/onboarding/index.js";
 import type { QueueRepository } from "../../src/features/queue/index.js";
 import {
@@ -30,7 +35,11 @@ import { createInMemoryApprovalChannel } from "../../src/platform/approvals/in-m
 import { createHmacApprovalTransitionSigner } from "../../src/platform/approvals/hmac-approval-transition-signer.js";
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 import { createProductionApprovalQueue } from "../../src/cli/production/approval-queue.js";
-import { runProductionDaemon } from "../../src/cli/production/daemon.js";
+import { applyProductionUninstall } from "../../src/cli/production/uninstall.js";
+import {
+  runProductionDaemon,
+  runProductionDaemonRuntime,
+} from "../../src/cli/production/daemon.js";
 import { createSqliteApprovalStore } from "../../src/platform/approvals/telegram-approval-adapter.js";
 import { validV2Contract } from "../fixtures/v2-contract.js";
 
@@ -102,7 +111,7 @@ function disabledProductionConfig() {
 
 async function enabledProductionConfig() {
   const disabled = disabledProductionConfig();
-  const activation = await applyInstall(
+  const install = await applyInstall(
     { preview: disabled.install, approvedDigest: disabled.install.digest },
     {
       launchAgent: {
@@ -111,26 +120,41 @@ async function enabledProductionConfig() {
       },
     },
   );
-  return createEnabledDaemonConfig(activation);
+  const activation = previewActivation({
+    install,
+    telegram: { userId: "42", chatId: "99" },
+  });
+  const config = createEnabledDaemonConfig(activation);
+  if (!config.enabled) throw new Error("expected enabled test config");
+  return config;
 }
 
 async function runProductionApprovalScenario(
   advanceDuringPollMs: number,
   rotateTransitionKey = false,
+  existing?: {
+    readonly config: Awaited<ReturnType<typeof enabledProductionConfig>>;
+    readonly currentConfig?: DaemonConfig;
+    readonly approvalDatabasePath?: string;
+  },
 ) {
   const directory = await mkdtemp(join(tmpdir(), "opc-production-approval-"));
   const configPath = join(directory, "config.json");
-  const config = await enabledProductionConfig();
+  const config = existing?.config ?? await enabledProductionConfig();
   const github = createInMemoryGitHub();
   const submitted = await submitWork(validV2Contract, github);
   const databases: { readonly path: string; readonly database: Database }[] = [];
+  const preparedFiles = new Set<string>();
   let clockMs = Date.parse("2026-08-11T00:01:00.000Z");
   let nonce: string | undefined;
   let healthWrites = 0;
   let transitionKeyReads = 0;
+  let configLoads = 0;
   try {
     const daemonError = await runProductionDaemon(configPath, {
-      loadConfig: () => Promise.resolve(config),
+      loadConfig: () => Promise.resolve(
+        configLoads++ === 0 ? config : existing?.currentConfig ?? config,
+      ),
       githubIdentity: () => ({
         inspect: () => Promise.resolve({ login: "roy", host: "github.com" }),
         inspectRepository: () => Promise.resolve({ private: true, fork: false, owner: "roy" }),
@@ -156,8 +180,38 @@ async function runProductionApprovalScenario(
       queue: () => github,
       now: () => new Date(clockMs),
       runtimeDependencies: {
+        fileSystem: {
+          inspect: (path) => Promise.resolve(
+            path.includes(".sqlite") || path.endsWith("/health.json")
+              ? preparedFiles.has(path)
+                ? { kind: "file" as const, uid: config.install.manifest.currentUid, mode: 0o600 }
+                : { kind: "missing" as const }
+              : {
+                  kind: "directory" as const,
+                  uid: config.install.manifest.currentUid,
+                  mode: 0o700,
+                },
+          ),
+          writeFileExclusive: (path) => {
+            preparedFiles.add(path);
+            return Promise.resolve();
+          },
+          rename: () => Promise.resolve(),
+          chmod: () => Promise.resolve(),
+          removeFile: () => Promise.resolve(),
+        },
         openDatabase: (path) => {
-          const database = new Database(":memory:");
+          const database = new Database(
+            existing?.approvalDatabasePath !== undefined && path.endsWith("/approvals.sqlite")
+              ? existing.approvalDatabasePath
+              : ":memory:",
+          );
+          if (existing?.approvalDatabasePath === undefined && path.endsWith("/approvals.sqlite")) {
+            createSqliteApprovalStore(database);
+            database.query(
+              "INSERT INTO approval_pairing (singleton, user_id, chat_id) VALUES (1, ?, ?)",
+            ).run("42", "99");
+          }
           databases.push({ path, database });
           return database;
         },
@@ -178,7 +232,7 @@ async function runProductionApprovalScenario(
             body: JSON.stringify({
               ok: true,
               result: [{
-                update_id: 1,
+                update_id: existing === undefined ? 1 : 2,
                 callback_query: {
                   id: "production-callback",
                   from: { id: 42 },
@@ -196,23 +250,6 @@ async function runProductionApprovalScenario(
         runLoop: async (dependencies) => {
           const approvalDatabase = databases.find(({ path }) => path.endsWith("/approvals.sqlite"));
           if (approvalDatabase === undefined) throw new Error("missing approval database");
-          const store = createSqliteApprovalStore(approvalDatabase.database);
-          const challenge = await createTelegramPairingChallenge(
-            {
-              now: "2026-08-11T00:00:00.000Z",
-              expiresAt: "2026-08-11T00:10:00.000Z",
-            },
-            { store, randomBytes: () => new Uint8Array(32).fill(4) },
-          );
-          await pairTelegram(
-            {
-              userId: "42",
-              chatId: "99",
-              code: challenge.code,
-              now: "2026-08-11T00:00:30.000Z",
-            },
-            { store },
-          );
           const lease = await dependencies.processLock.acquire(dependencies.ownerId);
           try {
             const result = await dependencies.loop.tick(dependencies.now(), dependencies.signal);
@@ -286,12 +323,15 @@ describe("current-user lifecycle CLI", () => {
   });
 
   it("runs production identity, disabled install, and activation stages through fake adapters", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opc-onboard-telegram-"));
+    const approvalDatabasePath = join(directory, "approvals.sqlite");
     const previous = {
       input: process.env.OPC_ONBOARDING_INPUT,
       stage: process.env.OPC_ONBOARDING_STAGE,
       identity: process.env.OPC_APPROVED_GITHUB_IDENTITY,
       repositories: process.env.OPC_APPROVED_REPOSITORIES,
       activation: process.env.OPC_ACTIVATION_PREVIEW,
+      pairing: process.env.OPC_TELEGRAM_PAIRING_PREVIEW,
     };
     process.env.OPC_ONBOARDING_INPUT = JSON.stringify({
       githubLogin: "roy",
@@ -310,6 +350,8 @@ describe("current-user lifecycle CLI", () => {
     const launchCalls: string[] = [];
     let liveGitHubLogin = "roy";
     let transitionKey: string | undefined;
+    let pairingCode = "";
+    let secretReads = 0;
     const factories = createProductionCliFactories({
       githubIdentity: () => ({
         inspect: () => Promise.resolve({ login: liveGitHubLogin, host: "github.com" }),
@@ -336,6 +378,37 @@ describe("current-user lifecycle CLI", () => {
           return Promise.resolve();
         },
       }),
+      readSecret: () => {
+        secretReads += 1;
+        return Promise.resolve("123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi");
+      },
+      openApprovalDatabase: () => new Database(approvalDatabasePath),
+      prepareApprovalDatabase: () => Promise.resolve(),
+      validateApprovalDatabase: () => Promise.resolve(),
+      telegramLifecycleLock: () => ({
+        withLock: (path, operation) => {
+          if (path !== "/Users/roy/Library/Application Support/OPC/config.json") {
+            throw new Error("INVALID_LIFECYCLE_LOCK_REQUEST");
+          }
+          return operation();
+        },
+      }),
+      telegramRequest: () => Promise.resolve({
+        status: 200,
+        body: JSON.stringify({
+          ok: true,
+          result: [{
+            update_id: 1,
+            message: {
+              text: pairingCode,
+              from: { id: 42 },
+              chat: { id: 99 },
+            },
+          }],
+        }),
+      }),
+      now: () => new Date("2026-08-11T00:00:00.000Z"),
+      sleep: () => Promise.resolve(),
     });
 
     try {
@@ -352,13 +425,43 @@ describe("current-user lifecycle CLI", () => {
       process.env.OPC_ONBOARDING_STAGE = "install";
       const installPreview = record(json((await runCli(["onboard", "--preview"], factories)).message).result);
       if (typeof installPreview.digest !== "string") throw new Error("missing install digest");
-      const installApply = await runCli(
+      const missingSecretInput = await runCli(
         ["onboard", "--apply", installPreview.digest],
         factories,
       );
+      expect(json(missingSecretInput.message)).toEqual({
+        ok: false,
+        error: "TELEGRAM_SECRET_INPUT_REQUIRED",
+      });
+      expect(secretReads).toBe(0);
+      expect(launchCalls).toEqual([]);
+      const installApply = await runCli(
+        ["onboard", "--apply", installPreview.digest, "--telegram-token-stdin"],
+        factories,
+      );
       expect(installApply.exitCode).toBe(0);
-      const activationPreview = record(json(installApply.message).result);
+      expect(secretReads).toBe(1);
+      expect(installApply.message).not.toContain("123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi");
+      const pairingStart = record(json(installApply.message).result);
+      const challenge = record(pairingStart.challenge);
+      if (typeof challenge.code !== "string") throw new Error("missing pairing code");
+      pairingCode = challenge.code;
+      const pairingPreview = record(pairingStart.next);
+      if (typeof pairingPreview.digest !== "string") throw new Error("missing pairing digest");
+      process.env.OPC_ONBOARDING_STAGE = "pairing";
+      process.env.OPC_TELEGRAM_PAIRING_PREVIEW = JSON.stringify(pairingPreview);
+      const pairingApply = await runCli(
+        ["onboard", "--apply", pairingPreview.digest],
+        factories,
+      );
+      expect(pairingApply.exitCode).toBe(0);
+      const activationPreview = record(json(pairingApply.message).result);
       if (typeof activationPreview.digest !== "string") throw new Error("missing activation digest");
+      const pairingCrashRetry = await runCli(
+        ["onboard", "--apply", pairingPreview.digest],
+        factories,
+      );
+      expect(json(pairingCrashRetry.message)).toEqual(json(pairingApply.message));
       process.env.OPC_ACTIVATION_PREVIEW = JSON.stringify(activationPreview);
 
       liveGitHubLogin = "changed";
@@ -369,6 +472,24 @@ describe("current-user lifecycle CLI", () => {
       const activation = await runCli(["activate", activationPreview.digest], factories);
       expect(activation.exitCode).toBe(0);
       expect(launchCalls).toEqual(["install", "activate"]);
+      const install = previewInstall({
+        onboarding: disabledProductionConfig().onboarding,
+        currentUid: 501,
+      });
+      const durableActivation = previewActivation({
+        install,
+        telegram: { userId: "42", chatId: "99" },
+      });
+      expect(activationPreview.digest).toBe(durableActivation.digest);
+      const delivery = await runProductionApprovalScenario(1_000, false, {
+        config: (() => {
+          const enabled = createEnabledDaemonConfig(durableActivation);
+          if (!enabled.enabled) throw new Error("expected enabled config");
+          return enabled;
+        })(),
+        approvalDatabasePath,
+      });
+      expect(delivery.issue).toMatchObject({ stateLabel: "opc:claimed" });
     } finally {
       for (const [name, value] of [
         ["OPC_ONBOARDING_INPUT", previous.input],
@@ -376,10 +497,12 @@ describe("current-user lifecycle CLI", () => {
         ["OPC_APPROVED_GITHUB_IDENTITY", previous.identity],
         ["OPC_APPROVED_REPOSITORIES", previous.repositories],
         ["OPC_ACTIVATION_PREVIEW", previous.activation],
+        ["OPC_TELEGRAM_PAIRING_PREVIEW", previous.pairing],
       ] as const) {
         if (value === undefined) Reflect.deleteProperty(process.env, name);
         else process.env[name] = value;
       }
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -501,6 +624,151 @@ describe("current-user lifecycle CLI", () => {
     }
   });
 
+  it("creates and reopens private SQLite files while rejecting symlinks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opc-private-sqlite-"));
+    const databasePath = join(directory, "approvals.sqlite");
+    const symlinkPath = join(directory, "linked.sqlite");
+    const walPath = `${databasePath}-wal`;
+    const shmPath = `${databasePath}-shm`;
+    try {
+      await preparePrivateSqliteFile(databasePath);
+      expect((await lstat(databasePath)).mode & 0o777).toBe(0o600);
+      new Database(databasePath).close();
+      await chmod(databasePath, 0o644);
+      await preparePrivateSqliteFile(databasePath);
+      expect((await lstat(databasePath)).mode & 0o777).toBe(0o600);
+      await symlink(databasePath, symlinkPath);
+      const symlinkError = await preparePrivateSqliteFile(symlinkPath).catch(
+        (error: unknown) => error,
+      );
+      expect(symlinkError).toMatchObject({ message: "INVALID_PRIVATE_SQLITE_PATH" });
+      await writeFile(walPath, "", { mode: 0o644 });
+      const wideSidecarError = await validatePrivateSqliteArtifacts(databasePath).catch(
+        (error: unknown) => error,
+      );
+      expect(wideSidecarError).toMatchObject({ message: "INVALID_PRIVATE_SQLITE_PATH" });
+      await chmod(walPath, 0o600);
+      await symlink(databasePath, shmPath);
+      const linkedSidecarError = await validatePrivateSqliteArtifacts(databasePath).catch(
+        (error: unknown) => error,
+      );
+      expect(linkedSidecarError).toMatchObject({ message: "INVALID_PRIVATE_SQLITE_PATH" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe daemon database and health paths before opening SQLite", async () => {
+    const config = await enabledProductionConfig();
+    const support = config.onboarding.manifest.paths.applicationSupport;
+    const health = `${config.onboarding.manifest.paths.logs}/health.json`;
+    const uid = config.install.manifest.currentUid;
+    for (const invalidPath of [support, health]) {
+      let opens = 0;
+      const error = await runProductionDaemonRuntime(
+        {
+          configPath: config.install.manifest.paths.config,
+          config,
+          transitionKey: "11".repeat(32),
+          keyId: "key-1",
+          github: {} as QueueRepository,
+          credentialStore: {
+            read: () => Promise.resolve("11".repeat(32)),
+            write: () => Promise.resolve(),
+            remove: () => Promise.resolve(),
+          },
+          reloadConfig: () => Promise.resolve(config),
+          revalidateIdentity: () => Promise.resolve(),
+          now: () => new Date("2026-08-11T00:00:00.000Z"),
+        },
+        {
+          fileSystem: {
+            inspect: (path) => Promise.resolve(
+              path === invalidPath
+                ? invalidPath === health
+                  ? { kind: "file" as const, uid, mode: 0o644 }
+                  : { kind: "symlink" as const, uid, mode: 0o700 }
+                : path.includes(".sqlite") || path === health
+                  ? { kind: "missing" as const }
+                  : { kind: "directory" as const, uid, mode: 0o700 },
+            ),
+            writeFileExclusive: () => Promise.resolve(),
+            rename: () => Promise.resolve(),
+            chmod: () => Promise.resolve(),
+            removeFile: () => Promise.resolve(),
+          },
+          openDatabase: () => {
+            opens += 1;
+            throw new Error("database must stay closed");
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ message: "INVALID_DAEMON_RUNTIME_PATH" });
+      expect(opens).toBe(0);
+    }
+  });
+
+  it("writes health atomically and preserves temporary cleanup failure", async () => {
+    const config = await enabledProductionConfig();
+    const uid = config.install.manifest.currentUid;
+    const primary = new Error("health rename failed");
+    const cleanup = new Error("health cleanup failed");
+    const databases: Database[] = [];
+    const preparedFiles = new Set<string>();
+    const error = await runProductionDaemonRuntime(
+      {
+        configPath: config.install.manifest.paths.config,
+        config,
+        transitionKey: "11".repeat(32),
+        keyId: "key-1",
+        github: {} as QueueRepository,
+        credentialStore: {
+          read: () => Promise.resolve("11".repeat(32)),
+          write: () => Promise.resolve(),
+          remove: () => Promise.resolve(),
+        },
+        reloadConfig: () => Promise.resolve(config),
+        revalidateIdentity: () => Promise.resolve(),
+        now: () => new Date("2026-08-11T00:00:00.000Z"),
+      },
+      {
+        fileSystem: {
+          inspect: (path) => Promise.resolve(
+            path.includes(".sqlite") || path.endsWith("/health.json")
+              ? preparedFiles.has(path)
+                ? { kind: "file" as const, uid, mode: 0o600 }
+                : { kind: "missing" as const }
+              : { kind: "directory" as const, uid, mode: 0o700 },
+          ),
+          writeFileExclusive: (path) => {
+            preparedFiles.add(path);
+            return Promise.resolve();
+          },
+          rename: () => Promise.reject(primary),
+          chmod: () => Promise.resolve(),
+          removeFile: () => Promise.reject(cleanup),
+        },
+        openDatabase: () => {
+          const database = new Database(":memory:");
+          createSqliteApprovalStore(database);
+          database.query(
+            "INSERT OR IGNORE INTO approval_pairing (singleton, user_id, chat_id) VALUES (1, ?, ?)",
+          ).run("42", "99");
+          databases.push(database);
+          return database;
+        },
+        async runLoop(dependencies) {
+          await dependencies.onHealth(new Date("2026-08-11T00:00:00.000Z"));
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([primary, cleanup]);
+    expect(databases).toHaveLength(3);
+  });
+
   it("rejects resume before activation without invoking the config writer", async () => {
     const config = disabledProductionConfig();
     let writes = 0;
@@ -518,12 +786,36 @@ describe("current-user lifecycle CLI", () => {
     expect(writes).toBe(0);
   });
 
+  it("retains approved activation authority across pause and resume", async () => {
+    let config: DaemonConfig = await enabledProductionConfig();
+    const digest = config.activation.digest;
+    const factories = createProductionCliFactories({
+      loadDaemonConfig: () => Promise.resolve(config),
+      writeDaemonConfig: (_current, enabled) => {
+        if (!("activation" in config)) throw new Error("activation authority lost");
+        const activation = config.activation;
+        config = enabled
+          ? createEnabledDaemonConfig(activation)
+          : createPausedDaemonConfig(activation);
+        if (!("activation" in config)) throw new Error("activation authority lost");
+        return Promise.resolve(config);
+      },
+    });
+
+    expect(json((await runCli(["pause"], factories)).message)).toMatchObject({
+      result: { paused: true, digest },
+    });
+    expect(record(config).enabled).toBe(false);
+    expect("activation" in config).toBe(true);
+    expect(json((await runCli(["resume"], factories)).message)).toMatchObject({
+      result: { resumed: true, digest },
+    });
+    expect(record(config).enabled).toBe(true);
+  });
+
   it("rejects a stale lifecycle writer against newer canonical daemon authority", async () => {
     const staleEnabled = await enabledProductionConfig();
-    const newerDisabled = createDisabledDaemonConfig(
-      staleEnabled.install,
-      staleEnabled.activation,
-    );
+    const newerDisabled = createDisabledDaemonConfig(staleEnabled.install);
 
     expect(() =>
       requireCurrentDaemonConfig(staleEnabled, encodeDaemonConfig(newerDisabled)),
@@ -640,6 +932,36 @@ describe("current-user lifecycle CLI", () => {
     expect(result.databasesClosed).toBe(true);
   });
 
+  it("stops before approvals or work when durable Telegram identity drifts", async () => {
+    const install = disabledProductionConfig().install;
+    const activation = previewActivation({
+      install,
+      telegram: { userId: "43", chatId: "99" },
+    });
+    const config = createEnabledDaemonConfig(activation);
+    if (!config.enabled) throw new Error("expected enabled config");
+
+    const result = await runProductionApprovalScenario(1_000, false, {
+      config,
+    });
+
+    expect(result.daemonError).toMatchObject({ message: "TELEGRAM_IDENTITY_CHANGED" });
+    expect(result.issue).toMatchObject({ stateLabel: "opc:awaiting-approval" });
+    expect(result.transitions).toEqual([]);
+  });
+
+  it("rejects an enabled daemon authority downgraded to an installed config", async () => {
+    const config = await enabledProductionConfig();
+    const result = await runProductionApprovalScenario(1_000, false, {
+      config,
+      currentConfig: createDisabledDaemonConfig(config.install),
+    });
+
+    expect(result.daemonError).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+    expect(result.issue).toMatchObject({ stateLabel: "opc:awaiting-approval" });
+    expect(result.transitions).toEqual([]);
+  });
+
   it("binds onboard apply and activation to freshly loaded previews", async () => {
     const calls: unknown[] = [];
     const factories: CliFactoryOverrides = {
@@ -733,7 +1055,11 @@ describe("current-user lifecycle CLI", () => {
       doctor: () => ({ doctor: () => Promise.resolve({ healthy: true, enabled: false, checks: [] }) }),
       daemon: () => ({ run: (configPath) => Promise.resolve({ stopped: true, configPath }) }),
       uninstall: () => ({
-        preview: (selection) => Promise.resolve({ digest: approvedDigest, selection }),
+        preview: (selection) => Promise.resolve({
+          digest: approvedDigest,
+          selection,
+          preserved: { lifecycleLock: "preserved" },
+        }),
         apply: () => Promise.reject(new Error("unexpected uninstall apply")),
       }),
     };
@@ -770,10 +1096,17 @@ describe("current-user lifecycle CLI", () => {
       {
         uninstall: () => ({
           preview: (selection) =>
-            Promise.resolve(Object.freeze({ digest: approvedDigest, selection })),
+            Promise.resolve(Object.freeze({
+              digest: approvedDigest,
+              selection,
+              preserved: { lifecycleLock: "preserved" as const },
+            })),
           apply: (input) => {
             applied.push(input);
-            return Promise.resolve({ removed: input.selection });
+            return Promise.resolve({
+              removed: input.selection,
+              preserved: { lifecycleLock: "preserved" as const },
+            });
           },
         }),
       },
@@ -790,6 +1123,7 @@ describe("current-user lifecycle CLI", () => {
             telegramToken: true,
             transitionKey: false,
           },
+          preserved: { lifecycleLock: "preserved" },
         },
         approvedDigest,
         selection: {
@@ -800,6 +1134,69 @@ describe("current-user lifecycle CLI", () => {
         },
       },
     ]);
+  });
+
+  it("holds the lifecycle lock across uninstall and preserves its stable coordination files", async () => {
+    const onboarding = disabledProductionConfig().onboarding;
+    const events: string[] = [];
+    let locked = false;
+    const result = await applyProductionUninstall(
+      {
+        programFiles: false,
+        stateAndLogs: true,
+        telegramToken: true,
+        transitionKey: false,
+      },
+      {
+        onboarding: () => onboarding,
+        lifecycleLock: {
+          async withLock(_path, operation) {
+            locked = true;
+            events.push("lock:start");
+            try {
+              return await operation();
+            } finally {
+              events.push("lock:end");
+              locked = false;
+            }
+          },
+        },
+        stopLaunchAgent: () => {
+          expect(locked).toBe(true);
+          events.push("bootout");
+          return Promise.resolve();
+        },
+        validateRemovalPath: () => Promise.resolve(),
+        removePath: (path) => {
+          expect(locked).toBe(!path.includes("/lifecycle-lock.sqlite"));
+          events.push(path);
+          return Promise.resolve();
+        },
+        credentialStore: {
+          read: () => Promise.resolve(undefined),
+          write: () => Promise.resolve(),
+          remove: (name) => {
+            expect(locked).toBe(true);
+            events.push(`credential:${name}`);
+            return Promise.resolve();
+          },
+        },
+      },
+    );
+
+    if (!("removed" in result)) throw new Error("expected uninstall result");
+    expect(result.removed).toEqual({
+      programFiles: false,
+      stateAndLogs: true,
+      telegramToken: true,
+      transitionKey: false,
+    });
+    expect(events[0]).toBe("lock:start");
+    const lockEnd = events.indexOf("lock:end");
+    expect(lockEnd).toBeGreaterThan(0);
+    expect(events.some((event) => event.includes("/lifecycle-lock.sqlite"))).toBe(false);
+    expect(result).toMatchObject({ preserved: { lifecycleLock: "preserved" } });
+    expect(events).toContain("credential:telegram-token");
   });
 
   it("rejects unknown, missing, extra, malformed, NUL, and oversized arguments before factories", async () => {
@@ -892,6 +1289,29 @@ describe("current-user lifecycle CLI", () => {
       const result = await runCli(["status"], {
         status: () => ({ status: () => Promise.resolve(output) }),
       } as unknown as CliFactoryOverrides);
+      expect(json(result.message)).toEqual({ ok: false, error: "INVALID_COMMAND_OUTPUT" });
+    }
+  });
+
+  it("rejects non-canonical Telegram identities in activation command output", async () => {
+    const enabled = await enabledProductionConfig();
+    const activation = enabled.activation;
+    for (const telegram of [
+      { userId: "01", chatId: "99" },
+      { userId: "42", chatId: "+99" },
+    ]) {
+      const result = await runCli(["onboard", "--apply", approvedDigest], {
+        onboard: () => ({
+          preview: () => Promise.resolve({ digest: approvedDigest, manifest: {} }),
+          apply: () => Promise.resolve({
+            ...activation,
+            manifest: { ...activation.manifest, telegram },
+          }),
+          activationPreview: () => Promise.reject(new Error("unexpected activation preview")),
+          activate: () => Promise.reject(new Error("unexpected activation")),
+        }),
+      });
+
       expect(json(result.message)).toEqual({ ok: false, error: "INVALID_COMMAND_OUTPUT" });
     }
   });

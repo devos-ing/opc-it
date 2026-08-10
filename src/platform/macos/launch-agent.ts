@@ -14,6 +14,7 @@ import {
   createEnabledDaemonConfig,
   decodeDaemonConfig,
   encodeDaemonConfig,
+  validateTelegramIdentity,
   validateOnboardingPreview,
   type DaemonConfig,
 } from "../../features/onboarding/index.js";
@@ -37,6 +38,7 @@ export interface LaunchAgentFileSystem {
   writeFileExclusive(path: string, contents: string, mode: number): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
+  removeFile(path: string): Promise<void>;
 }
 
 export interface LaunchAgentAdapterOptions {
@@ -179,7 +181,15 @@ function plainDataFields(
 function snapshotFileSystem(value: unknown): LaunchAgentFileSystem {
   const fields = plainDataFields(
     value,
-    ["inspect", "makeDirectory", "readFile", "writeFileExclusive", "rename", "chmod"],
+    [
+      "inspect",
+      "makeDirectory",
+      "readFile",
+      "writeFileExclusive",
+      "rename",
+      "chmod",
+      "removeFile",
+    ],
     [],
     "INVALID_LAUNCH_AGENT_FILESYSTEM",
   );
@@ -325,7 +335,7 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
 function snapshotActivationManifest(value: unknown): LaunchAgentActivationManifest {
   const manifest = plainDataFields(
     value,
-    ["version", "operation", "installDigest", "install", "enabled"],
+    ["version", "operation", "installDigest", "install", "telegram", "enabled"],
     [],
     "INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST",
   );
@@ -340,6 +350,12 @@ function snapshotActivationManifest(value: unknown): LaunchAgentActivationManife
     throw new Error("INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST");
   }
   const install = snapshotInstallManifest(manifest.install);
+  let telegram;
+  try {
+    telegram = validateTelegramIdentity(manifest.telegram);
+  } catch {
+    throw new Error("INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST");
+  }
   if (
     Object.getOwnPropertyDescriptor(Object.prototype, "toJSON") !== undefined ||
     Object.getOwnPropertyDescriptor(Array.prototype, "toJSON") !== undefined ||
@@ -352,6 +368,7 @@ function snapshotActivationManifest(value: unknown): LaunchAgentActivationManife
     operation: "activate",
     installDigest: manifest.installDigest,
     install,
+    telegram,
     enabled: true,
   });
 }
@@ -675,7 +692,7 @@ function requireActivationConfig(
   if (
     current.onboarding.digest !== install.manifest.onboardingDigest ||
     current.install.digest !== install.digest ||
-    (current.activation !== undefined && current.activation.digest !== activation.digest)
+    ("activation" in current && current.activation.digest !== activation.digest)
   ) {
     throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
   }
@@ -695,9 +712,50 @@ async function writeAtomic(
     return;
   }
   const temporary = `${path}.${requireSafeNonce(nonce())}.tmp`;
-  await fileSystem.writeFileExclusive(temporary, contents, 0o600);
-  await fileSystem.rename(temporary, path);
-  await fileSystem.chmod(path, 0o600);
+  let created = false;
+  let moved = false;
+  let primaryError: unknown;
+  try {
+    await fileSystem.writeFileExclusive(temporary, contents, 0o600);
+    created = true;
+    await fileSystem.rename(temporary, path);
+    moved = true;
+    await fileSystem.chmod(path, 0o600);
+  } catch (error) {
+    primaryError = error;
+  }
+  let cleanupError: unknown;
+  if (created && !moved) {
+    try {
+      await fileSystem.removeFile(temporary);
+    } catch (error) {
+      cleanupError = error;
+      try {
+        await fileSystem.removeFile(temporary);
+      } catch (retryError) {
+        cleanupError = new AggregateError(
+          [error, retryError],
+          "ATOMIC_WRITE_CLEANUP_FAILED",
+        );
+      }
+    }
+  }
+  if (primaryError !== undefined && cleanupError !== undefined) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      "ATOMIC_WRITE_AND_CLEANUP_FAILED",
+    );
+  }
+  if (primaryError !== undefined) {
+    throw primaryError instanceof Error
+      ? primaryError
+      : new Error("ATOMIC_WRITE_FAILED", { cause: primaryError });
+  }
+  if (cleanupError !== undefined) {
+    throw cleanupError instanceof Error
+      ? cleanupError
+      : new Error("ATOMIC_WRITE_CLEANUP_FAILED", { cause: cleanupError });
+  }
 }
 
 async function ensurePrivateFile(
@@ -829,9 +887,7 @@ export function createLaunchAgentAdapter(
           });
           requireCommandResult(result);
         } catch (activationError) {
-          const rollback = current.config.enabled
-            ? createDisabledDaemonConfig(install, preview)
-            : current.config;
+          const rollback = current.config;
           try {
             await writeAtomic(
               snapshot.fileSystem,

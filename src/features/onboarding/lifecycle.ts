@@ -2,6 +2,10 @@ import { types } from "node:util";
 import { posix } from "node:path";
 import { digestCanonical, type Sha256 } from "../../domain/identity.js";
 import {
+  validateTelegramChatId,
+  validateTelegramUserId,
+} from "../approvals/index.js";
+import {
   validateOnboardingPreview,
   type OnboardingPreview,
 } from "./permission-manifest.js";
@@ -39,12 +43,18 @@ export interface LaunchAgentActivationManifest {
   readonly operation: "activate";
   readonly installDigest: Sha256;
   readonly install: LaunchAgentInstallManifest;
+  readonly telegram: TelegramIdentity;
   readonly enabled: true;
 }
 
 export interface ActivationPreview {
   readonly manifest: LaunchAgentActivationManifest;
   readonly digest: Sha256;
+}
+
+export interface TelegramIdentity {
+  readonly userId: string;
+  readonly chatId: string;
 }
 
 export interface LaunchAgentLifecycle {
@@ -64,6 +74,11 @@ export interface ApplyInstallInput {
 
 export interface ApplyInstallDependencies {
   readonly launchAgent: LaunchAgentLifecycle;
+}
+
+export interface PreviewActivationInput {
+  readonly install: InstallPreview;
+  readonly telegram: TelegramIdentity;
 }
 
 const sha256Pattern = /^sha256:[a-f0-9]{64}$/;
@@ -299,12 +314,41 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
   return result;
 }
 
-export function createActivationPreview(install: InstallPreview): ActivationPreview {
+function validateTelegramIdentity(value: unknown): TelegramIdentity {
+  const identity = exactDataRecord(
+    value,
+    ["userId", "chatId"],
+    "INVALID_TELEGRAM_IDENTITY",
+  );
+  try {
+    return Object.freeze({
+      userId: validateTelegramUserId(identity.userId),
+      chatId: validateTelegramChatId(identity.chatId),
+    });
+  } catch {
+    return fail("INVALID_TELEGRAM_IDENTITY");
+  }
+}
+
+export function previewActivation(input: PreviewActivationInput): ActivationPreview {
+  const fields = exactDataRecord(
+    input,
+    ["install", "telegram"],
+    "INVALID_ACTIVATION_PREVIEW_INPUT",
+  );
+  const installFields = exactDataRecord(
+    fields.install,
+    ["manifest", "digest"],
+    "INVALID_ACTIVATION_PREVIEW_INPUT",
+  );
+  const install = requireInstallPreview(fields.install, installFields.digest);
+  const telegram = validateTelegramIdentity(fields.telegram);
   const manifest: LaunchAgentActivationManifest = {
     version: 1,
     operation: "activate",
     installDigest: install.digest,
     install: install.manifest,
+    telegram,
     enabled: true,
   };
   const result: ActivationPreview = { manifest, digest: digestCanonical(manifest) };
@@ -315,11 +359,11 @@ export function createActivationPreview(install: InstallPreview): ActivationPrev
 export async function applyInstall(
   input: ApplyInstallInput,
   dependencies: ApplyInstallDependencies,
-): Promise<ActivationPreview> {
+): Promise<InstallPreview> {
   const fields = exactDataRecord(input, ["preview", "approvedDigest"], "INSTALL_DIGEST_NOT_APPROVED");
   const preview = requireInstallPreview(fields.preview, fields.approvedDigest);
   await dependencies.launchAgent.install(preview.manifest);
-  return createActivationPreview(preview);
+  return preview;
 }
 
-export { exactDataRecord, fail, sha256Pattern };
+export { exactDataRecord, fail, sha256Pattern, validateTelegramIdentity };

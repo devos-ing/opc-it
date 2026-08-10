@@ -18,12 +18,24 @@ export interface UninstallSelection {
   readonly transitionKey: boolean;
 }
 
-export type UninstallCommandResult =
-  | { readonly digest: string; readonly manifest: object }
-  | { readonly digest: string; readonly selection: UninstallSelection }
-  | { readonly removed: UninstallSelection };
+export interface UninstallPreservedAuthority {
+  readonly lifecycleLock: "preserved";
+}
 
-export type UninstallPreviewResult = Exclude<UninstallCommandResult, { readonly removed: UninstallSelection }>;
+export type UninstallCommandResult =
+  | {
+      readonly digest: string;
+      readonly manifest: object;
+      readonly preserved: UninstallPreservedAuthority;
+    }
+  | {
+      readonly digest: string;
+      readonly selection: UninstallSelection;
+      readonly preserved: UninstallPreservedAuthority;
+    }
+  | { readonly removed: UninstallSelection; readonly preserved: UninstallPreservedAuthority };
+
+export type UninstallPreviewResult = Exclude<UninstallCommandResult, { readonly removed: UninstallSelection; readonly preserved: UninstallPreservedAuthority }>;
 
 export interface UninstallCommandService {
   preview(selection: UninstallSelection): Promise<UninstallPreviewResult>;
@@ -42,6 +54,9 @@ const selectionSchema = objectOutput({
   telegramToken: booleanOutput,
   transitionKey: booleanOutput,
 });
+const preservedSchema = objectOutput({
+  lifecycleLock: stringOutput((value) => value === "preserved"),
+});
 
 export const uninstallOutputCodec: OutputCodec<UninstallCommandResult> = outputCodec(
   unionOutput(
@@ -53,10 +68,12 @@ export const uninstallOutputCodec: OutputCodec<UninstallCommandResult> = outputC
         onboardingDigest: digestOutput,
         currentHome: pathOutput,
         selection: selectionSchema,
+        preserved: preservedSchema,
       }),
+      preserved: preservedSchema,
     }),
-    objectOutput({ digest: digestOutput, selection: selectionSchema }),
-    objectOutput({ removed: selectionSchema }),
+    objectOutput({ digest: digestOutput, selection: selectionSchema, preserved: preservedSchema }),
+    objectOutput({ removed: selectionSchema, preserved: preservedSchema }),
   ),
 );
 

@@ -3,13 +3,18 @@ import { digestCanonical } from "../../src/domain/identity.js";
 import {
   activate,
   applyInstall,
+  createDisabledDaemonConfig,
+  createEnabledDaemonConfig,
+  createPausedDaemonConfig,
   decodeDaemonConfig,
   encodeDaemonConfig,
+  previewActivation,
   previewInstall,
   previewOnboarding,
   validateDaemonConfig,
   type InstallPreview,
   type LaunchAgentInstallManifest,
+  type TelegramIdentity,
 } from "../../src/features/onboarding/index.js";
 import { createInMemoryLaunchAgent } from "../../src/platform/macos/in-memory-launch-agent.js";
 import {
@@ -30,6 +35,14 @@ import type {
 } from "../../src/adapters/local/process-runner.js";
 
 const currentHome = "/Users/roy";
+
+function telegramIdentity(): TelegramIdentity {
+  return Object.freeze({ userId: "42", chatId: "-100" });
+}
+
+function activationPreview(install: InstallPreview) {
+  return previewActivation({ install, telegram: telegramIdentity() });
+}
 
 function onboardingPreview() {
   return previewOnboarding({
@@ -139,6 +152,11 @@ function fakeFileSystem() {
       entries.set(path, { ...entry, mode });
       return Promise.resolve();
     },
+    removeFile(path) {
+      operations.push(`remove:${path}`);
+      entries.delete(path);
+      return Promise.resolve();
+    },
   };
   return { entries, operations, fileSystem };
 }
@@ -177,6 +195,125 @@ function productionAdapterFixture(lifecycleLock = exclusiveLifecycleLock()) {
 }
 
 describe("current-user LaunchAgent lifecycle", () => {
+  test("activation preview canonically binds the exact non-secret Telegram identity", () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const telegram: TelegramIdentity = { userId: "42", chatId: "-100" };
+    const preview = previewActivation({ install, telegram });
+    const changed = activationPreview(
+      previewInstall({ onboarding: onboardingPreview(), currentUid: 502 }),
+    );
+
+    expect(preview.manifest.telegram).toEqual(telegram);
+    expect(Object.isFrozen(preview.manifest.telegram)).toBe(true);
+    expect(changed.digest).not.toBe(preview.digest);
+    expect(JSON.stringify(preview)).not.toMatch(/token|secret|authorization/i);
+
+    for (const identity of [
+      { userId: "0", chatId: "-100" },
+      { userId: "01", chatId: "-100" },
+      { userId: "-42", chatId: "-100" },
+      { userId: "9007199254740992", chatId: "-100" },
+      { userId: "42", chatId: "-0" },
+      { userId: "42", chatId: "01" },
+    ]) {
+      expect(() => previewActivation({ install, telegram: identity })).toThrow(
+        "INVALID_TELEGRAM_IDENTITY",
+      );
+    }
+
+    let accesses = 0;
+    const accessorIdentity = { chatId: "-100" } as TelegramIdentity;
+    Object.defineProperty(accessorIdentity, "userId", {
+      enumerable: true,
+      get() {
+        accesses += 1;
+        return "42";
+      },
+    });
+    expect(() => previewActivation({ install, telegram: accessorIdentity })).toThrow(
+      "INVALID_TELEGRAM_IDENTITY",
+    );
+    expect(accesses).toBe(0);
+  });
+
+  test("activation rejects current Telegram pairing drift before LaunchAgent mutation", async () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const preview = previewActivation({
+      install,
+      telegram: { userId: "42", chatId: "-100" },
+    });
+    let calls = 0;
+
+    expect(
+      await activate(
+        {
+          preview,
+          approvedDigest: preview.digest,
+          currentTelegram: { userId: "42", chatId: "-101" },
+        },
+        {
+          launchAgent: {
+            install: () => Promise.resolve(),
+            activate: () => {
+              calls += 1;
+              return Promise.resolve();
+            },
+          },
+        },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "TELEGRAM_IDENTITY_CHANGED" });
+    expect(calls).toBe(0);
+  });
+
+  test("enabled config requires activation Telegram authority while disabled config omits it", () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const activation = previewActivation({
+      install,
+      telegram: { userId: "42", chatId: "-100" },
+    });
+    const disabled = createDisabledDaemonConfig(install);
+    const enabled = createEnabledDaemonConfig(activation);
+    const decodedEnabled = decodeDaemonConfig(encodeDaemonConfig(enabled));
+
+    expect("activation" in disabled).toBe(false);
+    if (!decodedEnabled.enabled) throw new Error("expected enabled config");
+    expect(decodedEnabled.activation.manifest.telegram).toEqual({
+      userId: "42",
+      chatId: "-100",
+    });
+
+    const paused = { ...disabled, activation };
+    freezeGraph(paused);
+    expect(validateDaemonConfig(paused)).toEqual(createPausedDaemonConfig(activation));
+
+    const enabledWithoutTelegram = structuredClone(enabled) as unknown as {
+      activation: { manifest: { telegram?: TelegramIdentity } };
+    };
+    Reflect.deleteProperty(enabledWithoutTelegram.activation.manifest, "telegram");
+    freezeGraph(enabledWithoutTelegram);
+    expect(() => validateDaemonConfig(enabledWithoutTelegram)).toThrow("INVALID_DAEMON_CONFIG");
+  });
+
+  test("paused config retains the exact approved activation authority", () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const activation = activationPreview(install);
+    const paused = createPausedDaemonConfig(activation);
+    const decoded = decodeDaemonConfig(encodeDaemonConfig(paused));
+
+    expect(decoded.enabled).toBe(false);
+    expect("activation" in decoded && decoded.activation).toEqual(activation);
+    expect(Object.isFrozen(decoded)).toBe(true);
+    expect(Object.isFrozen("activation" in decoded && decoded.activation.manifest.telegram)).toBe(
+      true,
+    );
+
+    const changed = activationPreview(
+      previewInstall({ onboarding: onboardingPreview(), currentUid: 502 }),
+    );
+    const mismatched = { ...paused, activation: changed };
+    freezeGraph(mismatched);
+    expect(() => validateDaemonConfig(mismatched)).toThrow("INVALID_DAEMON_CONFIG");
+  });
   test("apply installs a disabled agent and a separately approved digest activates it", async () => {
     const launchAgent = createInMemoryLaunchAgent({ currentHome, currentUid: 501 });
     const installPreview = previewInstall({
@@ -184,10 +321,11 @@ describe("current-user LaunchAgent lifecycle", () => {
       currentUid: 501,
     });
 
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent },
     );
+    const activation = activationPreview(installed);
 
     expect(launchAgent.snapshot()).toMatchObject({
       installed: true,
@@ -210,7 +348,11 @@ describe("current-user LaunchAgent lifecycle", () => {
     );
 
     await activate(
-      { preview: activationPreview, approvedDigest: activationPreview.digest },
+      {
+        preview: activation,
+        approvedDigest: activation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent },
     );
 
@@ -244,15 +386,17 @@ describe("current-user LaunchAgent lifecycle", () => {
     }
 
     const launchAgent = createInMemoryLaunchAgent({ currentHome, currentUid: 501 });
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent },
     );
+    const activation = activationPreview(installed);
     for (const approvedDigest of [undefined, `sha256:${"f".repeat(64)}`]) {
       const error = await activate(
         {
-          preview: activationPreview,
+          preview: activation,
           ...(approvedDigest === undefined ? {} : { approvedDigest }),
+          currentTelegram: telegramIdentity(),
         },
         { launchAgent },
       ).catch((caught: unknown) => caught);
@@ -264,15 +408,19 @@ describe("current-user LaunchAgent lifecycle", () => {
   test("in-memory lifecycle accepts a canonical approval restored from persistence", async () => {
     const launchAgent = createInMemoryLaunchAgent({ currentHome, currentUid: 501 });
     const installPreview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent },
     );
-    const restored = structuredClone(activationPreview);
+    const restored = structuredClone(activationPreview(installed));
     freezeGraph(restored);
 
     await activate(
-      { preview: restored, approvedDigest: restored.digest },
+      {
+        preview: restored,
+        approvedDigest: restored.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent },
     );
     expect(launchAgent.snapshot().loaded).toBe(true);
@@ -281,10 +429,11 @@ describe("current-user LaunchAgent lifecycle", () => {
   test("production adapter atomically writes only the user plist and bootstraps only on activation", async () => {
     const fixture = productionAdapterFixture();
     const installPreview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: fixture.adapter },
     );
+    const activation = activationPreview(installed);
     const path = `${currentHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`;
 
     expect(fixture.commands).toEqual([]);
@@ -329,7 +478,11 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect(fixture.operations.filter((operation) => operation.startsWith("write:"))).toHaveLength(4);
 
     await activate(
-      { preview: activationPreview, approvedDigest: activationPreview.digest },
+      {
+        preview: activation,
+        approvedDigest: activation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: fixture.adapter },
     );
     expect(fixture.commands).toEqual([
@@ -358,9 +511,90 @@ describe("current-user LaunchAgent lifecycle", () => {
       enabled: true,
       onboarding: onboardingPreview(),
       install: installPreview,
-      activation: activationPreview,
+      activation,
     });
     expect(enabledContents).toBe(encodeDaemonConfig(enabledConfig));
+  });
+
+  test("atomic write cleans exclusive temp files and preserves primary plus cleanup failures", async () => {
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const temporary = `${install.manifest.paths.config}.${"09".repeat(16)}.tmp`;
+
+    const renameFailure = fakeFileSystem();
+    const renameFileSystem: LaunchAgentFileSystem = {
+      ...renameFailure.fileSystem,
+      rename: () => Promise.reject(new Error("RENAME_FAILED")),
+    };
+    const renameAdapter = createLaunchAgentAdapter({
+      currentHome,
+      currentUid: 501,
+      trustedPath: "/usr/bin:/bin",
+      fileSystem: renameFileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
+      run: () => Promise.resolve(passed()),
+      nonce: () => "09".repeat(16),
+    });
+    expect(
+      await applyInstall(
+        { preview: install, approvedDigest: install.digest },
+        { launchAgent: renameAdapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "RENAME_FAILED" });
+    expect(renameFailure.entries.has(temporary)).toBe(false);
+
+    const cleanupFailure = fakeFileSystem();
+    let removeAttempts = 0;
+    const cleanupFileSystem: LaunchAgentFileSystem = {
+      ...cleanupFailure.fileSystem,
+      rename: () => Promise.reject(new Error("RENAME_FAILED")),
+      removeFile(path) {
+        removeAttempts += 1;
+        if (removeAttempts === 1) return Promise.reject(new Error("UNLINK_FAILED"));
+        return cleanupFailure.fileSystem.removeFile(path);
+      },
+    };
+    const cleanupAdapter = createLaunchAgentAdapter({
+      currentHome,
+      currentUid: 501,
+      trustedPath: "/usr/bin:/bin",
+      fileSystem: cleanupFileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
+      run: () => Promise.resolve(passed()),
+      nonce: () => "09".repeat(16),
+    });
+    const aggregate = await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: cleanupAdapter },
+    ).catch((error: unknown) => error);
+    expect(aggregate).toBeInstanceOf(AggregateError);
+    expect((aggregate as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: "RENAME_FAILED" }),
+      expect.objectContaining({ message: "UNLINK_FAILED" }),
+    ]);
+    expect(removeAttempts).toBe(2);
+    expect(cleanupFailure.entries.has(temporary)).toBe(false);
+
+    const chmodFailure = fakeFileSystem();
+    const chmodFileSystem: LaunchAgentFileSystem = {
+      ...chmodFailure.fileSystem,
+      chmod: () => Promise.reject(new Error("CHMOD_FAILED")),
+    };
+    const chmodAdapter = createLaunchAgentAdapter({
+      currentHome,
+      currentUid: 501,
+      trustedPath: "/usr/bin:/bin",
+      fileSystem: chmodFileSystem,
+      lifecycleLock: exclusiveLifecycleLock(),
+      run: () => Promise.resolve(passed()),
+      nonce: () => "09".repeat(16),
+    });
+    expect(
+      await applyInstall(
+        { preview: install, approvedDigest: install.digest },
+        { launchAgent: chmodAdapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "CHMOD_FAILED" });
+    expect(chmodFailure.entries.has(temporary)).toBe(false);
   });
 
   test("fails closed on symlinks, uid drift, and mutated argv", async () => {
@@ -463,14 +697,15 @@ describe("current-user LaunchAgent lifecycle", () => {
   test("production activation independently rejects an install digest mismatch", async () => {
     const fixture = productionAdapterFixture();
     const installPreview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: fixture.adapter },
     );
+    const activation = activationPreview(installed);
     const forged = {
-      ...activationPreview.manifest,
+      ...activation.manifest,
       installDigest: `sha256:${"0".repeat(64)}`,
-    } as typeof activationPreview.manifest;
+    } as typeof activation.manifest;
     Object.freeze(forged);
 
     expect(
@@ -479,13 +714,46 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect(fixture.commands).toEqual([]);
   });
 
+  test("activation rejects a paused config bound to a different approved pairing before launchctl", async () => {
+    const fixture = productionAdapterFixture();
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    const approved = activationPreview(install);
+    const changed = previewActivation({
+      install,
+      telegram: { userId: "42", chatId: "-101" },
+    });
+    const configEntry = fixture.entries.get(install.manifest.paths.config);
+    if (configEntry === undefined) throw new Error("missing paused fixture config");
+    fixture.entries.set(install.manifest.paths.config, {
+      ...configEntry,
+      contents: encodeDaemonConfig(createPausedDaemonConfig(changed)),
+    });
+
+    expect(
+      await activate(
+        {
+          preview: approved,
+          approvedDigest: approved.digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+    expect(fixture.commands).toEqual([]);
+  });
+
   test("activation rejects a plist that became group or world writable", async () => {
     const fixture = productionAdapterFixture();
     const installPreview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: fixture.adapter },
     );
+    const activation = activationPreview(installed);
     const path = installPreview.manifest.paths.launchAgent;
     const entry = fixture.entries.get(path);
     if (entry === undefined) throw new Error("missing fixture plist");
@@ -493,7 +761,11 @@ describe("current-user LaunchAgent lifecycle", () => {
 
     expect(
       await activate(
-        { preview: activationPreview, approvedDigest: activationPreview.digest },
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
         { launchAgent: fixture.adapter },
       ).catch((error: unknown) => error),
     ).toMatchObject({ message: "UNSAFE_LAUNCH_AGENT_PERMISSIONS" });
@@ -563,12 +835,17 @@ describe("current-user LaunchAgent lifecycle", () => {
       });
 
     const firstAdapter = createAdapter();
-    const activationPreview = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: firstAdapter },
     );
+    const activation = activationPreview(installed);
     await activate(
-      { preview: activationPreview, approvedDigest: activationPreview.digest },
+      {
+        preview: activation,
+        approvedDigest: activation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: firstAdapter },
     );
     const stdoutEntry = fake.entries.get(installPreview.manifest.paths.stdout);
@@ -580,7 +857,11 @@ describe("current-user LaunchAgent lifecycle", () => {
 
     const restartedAdapter = createAdapter();
     await activate(
-      { preview: activationPreview, approvedDigest: activationPreview.digest },
+      {
+        preview: activation,
+        approvedDigest: activation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: restartedAdapter },
     );
     expect(bootstrapCalls).toBe(1);
@@ -652,12 +933,17 @@ describe("current-user LaunchAgent lifecycle", () => {
         Promise.resolve(request.args[0] === "print" ? missingService() : failedBootstrap),
       nonce: () => "04".repeat(16),
     });
-    const normalActivation = await applyInstall(
+    const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: normalAdapter },
     );
+    const normalActivation = activationPreview(installed);
     const bootstrapError = await activate(
-      { preview: normalActivation, approvedDigest: normalActivation.digest },
+      {
+        preview: normalActivation,
+        approvedDigest: normalActivation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: normalAdapter },
     ).catch((error: unknown) => error);
     expect(bootstrapError).toMatchObject({
@@ -672,6 +958,30 @@ describe("current-user LaunchAgent lifecycle", () => {
       onboarding: onboardingPreview(),
       install: installPreview,
     });
+    expect("activation" in decodeDaemonConfig(rolledBack)).toBe(false);
+
+    const configPath = installPreview.manifest.paths.config;
+    const configEntry = normal.entries.get(configPath);
+    if (configEntry === undefined) throw new Error("missing paused config fixture");
+    normal.entries.set(configPath, {
+      ...configEntry,
+      contents: encodeDaemonConfig(createPausedDaemonConfig(normalActivation)),
+    });
+    await activate(
+      {
+        preview: normalActivation,
+        approvedDigest: normalActivation.digest,
+        currentTelegram: telegramIdentity(),
+      },
+      { launchAgent: normalAdapter },
+    ).catch(() => undefined);
+    const pausedRollback = normal.entries.get(configPath)?.contents;
+    if (pausedRollback === undefined) throw new Error("missing paused rollback config");
+    const decodedPausedRollback = decodeDaemonConfig(pausedRollback);
+    expect(decodedPausedRollback.enabled).toBe(false);
+    expect(
+      "activation" in decodedPausedRollback && decodedPausedRollback.activation,
+    ).toEqual(normalActivation);
 
     const rollback = fakeFileSystem();
     let rejectDisabledWrite = false;
@@ -700,13 +1010,18 @@ describe("current-user LaunchAgent lifecycle", () => {
         Promise.resolve(request.args[0] === "print" ? missingService() : failedBootstrap),
       nonce: () => "05".repeat(16),
     });
-    const rollbackActivation = await applyInstall(
+    const rollbackInstalled = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
       { launchAgent: rollbackAdapter },
     );
+    const rollbackActivation = activationPreview(rollbackInstalled);
     rejectDisabledWrite = true;
     const aggregate = await activate(
-      { preview: rollbackActivation, approvedDigest: rollbackActivation.digest },
+      {
+        preview: rollbackActivation,
+        approvedDigest: rollbackActivation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: rollbackAdapter },
     ).catch((error: unknown) => error);
     expect(aggregate).toBeInstanceOf(AggregateError);
@@ -799,10 +1114,11 @@ describe("current-user LaunchAgent lifecycle", () => {
   test("activation preserves the closed decoder error when on-disk config authority is corrupt", async () => {
     const fixture = productionAdapterFixture();
     const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activation = await applyInstall(
+    const installed = await applyInstall(
       { preview: install, approvedDigest: install.digest },
       { launchAgent: fixture.adapter },
     );
+    const activation = activationPreview(installed);
     const entry = fixture.entries.get(install.manifest.paths.config);
     if (entry === undefined) throw new Error("missing config fixture");
     fixture.entries.set(install.manifest.paths.config, {
@@ -812,7 +1128,11 @@ describe("current-user LaunchAgent lifecycle", () => {
 
     expect(
       await activate(
-        { preview: activation, approvedDigest: activation.digest },
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
         { launchAgent: fixture.adapter },
       ).catch((error: unknown) => error),
     ).toMatchObject({
@@ -903,17 +1223,22 @@ describe("current-user LaunchAgent lifecycle", () => {
       nonce: () => "06".repeat(16),
     });
     const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const activation = await applyInstall(
+    const installed = await applyInstall(
       { preview: install, approvedDigest: install.digest },
       { launchAgent: adapter },
     );
+    const activation = activationPreview(installed);
     const configPath = install.manifest.paths.config;
     const staleContents = fake.entries.get(configPath)?.contents;
     if (staleContents === undefined) throw new Error("missing stale config");
     const staleConfig = decodeDaemonConfig(staleContents);
 
     const activating = activate(
-      { preview: activation, approvedDigest: activation.digest },
+      {
+        preview: activation,
+        approvedDigest: activation.digest,
+        currentTelegram: telegramIdentity(),
+      },
       { launchAgent: adapter },
     );
     await printStarted;

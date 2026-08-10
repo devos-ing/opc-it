@@ -21,7 +21,9 @@ export {
 export {
   applyInstall,
   launchAgentLabel,
+  previewActivation,
   previewInstall,
+  validateTelegramIdentity,
   type ActivationPreview,
   type ApplyInstallDependencies,
   type ApplyInstallInput,
@@ -30,11 +32,14 @@ export {
   type LaunchAgentInstallManifest,
   type LaunchAgentLifecycle,
   type PreviewInstallInput,
+  type PreviewActivationInput,
+  type TelegramIdentity,
 } from "./lifecycle.js";
 export {
   activate,
   createDisabledDaemonConfig,
   createEnabledDaemonConfig,
+  createPausedDaemonConfig,
   decodeDaemonConfig,
   encodeDaemonConfig,
   validateActivationPreview,
