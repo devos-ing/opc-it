@@ -14,7 +14,15 @@ function projectPath(filename) {
 }
 
 function projectSpecifier(specifier) {
-  const normalized = posix.normalize(specifier.replaceAll("\\", "/"));
+  let candidate = specifier;
+  if (specifier.startsWith("file://")) {
+    try {
+      candidate = fileURLToPath(specifier);
+    } catch {
+      return undefined;
+    }
+  }
+  const normalized = posix.normalize(candidate.replaceAll("\\", "/"));
   if (normalized.startsWith(`${repositoryRoot}/`)) {
     return normalized.slice(repositoryRoot.length + 1);
   }

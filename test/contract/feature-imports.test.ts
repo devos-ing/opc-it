@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ESLint } from "eslint";
 import { posix } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const featureRoot = "src/features/";
@@ -74,7 +75,15 @@ function resolveProjectImport(importer: string, specifier: string): string | und
     return posix.normalize(posix.join(posix.dirname(importer), specifier));
   }
   if (specifier.startsWith("src/")) return posix.normalize(specifier);
-  const normalized = posix.normalize(specifier);
+  let candidate = specifier;
+  if (specifier.startsWith("file://")) {
+    try {
+      candidate = fileURLToPath(specifier);
+    } catch {
+      return undefined;
+    }
+  }
+  const normalized = posix.normalize(candidate.replaceAll("\\", "/"));
   if (normalized.startsWith(`${repositoryRoot}/`)) {
     return normalized.slice(repositoryRoot.length + 1);
   }
@@ -284,6 +293,56 @@ describe("every module form preserves feature seams", () => {
     expect(
       results
         .flat()
+        .flatMap((result) => result.messages)
+        .filter((message) => message.ruleId === "opc-feature-seams/imports"),
+    ).toEqual([]);
+  });
+
+  test("rejects workspace file URL bypasses while preserving public and external URLs", async () => {
+    const workspaceUrl = pathToFileURL(`${repositoryRoot}/`);
+    const deepFeatureUrl = new URL("src/features/queue/private.js", workspaceUrl).href;
+    const publicFeatureUrl = new URL("src/features/queue/index.js", workspaceUrl).href;
+    const platformUrl = new URL("src/platform/private.js", workspaceUrl).href;
+    const externalUrl = pathToFileURL("/opt/vendor/src/features/queue/private.js").href;
+    const callerSource = `
+      import "${deepFeatureUrl}";
+      import "${publicFeatureUrl}";
+      import "${externalUrl}";
+    `;
+    const allowedCallerSource = `
+      import "${publicFeatureUrl}";
+      import "${externalUrl}";
+    `;
+    const featureSource = `
+      import "${platformUrl}";
+      import "${externalUrl}";
+    `;
+
+    expect(importViolations("test/contract/mutation.ts", callerSource)).toEqual([
+      `test/contract/mutation.ts:${deepFeatureUrl}:deep-import`,
+    ]);
+    expect(importViolations("test/contract/allowed.ts", allowedCallerSource)).toEqual([]);
+    expect(importViolations("src/features/planning/mutation.ts", featureSource)).toEqual([
+      `src/features/planning/mutation.ts:${platformUrl}:platform`,
+    ]);
+
+    const results = await Promise.all([
+      eslint.lintText(callerSource, { filePath: "test/contract/feature-imports.test.ts" }),
+      eslint.lintText(featureSource, { filePath: "src/features/planning/index.ts" }),
+    ]);
+    expect(
+      results.map((result) =>
+        result.some((entry) =>
+          entry.messages.some((message) => message.ruleId === "opc-feature-seams/imports"),
+        ),
+      ),
+    ).toEqual([true, true]);
+    expect(
+      (
+        await eslint.lintText(allowedCallerSource, {
+          filePath: "test/contract/feature-imports.test.ts",
+        })
+      )
         .flatMap((result) => result.messages)
         .filter((message) => message.ruleId === "opc-feature-seams/imports"),
     ).toEqual([]);
