@@ -1,5 +1,9 @@
 import type { DeliveryLoop, TickResult } from "./delivery-loop.js";
 import { QueueTransportError } from "../features/queue/index.js";
+import {
+  snapshotProcessLockOwnerId,
+  type ProcessLock,
+} from "./process-lock.js";
 
 const successfulPollIntervalMs = 60_000;
 const successfulPollJitterMs = 6_000;
@@ -7,6 +11,8 @@ const maximumTransientBackoffMs = 15 * 60_000;
 const maximumRetryAfterMs = 2_147_483_647;
 
 export interface RunDaemonDependencies {
+  readonly processLock: ProcessLock;
+  readonly ownerId: string;
   readonly loop: DeliveryLoop;
   readonly sleep: (delayMs: number, signal: AbortSignal) => Promise<void>;
   readonly random: () => number;
@@ -114,32 +120,38 @@ async function sleepUntilReady(
 }
 
 export async function runDaemon(dependencies: RunDaemonDependencies): Promise<void> {
-  let retryAttempt = 0;
-  let previousNowMs: number | undefined;
-  while (!isAborted(dependencies.signal)) {
-    const polledAt = readNow(dependencies.now, previousNowMs);
-    previousNowMs = polledAt.getTime();
-    let result: TickResult;
-    try {
-      result = await dependencies.loop.tick(
-        new Date(polledAt.getTime()),
-        dependencies.signal,
-      );
-    } catch (error) {
+  const ownerId = snapshotProcessLockOwnerId(dependencies.ownerId);
+  const lease = await dependencies.processLock.acquire(ownerId);
+  try {
+    let retryAttempt = 0;
+    let previousNowMs: number | undefined;
+    while (!isAborted(dependencies.signal)) {
+      const polledAt = readNow(dependencies.now, previousNowMs);
+      previousNowMs = polledAt.getTime();
+      let result: TickResult;
+      try {
+        result = await dependencies.loop.tick(
+          new Date(polledAt.getTime()),
+          dependencies.signal,
+        );
+      } catch (error) {
+        if (isAborted(dependencies.signal)) return;
+        const delayMs = retryDelay(error, polledAt.getTime(), retryAttempt);
+        retryAttempt += 1;
+        await sleepUntilReady(dependencies, delayMs);
+        continue;
+      }
+      retryAttempt = 0;
+      if (result.status !== "disabled" && result.repositoriesChecked > 0) {
+        await dependencies.onHealth(new Date(polledAt.getTime()));
+      }
       if (isAborted(dependencies.signal)) return;
-      const delayMs = retryDelay(error, polledAt.getTime(), retryAttempt);
-      retryAttempt += 1;
-      await sleepUntilReady(dependencies, delayMs);
-      continue;
+      await sleepUntilReady(
+        dependencies,
+        nextSuccessfulPollDelay(dependencies.random),
+      );
     }
-    retryAttempt = 0;
-    if (result.status !== "disabled" && result.repositoriesChecked > 0) {
-      await dependencies.onHealth(new Date(polledAt.getTime()));
-    }
-    if (isAborted(dependencies.signal)) return;
-    await sleepUntilReady(
-      dependencies,
-      nextSuccessfulPollDelay(dependencies.random),
-    );
+  } finally {
+    await lease.release();
   }
 }

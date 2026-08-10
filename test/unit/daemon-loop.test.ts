@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { runDaemon } from "../../src/runtime/daemon.js";
+import {
+  runDaemon as runDaemonWithProcessLock,
+  type RunDaemonDependencies,
+} from "../../src/runtime/daemon.js";
+import {
+  ProcessLockUnavailableError,
+  type ProcessLock,
+} from "../../src/runtime/process-lock.js";
 import {
   createDeliveryLoop,
   type DeliveryLoop,
@@ -28,6 +35,256 @@ async function rejectionOf(action: () => Promise<unknown>): Promise<unknown> {
   }
   throw new Error("EXPECTED_REJECTION");
 }
+
+function createExclusiveTestProcessLock(): {
+  readonly lock: ProcessLock;
+  readonly releases: () => number;
+} {
+  let activeToken: object | undefined;
+  let releaseCount = 0;
+  return {
+    lock: {
+      acquire: (ownerId) => {
+        if (activeToken !== undefined) {
+          return Promise.reject(new ProcessLockUnavailableError());
+        }
+        const token = {};
+        activeToken = token;
+        let released = false;
+        return Promise.resolve(Object.freeze({
+          ownerId,
+          release: () => {
+            if (released || activeToken !== token) return Promise.resolve();
+            released = true;
+            activeToken = undefined;
+            releaseCount += 1;
+            return Promise.resolve();
+          },
+        }));
+      },
+    },
+    releases: () => releaseCount,
+  };
+}
+
+function runDaemon(
+  dependencies: Omit<RunDaemonDependencies, "processLock" | "ownerId">,
+): Promise<void> {
+  return runDaemonWithProcessLock({
+    ...dependencies,
+    processLock: createExclusiveTestProcessLock().lock,
+    ownerId: "daemon:test",
+  });
+}
+
+test("a second local daemon fails stably before starting a tick", async () => {
+  const controller = new AbortController();
+  const processLock = createExclusiveTestProcessLock();
+  let markFirstTickStarted = (): void => undefined;
+  const firstTickStarted = new Promise<void>((resolve) => {
+    markFirstTickStarted = resolve;
+  });
+  const firstRunning = runDaemonWithProcessLock({
+    processLock: processLock.lock,
+    ownerId: "daemon:first",
+    loop: {
+      tick: (_now, signal) => {
+        markFirstTickStarted();
+        return new Promise((resolve) => {
+          signal?.addEventListener("abort", () => {
+            resolve({ status: "idle", repositoriesChecked: 0 });
+          }, { once: true });
+        });
+      },
+    },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: controller.signal,
+    onHealth: () => undefined,
+  });
+
+  await firstTickStarted;
+  let secondTicks = 0;
+  const unavailable = await rejectionOf(() => runDaemonWithProcessLock({
+    processLock: processLock.lock,
+    ownerId: "daemon:second",
+    loop: {
+      tick: () => {
+        secondTicks += 1;
+        throw new Error("SECOND_DAEMON_TICKED");
+      },
+    },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: new AbortController().signal,
+    onHealth: () => undefined,
+  }));
+
+  try {
+    expect(unavailable).toBeInstanceOf(ProcessLockUnavailableError);
+    expect(unavailable).toMatchObject({ code: "PROCESS_LOCK_UNAVAILABLE" });
+    expect(secondTicks).toBe(0);
+  } finally {
+    controller.abort();
+    await firstRunning;
+  }
+  expect(processLock.releases()).toBe(1);
+});
+
+test("the process lease is released only after an aborted tick settles", async () => {
+  const controller = new AbortController();
+  const events: string[] = [];
+  let settleTick = (): void => undefined;
+  let markTickStarted = (): void => undefined;
+  const tickStarted = new Promise<void>((resolve) => {
+    markTickStarted = resolve;
+  });
+  const lock: ProcessLock = {
+    acquire: () => {
+      events.push("acquire");
+      return Promise.resolve({
+        ownerId: "daemon:ordered",
+        release: () => {
+          events.push("release");
+          return Promise.resolve();
+        },
+      });
+    },
+  };
+  const running = runDaemonWithProcessLock({
+    processLock: lock,
+    ownerId: "daemon:ordered",
+    loop: {
+      tick: () => {
+        events.push("tick");
+        markTickStarted();
+        return new Promise((resolve) => {
+          settleTick = () => {
+            events.push("tick-settled");
+            resolve({ status: "idle", repositoriesChecked: 0 });
+          };
+        });
+      },
+    },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: controller.signal,
+    onHealth: () => undefined,
+  });
+
+  await tickStarted;
+  controller.abort();
+  await Promise.resolve();
+  try {
+    expect(events).toEqual(["acquire", "tick"]);
+  } finally {
+    settleTick();
+    await running;
+  }
+  expect(events).toEqual(["acquire", "tick", "tick-settled", "release"]);
+});
+
+test("the process lease is released on a fatal tick error", async () => {
+  const marker = new Error("FATAL_TICK_ERROR");
+  const processLock = createExclusiveTestProcessLock();
+  const error = await rejectionOf(() => runDaemonWithProcessLock({
+    processLock: processLock.lock,
+    ownerId: "daemon:fatal",
+    loop: { tick: () => Promise.reject(marker) },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: new AbortController().signal,
+    onHealth: () => undefined,
+  }));
+
+  expect(error).toBe(marker);
+  expect(processLock.releases()).toBe(1);
+});
+
+test("the process lease is released after a successful poll exits during sleep", async () => {
+  const controller = new AbortController();
+  const processLock = createExclusiveTestProcessLock();
+  let healthCalls = 0;
+  await runDaemonWithProcessLock({
+    processLock: processLock.lock,
+    ownerId: "daemon:successful",
+    loop: {
+      tick: () => Promise.resolve({ status: "idle", repositoriesChecked: 1 }),
+    },
+    sleep: () => {
+      controller.abort();
+      return Promise.resolve();
+    },
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: controller.signal,
+    onHealth: () => {
+      healthCalls += 1;
+    },
+  });
+
+  expect(healthCalls).toBe(1);
+  expect(processLock.releases()).toBe(1);
+});
+
+test("invalid daemon owner identity fails before lock acquisition", async () => {
+  let acquireCalls = 0;
+  const error = await rejectionOf(() => runDaemonWithProcessLock({
+    processLock: {
+      acquire: () => {
+        acquireCalls += 1;
+        throw new Error("LOCK_ACQUIRED_WITH_INVALID_OWNER");
+      },
+    },
+    ownerId: "../daemon",
+    loop: { tick: () => Promise.resolve({ status: "idle", repositoriesChecked: 0 }) },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: new AbortController().signal,
+    onHealth: () => undefined,
+  }));
+
+  expect((error as Error).message).toBe("INVALID_PROCESS_LOCK_OWNER_ID");
+  expect(acquireCalls).toBe(0);
+});
+
+test("daemon owner identity is read once and snapshotted before acquisition", async () => {
+  const controller = new AbortController();
+  const processLock = createExclusiveTestProcessLock();
+  let ownerReads = 0;
+  const dependencies: RunDaemonDependencies = {
+    processLock: processLock.lock,
+    ownerId: "daemon:placeholder",
+    loop: {
+      tick: () => Promise.resolve({ status: "idle", repositoriesChecked: 0 }),
+    },
+    sleep: () => {
+      controller.abort();
+      return Promise.resolve();
+    },
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: controller.signal,
+    onHealth: () => undefined,
+  };
+  Object.defineProperty(dependencies, "ownerId", {
+    enumerable: true,
+    get() {
+      ownerReads += 1;
+      return ownerReads === 1 ? "daemon:snapshot" : "../changed";
+    },
+  });
+
+  await runDaemonWithProcessLock(dependencies);
+
+  expect(ownerReads).toBe(1);
+  expect(processLock.releases()).toBe(1);
+});
 
 test("a successful poll publishes health and waits sixty seconds plus bounded jitter", async () => {
   const controller = new AbortController();
