@@ -1349,6 +1349,44 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect(databaseLocked).toBe(false);
     expect(closes).toBe(4);
 
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      const artifact = `${lockPath}${suffix}`;
+      fake.entries.set(artifact, { kind: "symlink", uid: 501, mode: 0o600 });
+      expect(
+        await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+      ).toMatchObject({ message: "UNSAFE_LIFECYCLE_LOCK_PATH" });
+      fake.entries.set(artifact, { kind: "file", uid: 501, mode: 0o644, contents: "" });
+      expect(
+        await first.withLock(configPath, () => Promise.resolve()).catch((error: unknown) => error),
+      ).toMatchObject({ message: "UNSAFE_LIFECYCLE_LOCK_PERMISSIONS" });
+      fake.entries.delete(artifact);
+    }
+
+    let driftOnClose = true;
+    const cleanupLock = createSqliteLifecycleConfigLock({
+      ...options,
+      openDatabase: () => ({
+        run: () => undefined,
+        close() {
+          if (driftOnClose) {
+            fake.entries.set(`${lockPath}-journal`, {
+              kind: "symlink",
+              uid: 501,
+              mode: 0o600,
+            });
+          }
+        },
+      }),
+    });
+    expect(
+      await cleanupLock
+        .withLock(configPath, () => Promise.resolve())
+        .catch((error: unknown) => error),
+    ).toMatchObject({ message: "UNSAFE_LIFECYCLE_LOCK_PATH" });
+    driftOnClose = false;
+    fake.entries.delete(`${lockPath}-journal`);
+    await cleanupLock.withLock(configPath, () => Promise.resolve());
+
     const privateEntry = fake.entries.get(lockPath);
     if (privateEntry === undefined) throw new Error("missing lock file");
     fake.entries.set(lockPath, { ...privateEntry, mode: 0o644 });

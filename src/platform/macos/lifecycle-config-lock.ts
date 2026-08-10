@@ -277,6 +277,22 @@ function requirePrivateFile(entry: LifecycleConfigLockFileEntry, uid: number): v
   }
 }
 
+const lifecycleLockSidecarSuffixes = ["-wal", "-shm", "-journal"] as const;
+
+async function validatePrivateLockArtifacts(
+  fileSystem: LifecycleConfigLockFileSystem,
+  lockPath: string,
+  uid: number,
+  requireMain: boolean,
+): Promise<void> {
+  const main = snapshotEntry(await fileSystem.inspect(lockPath));
+  if (main.kind !== "missing" || requireMain) requirePrivateFile(main, uid);
+  for (const suffix of lifecycleLockSidecarSuffixes) {
+    const entry = snapshotEntry(await fileSystem.inspect(`${lockPath}${suffix}`));
+    if (entry.kind !== "missing") requirePrivateFile(entry, uid);
+  }
+}
+
 function errorCode(error: unknown): unknown {
   if (typeof error !== "object" || error === null || types.isProxy(error)) return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(error, "code");
@@ -302,6 +318,7 @@ async function ensurePrivateLockFile(
   ]) {
     requireDirectory(snapshotEntry(await fileSystem.inspect(directory)), currentUid);
   }
+  await validatePrivateLockArtifacts(fileSystem, lockPath, currentUid, false);
   let entry = snapshotEntry(await fileSystem.inspect(lockPath));
   if (entry.kind === "missing") {
     try {
@@ -313,7 +330,7 @@ async function ensurePrivateLockFile(
   }
   requirePrivateFile(entry, currentUid);
   await fileSystem.chmod(lockPath, 0o600);
-  requirePrivateFile(snapshotEntry(await fileSystem.inspect(lockPath)), currentUid);
+  await validatePrivateLockArtifacts(fileSystem, lockPath, currentUid, true);
 }
 
 export function createSqliteLifecycleConfigLock(
@@ -371,9 +388,11 @@ export function createSqliteLifecycleConfigLock(
       }
       if (lockPrepared) {
         try {
-          requirePrivateFile(
-            snapshotEntry(await fileSystem.inspect(lockPath)),
+          await validatePrivateLockArtifacts(
+            fileSystem,
+            lockPath,
             snapshot.currentUid,
+            true,
           );
         } catch (error) {
           cleanupErrors.push(error);

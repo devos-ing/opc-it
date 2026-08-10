@@ -69,14 +69,31 @@ export function createProductionCliFactories(
   const now = injected.now ?? (() => new Date());
   const sleep = injected.sleep ?? ((delayMs: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const resolveDaemonConfig = injected.loadDaemonConfig ?? readDaemonConfig;
   const withApprovalDatabase = async <T>(
     install: ReturnType<typeof previewInstall>,
+    authority:
+      | { readonly mode: "pairing" }
+      | { readonly mode: "activation"; readonly activationDigest: string },
     operation: (database: Database) => Promise<T>,
   ): Promise<T> => {
     const path = `${install.manifest.onboarding.manifest.paths.applicationSupport}/approvals.sqlite`;
     return resolveTelegramLifecycleLock(install).withLock(
       install.manifest.paths.config,
       async () => {
+      const current = validateDaemonConfig(
+        await resolveDaemonConfig(install.manifest.paths.config),
+      );
+      const baseChanged =
+        current.install.digest !== install.digest ||
+        current.install.manifest.paths.config !== install.manifest.paths.config ||
+        current.install.manifest.currentUid !== currentUid();
+      const stateChanged = authority.mode === "pairing"
+        ? current.enabled || "activation" in current
+        : "activation" in current && current.activation.digest !== authority.activationDigest;
+      if (baseChanged || stateChanged) {
+        throw new Error("TELEGRAM_ONBOARDING_CONFIG_CHANGED");
+      }
       await prepareApprovalDatabase(path);
       const database = openApprovalDatabase(path);
       let primary: unknown;
@@ -120,10 +137,18 @@ export function createProductionCliFactories(
     now,
     sleep,
   });
-  const resolveTelegramIdentity = injected.telegramIdentity ??
-    ((install: ReturnType<typeof previewInstall>) =>
-      withApprovalDatabase(install, (database) => loadDurableTelegramIdentity(database)));
-  const resolveDaemonConfig = injected.loadDaemonConfig ?? readDaemonConfig;
+  const injectedTelegramIdentity = injected.telegramIdentity;
+  const resolveTelegramIdentity = injectedTelegramIdentity === undefined
+    ? (install: ReturnType<typeof previewInstall>, activationDigest: string) =>
+      withApprovalDatabase(
+        install,
+        { mode: "activation", activationDigest },
+        (database) => loadDurableTelegramIdentity(database),
+      )
+    : (install: ReturnType<typeof previewInstall>, activationDigest: string) => {
+      void activationDigest;
+      return injectedTelegramIdentity(install);
+    };
   const persistDaemonConfig = injected.writeDaemonConfig ?? writeDaemonConfig;
   const inspectState = injected.inspectOperational ?? inspectOperationalState;
   const loadCurrentConfig = async () => {
@@ -150,7 +175,7 @@ export function createProductionCliFactories(
             { preview, approvedDigest: input.approvedDigest },
             { launchAgent: resolveLaunchAgent(onboarding) },
           );
-          return withApprovalDatabase(installed, (database) =>
+          return withApprovalDatabase(installed, { mode: "pairing" }, (database) =>
             beginTelegramOnboarding(
               installed,
               token,
@@ -163,7 +188,7 @@ export function createProductionCliFactories(
           if (preview.manifest.installDigest !== install.digest) {
             throw new Error("TELEGRAM_PAIRING_AUTHORITY_CHANGED");
           }
-          return withApprovalDatabase(install, (database) =>
+          return withApprovalDatabase(install, { mode: "pairing" }, (database) =>
             completeTelegramOnboarding(
               install,
               preview,
@@ -222,10 +247,13 @@ export function createProductionCliFactories(
           {
             preview,
             approvedDigest: input.approvedDigest,
-            currentTelegram: await resolveTelegramIdentity(Object.freeze({
-              manifest: preview.manifest.install,
-              digest: preview.manifest.installDigest,
-            })),
+            currentTelegram: await resolveTelegramIdentity(
+              Object.freeze({
+                manifest: preview.manifest.install,
+                digest: preview.manifest.installDigest,
+              }),
+              preview.digest,
+            ),
           },
           { launchAgent: resolveLaunchAgent(onboarding) },
         );

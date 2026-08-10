@@ -2,9 +2,9 @@ import { types } from "node:util";
 import { posix } from "node:path";
 import { digestCanonical, type Sha256 } from "../../domain/identity.js";
 import {
-  validateTelegramChatId,
-  validateTelegramUserId,
-} from "../approvals/index.js";
+  validateTelegramIdentity,
+  type TelegramIdentity,
+} from "../../domain/telegram-identity.js";
 import {
   validateOnboardingPreview,
   type OnboardingPreview,
@@ -50,11 +50,6 @@ export interface LaunchAgentActivationManifest {
 export interface ActivationPreview {
   readonly manifest: LaunchAgentActivationManifest;
   readonly digest: Sha256;
-}
-
-export interface TelegramIdentity {
-  readonly userId: string;
-  readonly chatId: string;
 }
 
 export interface LaunchAgentLifecycle {
@@ -314,22 +309,6 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
   return result;
 }
 
-function validateTelegramIdentity(value: unknown): TelegramIdentity {
-  const identity = exactDataRecord(
-    value,
-    ["userId", "chatId"],
-    "INVALID_TELEGRAM_IDENTITY",
-  );
-  try {
-    return Object.freeze({
-      userId: validateTelegramUserId(identity.userId),
-      chatId: validateTelegramChatId(identity.chatId),
-    });
-  } catch {
-    return fail("INVALID_TELEGRAM_IDENTITY");
-  }
-}
-
 export function previewActivation(input: PreviewActivationInput): ActivationPreview {
   const fields = exactDataRecord(
     input,
@@ -366,4 +345,10 @@ export async function applyInstall(
   return preview;
 }
 
-export { exactDataRecord, fail, sha256Pattern, validateTelegramIdentity };
+export {
+  exactDataRecord,
+  fail,
+  sha256Pattern,
+  validateTelegramIdentity,
+  type TelegramIdentity,
+};

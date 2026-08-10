@@ -36,12 +36,14 @@ import { createHmacApprovalTransitionSigner } from "../../src/platform/approvals
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 import { createProductionApprovalQueue } from "../../src/cli/production/approval-queue.js";
 import { applyProductionUninstall } from "../../src/cli/production/uninstall.js";
+import { validateTelegramPairingStagePreview } from "../../src/cli/production/telegram-onboarding.js";
 import {
   runProductionDaemon,
   runProductionDaemonRuntime,
 } from "../../src/cli/production/daemon.js";
 import { createSqliteApprovalStore } from "../../src/platform/approvals/telegram-approval-adapter.js";
 import { validV2Contract } from "../fixtures/v2-contract.js";
+import { digestCanonical } from "../../src/domain/identity.js";
 
 const approvedDigest = `sha256:${"0".repeat(64)}`;
 const changedDigest = `sha256:${"1".repeat(64)}`;
@@ -189,7 +191,7 @@ async function runProductionApprovalScenario(
               : {
                   kind: "directory" as const,
                   uid: config.install.manifest.currentUid,
-                  mode: 0o700,
+                  mode: path === config.install.manifest.currentHome ? 0o755 : 0o700,
                 },
           ),
           writeFileExclusive: (path) => {
@@ -348,10 +350,12 @@ describe("current-user lifecycle CLI", () => {
     process.env.OPC_APPROVED_GITHUB_IDENTITY = "github.com:roy";
     process.env.OPC_APPROVED_REPOSITORIES = '["roy/private-app"]';
     const launchCalls: string[] = [];
+    let installedConfig: DaemonConfig | undefined;
     let liveGitHubLogin = "roy";
     let transitionKey: string | undefined;
     let pairingCode = "";
     let secretReads = 0;
+    let approvalDatabaseOpens = 0;
     const factories = createProductionCliFactories({
       githubIdentity: () => ({
         inspect: () => Promise.resolve({ login: liveGitHubLogin, host: "github.com" }),
@@ -371,6 +375,7 @@ describe("current-user lifecycle CLI", () => {
       launchAgent: () => ({
         install: () => {
           launchCalls.push("install");
+          installedConfig = disabledProductionConfig();
           return Promise.resolve();
         },
         activate: () => {
@@ -382,7 +387,13 @@ describe("current-user lifecycle CLI", () => {
         secretReads += 1;
         return Promise.resolve("123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi");
       },
-      openApprovalDatabase: () => new Database(approvalDatabasePath),
+      loadDaemonConfig: () => installedConfig === undefined
+        ? Promise.reject(new Error("missing installed config"))
+        : Promise.resolve(installedConfig),
+      openApprovalDatabase: () => {
+        approvalDatabaseOpens += 1;
+        return new Database(approvalDatabasePath);
+      },
       prepareApprovalDatabase: () => Promise.resolve(),
       validateApprovalDatabase: () => Promise.resolve(),
       telegramLifecycleLock: () => ({
@@ -481,6 +492,25 @@ describe("current-user lifecycle CLI", () => {
         telegram: { userId: "42", chatId: "99" },
       });
       expect(activationPreview.digest).toBe(durableActivation.digest);
+      installedConfig = createEnabledDaemonConfig(durableActivation);
+      const activationCrashRetry = await runCli(["activate", activationPreview.digest], factories);
+      expect(activationCrashRetry.exitCode).toBe(0);
+      expect(launchCalls).toEqual(["install", "activate", "activate"]);
+      const changedTelegramActivation = previewActivation({
+        install,
+        telegram: { userId: "43", chatId: "99" },
+      });
+      installedConfig = createEnabledDaemonConfig(changedTelegramActivation);
+      const opensBeforeDrift = approvalDatabaseOpens;
+      const activationAuthorityDrift = await runCli(
+        ["activate", activationPreview.digest],
+        factories,
+      );
+      expect(json(activationAuthorityDrift.message)).toEqual({
+        ok: false,
+        error: "TELEGRAM_ONBOARDING_CONFIG_CHANGED",
+      });
+      expect(approvalDatabaseOpens).toBe(opensBeforeDrift);
       const delivery = await runProductionApprovalScenario(1_000, false, {
         config: (() => {
           const enabled = createEnabledDaemonConfig(durableActivation);
@@ -503,6 +533,72 @@ describe("current-user lifecycle CLI", () => {
         else process.env[name] = value;
       }
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects pairing config drift before credential or approval database mutation", async () => {
+    const previousInput = process.env.OPC_ONBOARDING_INPUT;
+    const previousStage = process.env.OPC_ONBOARDING_STAGE;
+    process.env.OPC_ONBOARDING_INPUT = JSON.stringify({
+      githubLogin: "roy",
+      currentHome: "/Users/roy",
+      repositories: [{ name: "roy/other-app", private: true, fork: false, owner: "roy" }],
+      paths: {
+        binary: "/Users/roy/.local/bin/opc",
+        applicationSupport: "/Users/roy/Library/Application Support/OPC",
+        logs: "/Users/roy/Library/Logs/OPC",
+        launchAgent: "/Users/roy/Library/LaunchAgents/com.getsuperpower.opc.plist",
+        codexHome: "/Users/roy/Library/Application Support/OPC/codex",
+      },
+    });
+    process.env.OPC_ONBOARDING_STAGE = "install";
+    let credentialWrites = 0;
+    let databaseMutations = 0;
+    const factories = createProductionCliFactories({
+      launchAgent: () => ({
+        install: () => Promise.resolve(),
+        activate: () => Promise.resolve(),
+      }),
+      readSecret: () =>
+        Promise.resolve("123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"),
+      loadDaemonConfig: () => Promise.resolve(disabledProductionConfig()),
+      telegramLifecycleLock: () => ({ withLock: (_path, operation) => operation() }),
+      prepareApprovalDatabase: () => {
+        databaseMutations += 1;
+        return Promise.resolve();
+      },
+      openApprovalDatabase: () => {
+        databaseMutations += 1;
+        return new Database(":memory:");
+      },
+      credentials: () => ({
+        read: () => Promise.resolve(undefined),
+        write: () => {
+          credentialWrites += 1;
+          return Promise.resolve();
+        },
+        remove: () => Promise.resolve(),
+      }),
+    });
+
+    try {
+      const preview = record(json((await runCli(["onboard", "--preview"], factories)).message).result);
+      if (typeof preview.digest !== "string") throw new Error("missing install digest");
+      const result = await runCli(
+        ["onboard", "--apply", preview.digest, "--telegram-token-stdin"],
+        factories,
+      );
+      expect(json(result.message)).toEqual({
+        ok: false,
+        error: "TELEGRAM_ONBOARDING_CONFIG_CHANGED",
+      });
+      expect(credentialWrites).toBe(0);
+      expect(databaseMutations).toBe(0);
+    } finally {
+      if (previousInput === undefined) Reflect.deleteProperty(process.env, "OPC_ONBOARDING_INPUT");
+      else process.env.OPC_ONBOARDING_INPUT = previousInput;
+      if (previousStage === undefined) Reflect.deleteProperty(process.env, "OPC_ONBOARDING_STAGE");
+      else process.env.OPC_ONBOARDING_STAGE = previousStage;
     }
   });
 
@@ -630,6 +726,7 @@ describe("current-user lifecycle CLI", () => {
     const symlinkPath = join(directory, "linked.sqlite");
     const walPath = `${databasePath}-wal`;
     const shmPath = `${databasePath}-shm`;
+    const journalPath = `${databasePath}-journal`;
     try {
       await preparePrivateSqliteFile(databasePath);
       expect((await lstat(databasePath)).mode & 0o777).toBe(0o600);
@@ -653,6 +750,12 @@ describe("current-user lifecycle CLI", () => {
         (error: unknown) => error,
       );
       expect(linkedSidecarError).toMatchObject({ message: "INVALID_PRIVATE_SQLITE_PATH" });
+      await rm(shmPath);
+      await writeFile(journalPath, "", { mode: 0o644 });
+      const wideJournalError = await validatePrivateSqliteArtifacts(databasePath).catch(
+        (error: unknown) => error,
+      );
+      expect(wideJournalError).toMatchObject({ message: "INVALID_PRIVATE_SQLITE_PATH" });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -661,9 +764,15 @@ describe("current-user lifecycle CLI", () => {
   it("rejects unsafe daemon database and health paths before opening SQLite", async () => {
     const config = await enabledProductionConfig();
     const support = config.onboarding.manifest.paths.applicationSupport;
+    const logs = config.onboarding.manifest.paths.logs;
     const health = `${config.onboarding.manifest.paths.logs}/health.json`;
     const uid = config.install.manifest.currentUid;
-    for (const invalidPath of [support, health]) {
+    const invalidEntries = new Map([
+      [support, { kind: "symlink" as const, uid, mode: 0o700 }],
+      [health, { kind: "file" as const, uid, mode: 0o644 }],
+      [logs, { kind: "directory" as const, uid, mode: 0o755 }],
+    ]);
+    for (const [invalidPath, invalidEntry] of invalidEntries) {
       let opens = 0;
       const error = await runProductionDaemonRuntime(
         {
@@ -685,9 +794,7 @@ describe("current-user lifecycle CLI", () => {
           fileSystem: {
             inspect: (path) => Promise.resolve(
               path === invalidPath
-                ? invalidPath === health
-                  ? { kind: "file" as const, uid, mode: 0o644 }
-                  : { kind: "symlink" as const, uid, mode: 0o700 }
+                ? invalidEntry
                 : path.includes(".sqlite") || path === health
                   ? { kind: "missing" as const }
                   : { kind: "directory" as const, uid, mode: 0o700 },
@@ -1161,6 +1268,7 @@ describe("current-user lifecycle CLI", () => {
             }
           },
         },
+        loadDaemonConfig: () => Promise.resolve(disabledProductionConfig()),
         stopLaunchAgent: () => {
           expect(locked).toBe(true);
           events.push("bootout");
@@ -1195,8 +1303,50 @@ describe("current-user lifecycle CLI", () => {
     const lockEnd = events.indexOf("lock:end");
     expect(lockEnd).toBeGreaterThan(0);
     expect(events.some((event) => event.includes("/lifecycle-lock.sqlite"))).toBe(false);
+    expect(events).toContain(`${onboarding.manifest.paths.applicationSupport}/state.sqlite-journal`);
+    expect(events).toContain(`${onboarding.manifest.paths.applicationSupport}/process-lock.sqlite-journal`);
+    expect(events).toContain(`${onboarding.manifest.paths.applicationSupport}/approvals.sqlite-journal`);
     expect(result).toMatchObject({ preserved: { lifecycleLock: "preserved" } });
     expect(events).toContain("credential:telegram-token");
+  });
+
+  it("rejects uninstall config authority drift before bootout or deletion", async () => {
+    const onboarding = disabledProductionConfig().onboarding;
+    let mutations = 0;
+    const drifted = createDisabledDaemonConfig(previewInstall({ onboarding, currentUid: 502 }));
+    const error = await applyProductionUninstall(
+      {
+        programFiles: true,
+        stateAndLogs: true,
+        telegramToken: true,
+        transitionKey: true,
+      },
+      {
+        onboarding: () => onboarding,
+        lifecycleLock: { withLock: (_path, operation) => operation() },
+        loadDaemonConfig: () => Promise.resolve(drifted),
+        stopLaunchAgent: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+        validateRemovalPath: () => Promise.resolve(),
+        removePath: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+        credentialStore: {
+          read: () => Promise.resolve(undefined),
+          write: () => Promise.resolve(),
+          remove: () => {
+            mutations += 1;
+            return Promise.resolve();
+          },
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "UNINSTALL_CONFIG_AUTHORITY_CHANGED" });
+    expect(mutations).toBe(0);
   });
 
   it("rejects unknown, missing, extra, malformed, NUL, and oversized arguments before factories", async () => {
@@ -1314,6 +1464,92 @@ describe("current-user lifecycle CLI", () => {
 
       expect(json(result.message)).toEqual({ ok: false, error: "INVALID_COMMAND_OUTPUT" });
     }
+  });
+
+  it("rejects hostile Telegram pairing previews without invoking descriptors", () => {
+    const manifest = {
+      version: 1 as const,
+      operation: "pair-telegram" as const,
+      installDigest: `sha256:${"1".repeat(64)}`,
+      challengeDigest: `sha256:${"2".repeat(64)}`,
+      expiresAt: "2026-08-11T00:10:00.000Z",
+    };
+    const valid = { digest: digestCanonical(manifest), manifest };
+    expect(validateTelegramPairingStagePreview(valid)).toEqual(valid);
+
+    let descriptorReads = 0;
+    const accessor = Object.create(Object.prototype) as Record<string, unknown>;
+    Object.defineProperties(accessor, {
+      digest: {
+        enumerable: true,
+        get() {
+          descriptorReads += 1;
+          return valid.digest;
+        },
+      },
+      manifest: { enumerable: true, value: manifest },
+    });
+    const proxy = new Proxy(valid, {
+      ownKeys() {
+        descriptorReads += 1;
+        return ["digest", "manifest"];
+      },
+    });
+    const nonEnumerable = Object.create(Object.prototype) as Record<string, unknown>;
+    Object.defineProperties(nonEnumerable, {
+      digest: { enumerable: false, value: valid.digest },
+      manifest: { enumerable: true, value: manifest },
+    });
+    const symbolField = { ...valid, [Symbol("authority")]: true };
+    const hostilePrototype = Object.create(Object.prototype) as Record<string, unknown>;
+    Object.defineProperty(hostilePrototype, "toJSON", {
+      get() {
+        descriptorReads += 1;
+        return () => valid;
+      },
+    });
+    const inheritedToJson = { ...valid };
+    Object.setPrototypeOf(inheritedToJson, hostilePrototype);
+    const manifestAccessor = { ...manifest } as Record<string, unknown>;
+    Object.defineProperty(manifestAccessor, "installDigest", {
+      enumerable: true,
+      get() {
+        descriptorReads += 1;
+        return manifest.installDigest;
+      },
+    });
+    const manifestProxy = new Proxy(manifest, {
+      ownKeys() {
+        descriptorReads += 1;
+        return Reflect.ownKeys(manifest);
+      },
+    });
+    const manifestSymbol = { ...manifest, [Symbol("authority")]: true };
+    const manifestNonEnumerable = { ...manifest };
+    Object.defineProperty(manifestNonEnumerable, "expiresAt", {
+      enumerable: false,
+      value: manifest.expiresAt,
+    });
+    const inheritedManifestToJson = { ...manifest };
+    Object.setPrototypeOf(inheritedManifestToJson, hostilePrototype);
+
+    for (const hostile of [
+      accessor,
+      proxy,
+      nonEnumerable,
+      symbolField,
+      inheritedToJson,
+      { ...valid, manifest: manifestAccessor },
+      { ...valid, manifest: manifestProxy },
+      { ...valid, manifest: manifestSymbol },
+      { ...valid, manifest: manifestNonEnumerable },
+      { ...valid, manifest: inheritedManifestToJson },
+    ]) {
+      expect(() => validateTelegramPairingStagePreview(hostile)).toThrow(
+        "INVALID_TELEGRAM_PAIRING_PREVIEW",
+      );
+    }
+    expect(descriptorReads).toBe(0);
   });
 
   it("rejects a proxied factory registry without invoking its descriptor trap", async () => {

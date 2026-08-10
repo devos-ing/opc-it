@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 import type { Database } from "bun:sqlite";
 import { digestCanonical } from "../../domain/identity.js";
 import {
@@ -49,6 +50,33 @@ function canonicalInstant(value: string): boolean {
   return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
+function exactPlainRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    types.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+  ) throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
+  const snapshot: Record<string, unknown> = {};
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
+}
+
 function pairingPreview(
   install: InstallPreview,
   code: string,
@@ -69,42 +97,41 @@ function pairingPreview(
 export function validateTelegramPairingStagePreview(
   value: unknown,
 ): TelegramPairingStagePreview {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
-  }
-  const record = value as Record<string, unknown>;
-  const manifest = record.manifest;
+  const record = exactPlainRecord(value, ["digest", "manifest"]);
+  const fields = exactPlainRecord(record.manifest, [
+    "version",
+    "operation",
+    "installDigest",
+    "challengeDigest",
+    "expiresAt",
+  ]);
+  const digest = record.digest;
+  const installDigest = fields.installDigest;
+  const challengeDigest = fields.challengeDigest;
+  const expiresAt = fields.expiresAt;
   if (
-    Reflect.ownKeys(record).length !== 2 ||
-    typeof record.digest !== "string" ||
-    !/^sha256:[a-f0-9]{64}$/.test(record.digest) ||
-    typeof manifest !== "object" ||
-    manifest === null ||
-    Array.isArray(manifest)
-  ) throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
-  const fields = manifest as Record<string, unknown>;
-  if (
-    Reflect.ownKeys(fields).length !== 5 ||
+    typeof digest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(digest) ||
     fields.version !== 1 ||
     fields.operation !== "pair-telegram" ||
-    typeof fields.installDigest !== "string" ||
-    !/^sha256:[a-f0-9]{64}$/.test(fields.installDigest) ||
-    typeof fields.challengeDigest !== "string" ||
-    !/^sha256:[a-f0-9]{64}$/.test(fields.challengeDigest) ||
-    typeof fields.expiresAt !== "string" ||
-    !canonicalInstant(fields.expiresAt) ||
-    digestCanonical(fields) !== record.digest
+    typeof installDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(installDigest) ||
+    typeof challengeDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(challengeDigest) ||
+    typeof expiresAt !== "string" ||
+    !canonicalInstant(expiresAt)
   ) throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
-  const result = {
-    digest: record.digest,
-    manifest: {
-      version: 1,
-      operation: "pair-telegram",
-      installDigest: fields.installDigest,
-      challengeDigest: fields.challengeDigest,
-      expiresAt: fields.expiresAt,
-    },
-  } as const;
+  const manifest = {
+    version: 1 as const,
+    operation: "pair-telegram" as const,
+    installDigest,
+    challengeDigest,
+    expiresAt,
+  };
+  if (digestCanonical(manifest) !== digest) {
+    throw new Error("INVALID_TELEGRAM_PAIRING_PREVIEW");
+  }
+  const result = { digest, manifest };
   Object.freeze(result.manifest);
   return Object.freeze(result);
 }

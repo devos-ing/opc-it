@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -29,6 +29,10 @@ afterEach(async () => {
 async function fixture(): Promise<{
   readonly onboarding: OnboardingPreview;
   readonly approvals: string;
+  readonly home: string;
+  readonly processLock: string;
+  readonly state: string;
+  readonly support: string;
   readonly logs: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "opc-inspection-"));
@@ -37,9 +41,14 @@ async function fixture(): Promise<{
   const logs = join(root, "logs");
   await mkdir(support, { mode: 0o700 });
   await mkdir(logs, { mode: 0o700 });
-  const state = new Database(join(support, "state.sqlite"), { create: true });
+  const statePath = join(support, "state.sqlite");
+  const state = new Database(statePath, { create: true });
   state.run("CREATE TABLE poll_cursor (repository TEXT)");
   state.close();
+  await chmod(statePath, 0o600);
+  const processLock = join(support, "process-lock.sqlite");
+  new Database(processLock, { create: true }).close();
+  await chmod(processLock, 0o600);
   const approvals = join(support, "approvals.sqlite");
   const database = new Database(approvals, { create: true });
   database.run("CREATE TABLE approval_transition_outbox (nonce TEXT)");
@@ -48,8 +57,13 @@ async function fixture(): Promise<{
     "CREATE TABLE approval_pairing (singleton INTEGER PRIMARY KEY, user_id TEXT, chat_id TEXT)",
   );
   database.close();
+  await chmod(approvals, 0o600);
   return {
     approvals,
+    home: root,
+    processLock,
+    state: statePath,
+    support,
     logs,
     onboarding: {
       digest,
@@ -93,6 +107,61 @@ function github(
 }
 
 describe("CLI operational inspection", () => {
+  it("rejects public sandbox descendants while allowing a non-private home", async () => {
+    const setup = await fixture();
+    await chmod(setup.home, 0o755);
+    await chmod(setup.support, 0o755);
+
+    const snapshot = await inspectOperationalState(
+      setup.onboarding,
+      github(),
+      credentials(),
+      new Date("2026-08-11T01:00:00.000Z"),
+    );
+
+    expect(snapshot.sandboxHealthy).toBe(false);
+    expect(snapshot.sqliteHealthy).toBe(false);
+  });
+
+  it("fails SQLite health closed for unsafe process-lock artifacts", async () => {
+    const setup = await fixture();
+    await symlink(setup.processLock, `${setup.processLock}-journal`);
+
+    const snapshot = await inspectOperationalState(
+      setup.onboarding,
+      github(),
+      credentials(),
+      new Date("2026-08-11T01:00:00.000Z"),
+    );
+
+    expect(snapshot.sqliteHealthy).toBe(false);
+  });
+
+  it("fails SQLite health closed for unsafe main, WAL, SHM, or rollback-journal artifacts", async () => {
+    const mutations = [
+      async (setup: Awaited<ReturnType<typeof fixture>>) => chmod(setup.state, 0o644),
+      async (setup: Awaited<ReturnType<typeof fixture>>) => symlink(setup.state, `${setup.state}-wal`),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        writeFile(`${setup.state}-shm`, "", { mode: 0o644 }),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        symlink(setup.state, `${setup.state}-journal`),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        writeFile(`${setup.approvals}-journal`, "", { mode: 0o644 }),
+    ];
+    for (const mutate of mutations) {
+      const setup = await fixture();
+      await mutate(setup);
+      const snapshot = await inspectOperationalState(
+        setup.onboarding,
+        github(),
+        credentials(),
+        new Date("2026-08-11T01:00:00.000Z"),
+      );
+      expect(snapshot.sqliteHealthy).toBe(false);
+      expect(snapshot.telegramPaired).toBe(false);
+    }
+  });
+
   it("marks an expired signed lease stuck even when the last poll is fresh", async () => {
     const setup = await fixture();
     await writeFile(

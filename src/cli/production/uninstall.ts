@@ -8,7 +8,12 @@ import type {
 } from "../commands/uninstall.js";
 import type {
   CredentialStore,
+  DaemonConfig,
   OnboardingPreview,
+} from "../../features/onboarding/index.js";
+import {
+  previewInstall,
+  validateDaemonConfig,
 } from "../../features/onboarding/index.js";
 import type { LifecycleConfigLock } from "../../platform/macos/lifecycle-config-lock.js";
 import {
@@ -17,12 +22,14 @@ import {
   currentUid,
   loadOnboardingPreview,
   lifecycleConfigLockForOnboarding,
+  readDaemonConfig,
   trustedPath,
 } from "./shared.js";
 
 export interface ProductionUninstallDependencies {
   readonly onboarding?: () => OnboardingPreview;
   readonly lifecycleLock?: LifecycleConfigLock;
+  readonly loadDaemonConfig?: (path: string) => Promise<DaemonConfig>;
   readonly stopLaunchAgent?: () => Promise<void>;
   readonly validateRemovalPath?: (home: string, path: string) => Promise<void>;
   readonly removePath?: (path: string) => Promise<void>;
@@ -75,10 +82,28 @@ export async function applyProductionUninstall(
   const removePath = dependencies.removePath ??
     ((path: string) => rm(path, { recursive: true, force: true }));
   await lifecycleLock.withLock(configPath, async () => {
+    const uid = currentUid();
+    const expectedInstall = previewInstall({ onboarding, currentUid: uid });
+    let current: DaemonConfig;
+    try {
+      current = validateDaemonConfig(
+        await (dependencies.loadDaemonConfig ?? readDaemonConfig)(configPath),
+      );
+    } catch (error) {
+      throw new Error("UNINSTALL_CONFIG_AUTHORITY_CHANGED", { cause: error });
+    }
+    if (
+      current.onboarding.digest !== onboarding.digest ||
+      current.install.digest !== expectedInstall.digest ||
+      current.install.manifest.paths.config !== configPath ||
+      current.install.manifest.currentUid !== uid
+    ) {
+      throw new Error("UNINSTALL_CONFIG_AUTHORITY_CHANGED");
+    }
     if (dependencies.stopLaunchAgent === undefined) {
       const stopped = await runBounded({
         command: "/bin/launchctl",
-        args: ["bootout", `gui/${String(currentUid())}/com.getsuperpower.opc`],
+        args: ["bootout", `gui/${String(uid)}/com.getsuperpower.opc`],
         cwd: home,
         env: { PATH: trustedPath },
         timeoutMs: 10_000,
@@ -101,10 +126,12 @@ export async function applyProductionUninstall(
     if (selection.stateAndLogs) {
       paths.push(
         configPath, `${support}/state.sqlite`, `${support}/state.sqlite-shm`,
-        `${support}/state.sqlite-wal`, `${support}/process-lock.sqlite`,
-        `${support}/process-lock.sqlite-shm`, `${support}/process-lock.sqlite-wal`,
+        `${support}/state.sqlite-wal`, `${support}/state.sqlite-journal`,
+        `${support}/process-lock.sqlite`, `${support}/process-lock.sqlite-shm`,
+        `${support}/process-lock.sqlite-wal`, `${support}/process-lock.sqlite-journal`,
         `${support}/approvals.sqlite`, `${support}/approvals.sqlite-shm`,
-        `${support}/approvals.sqlite-wal`, onboarding.manifest.paths.logs,
+        `${support}/approvals.sqlite-wal`, `${support}/approvals.sqlite-journal`,
+        onboarding.manifest.paths.logs,
       );
     }
     for (const path of [...new Set(paths)].sort((left, right) => right.length - left.length)) {

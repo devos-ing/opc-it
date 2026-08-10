@@ -230,6 +230,17 @@ function requirePrivateDirectory(entry: ProductionDaemonFileEntry, uid: number):
   }
 }
 
+function requireOwnedHomeDirectory(entry: ProductionDaemonFileEntry, uid: number): void {
+  if (
+    entry.kind !== "directory" ||
+    entry.uid !== uid ||
+    typeof entry.mode !== "number" ||
+    (entry.mode & 0o022) !== 0
+  ) {
+    throw new Error("INVALID_DAEMON_RUNTIME_PATH");
+  }
+}
+
 function requirePrivateFileOrMissing(entry: ProductionDaemonFileEntry, uid: number): void {
   if (entry.kind === "missing") return;
   if (
@@ -252,7 +263,12 @@ function runtimeSqlitePaths(input: ProductionDaemonRuntimeInput): readonly strin
 }
 
 function runtimeSqliteArtifacts(input: ProductionDaemonRuntimeInput): readonly string[] {
-  return runtimeSqlitePaths(input).flatMap((path) => [path, `${path}-wal`, `${path}-shm`]);
+  return runtimeSqlitePaths(input).flatMap((path) => [
+    path,
+    `${path}-wal`,
+    `${path}-shm`,
+    `${path}-journal`,
+  ]);
 }
 
 async function validateDaemonRuntimePaths(
@@ -279,7 +295,9 @@ async function validateDaemonRuntimePaths(
     }
   }
   for (const directory of directories) {
-    requirePrivateDirectory(await fileSystem.inspect(directory), uid);
+    const entry = await fileSystem.inspect(directory);
+    if (directory === home) requireOwnedHomeDirectory(entry, uid);
+    else requirePrivateDirectory(entry, uid);
   }
   for (const file of files) {
     requirePrivateFileOrMissing(await fileSystem.inspect(file), uid);

@@ -1,4 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
+import { posix } from "node:path";
 import { Database } from "bun:sqlite";
 import type { OnboardingPreview } from "../../features/onboarding/index.js";
 import {
@@ -16,7 +17,13 @@ import {
   validateTelegramToken,
   validateTelegramUserId,
 } from "../../features/approvals/index.js";
-import { currentUid, parseJson, transitionKeyId } from "./shared.js";
+import {
+  currentUid,
+  currentHome,
+  parseJson,
+  transitionKeyId,
+  validatePrivateSqliteArtifacts,
+} from "./shared.js";
 
 export interface OperationalSnapshot {
   readonly lastPollAt: string | null;
@@ -55,24 +62,50 @@ async function lastSuccessfulPollAt(
   }
 }
 
-function readonlyCount(path: string, query: string): number {
+async function withValidatedReadonlyDatabase<Result>(
+  path: string,
+  operation: (database: Database) => Result,
+): Promise<Result> {
+  await validatePrivateSqliteArtifacts(path);
   let database: Database | undefined;
+  let result: { readonly value: Result } | undefined;
+  const failures: unknown[] = [];
   try {
     database = new Database(path, { readonly: true });
-    const row = database.query<{ readonly count: number }, []>(query).get();
-    return row?.count ?? 0;
-  } finally {
-    database?.close();
+    result = { value: operation(database) };
+  } catch (error) {
+    failures.push(error);
   }
+  try {
+    database?.close();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await validatePrivateSqliteArtifacts(path);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "SQLITE_INSPECTION_FAILED");
+  }
+  if (result === undefined) throw new Error("SQLITE_INSPECTION_RESULT_MISSING");
+  return result.value;
 }
 
-function inspectApprovals(path: string): {
+async function readonlyCount(path: string, query: string): Promise<number> {
+  return withValidatedReadonlyDatabase(path, (database) => {
+    const row = database.query<{ readonly count: number }, []>(query).get();
+    return row?.count ?? 0;
+  });
+}
+
+async function inspectApprovals(path: string): Promise<{
   readonly outboxCount: number;
   readonly canonicalPairing: boolean;
-} {
-  let database: Database | undefined;
-  try {
-    database = new Database(path, { readonly: true });
+}> {
+  return withValidatedReadonlyDatabase(path, (database) => {
     const transition = database
       .query<{ readonly count: number }, []>(
         "SELECT COUNT(*) AS count FROM approval_transition_outbox",
@@ -99,8 +132,35 @@ function inspectApprovals(path: string): {
       }
     }
     return { outboxCount: transition + requests, canonicalPairing };
-  } finally {
-    database?.close();
+  });
+}
+
+async function requirePrivateSandboxPaths(onboarding: OnboardingPreview): Promise<void> {
+  const home = currentHome(onboarding);
+  const uid = currentUid();
+  const directories = new Set<string>([home]);
+  for (const target of [
+    onboarding.manifest.paths.applicationSupport,
+    onboarding.manifest.paths.logs,
+  ]) {
+    if (!target.startsWith(`${home}/`) || posix.normalize(target) !== target) {
+      throw new Error("INVALID_SANDBOX_PATH");
+    }
+    let current = home;
+    for (const component of target.slice(home.length + 1).split("/")) {
+      current = `${current}/${component}`;
+      directories.add(current);
+    }
+  }
+  for (const directory of directories) {
+    const stats = await lstat(directory);
+    const mode = stats.mode & 0o777;
+    if (
+      !stats.isDirectory() ||
+      stats.isSymbolicLink() ||
+      stats.uid !== uid ||
+      (directory === home ? (mode & 0o022) !== 0 : (mode & 0o077) !== 0)
+    ) throw new Error("INVALID_SANDBOX_PATH");
   }
 }
 
@@ -190,28 +250,33 @@ export async function inspectOperationalState(
     stuckLease = true;
   }
   const support = onboarding.manifest.paths.applicationSupport;
-  let sqliteHealthy = true;
+  let sandboxHealthy = true;
+  try {
+    await requirePrivateSandboxPaths(onboarding);
+  } catch {
+    sandboxHealthy = false;
+  }
+  let sqliteHealthy = sandboxHealthy;
   let outboxCount = 0;
   let canonicalPairing = false;
-  try {
-    readonlyCount(`${support}/state.sqlite`, "SELECT COUNT(*) AS count FROM poll_cursor");
-  } catch {
-    sqliteHealthy = false;
-  }
-  try {
-    const approvals = inspectApprovals(`${support}/approvals.sqlite`);
-    outboxCount = approvals.outboxCount;
-    canonicalPairing = approvals.canonicalPairing;
-  } catch {
-    sqliteHealthy = false;
-  }
-  let sandboxHealthy = true;
-  for (const path of [support, onboarding.manifest.paths.logs]) {
+  if (sandboxHealthy) {
     try {
-      const stats = await lstat(path);
-      if (!stats.isDirectory() || stats.isSymbolicLink() || stats.uid !== currentUid()) sandboxHealthy = false;
+      await readonlyCount(`${support}/state.sqlite`, "SELECT COUNT(*) AS count FROM poll_cursor");
     } catch {
-      sandboxHealthy = false;
+      sqliteHealthy = false;
+    }
+    try {
+      const approvals = await inspectApprovals(`${support}/approvals.sqlite`);
+      outboxCount = approvals.outboxCount;
+      canonicalPairing = approvals.canonicalPairing;
+    } catch {
+      sqliteHealthy = false;
+    }
+    try {
+      await validatePrivateSqliteArtifacts(`${support}/process-lock.sqlite`);
+      await validatePrivateSqliteArtifacts(`${support}/process-lock.sqlite`);
+    } catch {
+      sqliteHealthy = false;
     }
   }
   let telegramToken = false;
@@ -222,7 +287,7 @@ export async function inspectOperationalState(
     telegramToken = false;
   }
   return {
-    lastPollAt: await lastSuccessfulPollAt(onboarding, now),
+    lastPollAt: sandboxHealthy ? await lastSuccessfulPollAt(onboarding, now) : null,
     activeLeaseCount,
     stuckLease,
     outboxCount,

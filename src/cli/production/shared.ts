@@ -164,7 +164,7 @@ export async function validatePrivateSqliteArtifacts(
   path: string,
   uid: number = currentUid(),
 ): Promise<void> {
-  for (const artifact of [path, `${path}-wal`, `${path}-shm`]) {
+  for (const artifact of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
     try {
       const stats = await lstat(artifact);
       if (

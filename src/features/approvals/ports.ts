@@ -1,4 +1,16 @@
 import { types } from "node:util";
+import {
+  validateTelegramChatId,
+  validateTelegramUserId,
+  type TelegramIdentity,
+} from "../../domain/telegram-identity.js";
+
+export {
+  validateTelegramChatId,
+  validateTelegramIdentity,
+  validateTelegramUserId,
+} from "../../domain/telegram-identity.js";
+export type { TelegramIdentity } from "../../domain/telegram-identity.js";
 
 export interface ApprovalRequest {
   readonly issueUrl: string;
@@ -35,10 +47,7 @@ export interface ApprovalChannel {
   poll(after?: string): Promise<ApprovalPollPage>;
 }
 
-export interface TelegramPairing {
-  readonly userId: string;
-  readonly chatId: string;
-}
+export type TelegramPairing = TelegramIdentity;
 
 export interface TelegramPairingAttempt extends TelegramPairing {
   readonly cursor: string;
@@ -212,33 +221,6 @@ export function isCanonicalInstant(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const instant = new Date(value);
   return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
-}
-
-function validateCanonicalTelegramInteger(
-  value: unknown,
-  allowNegative: boolean,
-): string {
-  if (typeof value !== "string" || !/^-?[1-9][0-9]*$/.test(value)) {
-    throw new Error("INVALID_TELEGRAM_ID");
-  }
-  const numeric = Number(value);
-  if (
-    !Number.isSafeInteger(numeric) ||
-    numeric === 0 ||
-    (!allowNegative && numeric < 0) ||
-    String(numeric) !== value
-  ) {
-    throw new Error("INVALID_TELEGRAM_ID");
-  }
-  return value;
-}
-
-export function validateTelegramUserId(value: unknown): string {
-  return validateCanonicalTelegramInteger(value, false);
-}
-
-export function validateTelegramChatId(value: unknown): string {
-  return validateCanonicalTelegramInteger(value, true);
 }
 
 export function validateTelegramToken(value: unknown): string {
