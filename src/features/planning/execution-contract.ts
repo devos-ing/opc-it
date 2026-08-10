@@ -1,10 +1,11 @@
 import { Type, type Static } from "@sinclair/typebox";
 import Ajv from "ajv";
+import { posix } from "node:path";
 import { DomainError } from "../../domain/errors.js";
 
 const NonEmpty = Type.String({ minLength: 1 });
 const Sha = Type.String({ pattern: "^[0-9a-f]{40}$" });
-const HostDirectory = Type.String({ pattern: "^/" });
+const HostDirectory = Type.String({ format: "canonical-host-directory" });
 const CodexRoute = Type.Object(
   { profile: NonEmpty, model: NonEmpty, effort: NonEmpty },
   { additionalProperties: false },
@@ -95,7 +96,30 @@ export type ValidatedExecutionContract = DeepReadonly<ExecutionContract> & {
   readonly [validatedExecutionContract]: true;
 };
 
-const validator = new Ajv({ allErrors: true }).compile(ExecutionContractSchema);
+function isCanonicalHostDirectory(value: string): boolean {
+  if (!posix.isAbsolute(value) || value === "/" || value.includes("\0") || value.endsWith("/")) {
+    return false;
+  }
+  if (posix.normalize(value) !== value) return false;
+  return value
+    .split("/")
+    .slice(1)
+    .every((component) => component !== "" && component !== "." && component !== "..");
+}
+
+const validator = new Ajv({ allErrors: true })
+  .addFormat("canonical-host-directory", { type: "string", validate: isCanonicalHostDirectory })
+  .compile<ExecutionContract>(ExecutionContractSchema);
+
+function assertUniqueIds(values: readonly { readonly id: string }[], path: string): void {
+  const ids = new Set<string>();
+  for (const value of values) {
+    if (ids.has(value.id)) {
+      throw new DomainError("INVALID_CONTRACT", `${path} contains duplicate id ${JSON.stringify(value.id)}`);
+    }
+    ids.add(value.id);
+  }
+}
 
 function deepFreeze(value: unknown): void {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return;
@@ -107,7 +131,9 @@ export function validateExecutionContract(value: unknown): ValidatedExecutionCon
   if (!validator(value)) {
     throw new DomainError("INVALID_CONTRACT", JSON.stringify(validator.errors));
   }
+  assertUniqueIds(value.acceptance, "acceptance");
+  assertUniqueIds(value.commands.evidence, "commands.evidence");
   const detached = structuredClone(value);
   deepFreeze(detached);
-  return detached as ValidatedExecutionContract;
+  return detached as unknown as ValidatedExecutionContract;
 }

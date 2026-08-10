@@ -262,6 +262,98 @@ describe("collection and execution boundaries", () => {
   }
 });
 
+describe("canonical host directory grants", () => {
+  const invalidDirectories = [
+    { name: "empty path", path: "" },
+    { name: "filesystem root", path: "/" },
+    { name: "NUL byte", path: "/opt/opc\0/cache" },
+    { name: "dot component", path: "/opt/./opc" },
+    { name: "parent component", path: "/opt/opc/../cache" },
+    { name: "redundant separator", path: "/opt//opc" },
+    { name: "redundant leading separator", path: "//opt/opc" },
+    { name: "trailing separator", path: "/opt/opc/" },
+  ] as const;
+
+  for (const field of ["readable", "writable"] as const) {
+    for (const { name, path } of invalidDirectories) {
+      test(`rejects ${name} in ${field} grants`, () => {
+        const candidate = createContract();
+        candidate.capabilities.host_directories[field] = [path];
+        expect(() => validateExecutionContract(candidate)).toThrow("INVALID_CONTRACT");
+      });
+    }
+  }
+
+  for (const path of [
+    "/opt/opc/cache",
+    "/Users/roy/Library/Application Support/OPC",
+    "/private/var/tmp/opc-work-42",
+  ]) {
+    test(`accepts canonical host directory ${path}`, () => {
+      const candidate = createContract();
+      candidate.capabilities.host_directories = { readable: [path], writable: [path] };
+      expect(() => validateExecutionContract(candidate)).not.toThrow();
+    });
+  }
+});
+
+describe("semantic identifier uniqueness", () => {
+  test("rejects acceptance criteria with the same id and different content", () => {
+    const candidate = createContract();
+    candidate.acceptance.push({
+      id: "AC-1",
+      statement: "different acceptance statement",
+      evidence: "different evidence",
+    });
+    expect(() => validateExecutionContract(candidate)).toThrow("INVALID_CONTRACT");
+  });
+
+  test("rejects evidence commands with the same id and different commands", () => {
+    const candidate = createContract();
+    candidate.commands.evidence.push({ id: "tests", run: "bun test --filter different" });
+    expect(() => validateExecutionContract(candidate)).toThrow("INVALID_CONTRACT");
+  });
+});
+
+describe("non-empty execution authority strings", () => {
+  const emptyStringCases: ReadonlyArray<{
+    readonly name: string;
+    readonly mutate: (value: ReturnType<typeof createContract>) => void;
+  }> = [
+    { name: "work id", mutate: (value) => void (value.work_id = "") },
+    { name: "repository owner segment", mutate: (value) => void (value.repository = "/private-app") },
+    { name: "repository name segment", mutate: (value) => void (value.repository = "roy/") },
+    { name: "target branch", mutate: (value) => void (value.target_branch = "") },
+    { name: "milestone", mutate: (value) => void (value.milestone = "") },
+    { name: "goal", mutate: (value) => void (value.goal = "") },
+    { name: "acceptance id", mutate: (value) => void (first(value.acceptance).id = "") },
+    { name: "acceptance statement", mutate: (value) => void (first(value.acceptance).statement = "") },
+    { name: "acceptance evidence", mutate: (value) => void (first(value.acceptance).evidence = "") },
+    { name: "writable repository path", mutate: (value) => void (value.paths.writable = [""]) },
+    { name: "forbidden repository path", mutate: (value) => void (value.paths.forbidden = [""]) },
+    { name: "bootstrap command", mutate: (value) => void (value.commands.bootstrap = "") },
+    { name: "test command", mutate: (value) => void (value.commands.test = "") },
+    { name: "evidence id", mutate: (value) => void (first(value.commands.evidence).id = "") },
+    { name: "evidence command", mutate: (value) => void (first(value.commands.evidence).run = "") },
+    { name: "executor profile", mutate: (value) => void (value.codex.executor.profile = "") },
+    { name: "executor model", mutate: (value) => void (value.codex.executor.model = "") },
+    { name: "executor effort", mutate: (value) => void (value.codex.executor.effort = "") },
+    { name: "reviewer profile", mutate: (value) => void (value.codex.reviewer.profile = "") },
+    { name: "reviewer model", mutate: (value) => void (value.codex.reviewer.model = "") },
+    { name: "reviewer effort", mutate: (value) => void (value.codex.reviewer.effort = "") },
+    { name: "network domain", mutate: (value) => void (value.capabilities.network.allow_domains = [""]) },
+    { name: "other grant", mutate: (value) => void (value.capabilities.other = [""]) },
+  ];
+
+  for (const { name, mutate } of emptyStringCases) {
+    test(`rejects an empty ${name}`, () => {
+      const candidate = createContract();
+      mutate(candidate);
+      expect(() => validateExecutionContract(candidate)).toThrow("INVALID_CONTRACT");
+    });
+  }
+});
+
 const mandatoryAuthorityPaths = [
   ["goal"],
   ["commands", "test"],
