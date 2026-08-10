@@ -42,6 +42,7 @@ const queueDiscoveryLabelSet: ReadonlySet<string> = new Set([
 
 interface ParsedIssueBatch extends QueueIssueBatch {
   readonly candidateCount: number;
+  readonly probeIssueNumbers: readonly number[];
 }
 
 function requireControlledCwd(cwd: string): string {
@@ -171,14 +172,22 @@ function parseIssue(
   };
 }
 
-function issueDiagnostic(value: unknown): QueueIssueDiagnostic {
+function candidateIssueNumber(value: unknown): number | undefined {
   if (
     isRecord(value) &&
     typeof value.number === "number" &&
     Number.isSafeInteger(value.number) &&
     value.number > 0
   ) {
-    return { code: "MALFORMED_WORK_ISSUE", issueNumber: value.number };
+    return value.number;
+  }
+  return undefined;
+}
+
+function issueDiagnostic(value: unknown): QueueIssueDiagnostic {
+  const issueNumber = candidateIssueNumber(value);
+  if (issueNumber !== undefined) {
+    return { code: "MALFORMED_WORK_ISSUE", issueNumber };
   }
   return { code: "MALFORMED_WORK_ISSUE" };
 }
@@ -213,12 +222,15 @@ function parseIssueList(
   }
   const issues: QueueWorkIssue[] = [];
   const diagnostics: QueueIssueDiagnostic[] = [];
+  const probeIssueNumbers: number[] = [];
   for (const candidate of value) {
     if (
       selection === "marker" &&
       !isMarkerCandidate(candidate) &&
       !hasKnownQueueLabel(candidate)
     ) {
+      const issueNumber = candidateIssueNumber(candidate);
+      if (issueNumber !== undefined) probeIssueNumbers.push(issueNumber);
       continue;
     }
     try {
@@ -230,6 +242,7 @@ function parseIssueList(
   return {
     issues,
     diagnostics,
+    probeIssueNumbers,
     candidateCount:
       selection === "labelled"
         ? value.length
@@ -410,6 +423,7 @@ export function createGhCliGitHubAdapter(
     return {
       issues: batches.flatMap((batch) => batch.issues),
       diagnostics: batches.flatMap((batch) => batch.diagnostics),
+      probeIssueNumbers: batches.flatMap((batch) => batch.probeIssueNumbers),
       candidateCount: batches.reduce(
         (total, batch) => total + batch.candidateCount,
         0,
@@ -471,6 +485,30 @@ export function createGhCliGitHubAdapter(
       "per_page=100",
     ];
     return listIssuePages(baseArgs, repository.canonical, "marker");
+  }
+
+  async function listIssueTransitions(
+    repositoryName: string,
+    issueNumberValue: number,
+  ): Promise<readonly QueueTransition[]> {
+    const repository = validateQueueRepository(repositoryName);
+    const issueNumber = validateQueueIssueNumber(issueNumberValue);
+    const comments = await listCommentPages([
+      "api",
+      `repos/${repository.owner}/${repository.repo}/issues/${String(issueNumber)}/comments`,
+      "--method",
+      "GET",
+      "-f",
+      "per_page=100",
+    ]);
+    return comments.flatMap((comment) =>
+      comment.body.startsWith(transitionMarker)
+        ? [{
+            commentId: comment.id,
+            record: comment.body.slice(transitionMarker.length),
+          }]
+        : [],
+    );
   }
 
   return {
@@ -588,31 +626,21 @@ export function createGhCliGitHubAdapter(
 
     async listJournalCandidates(repository: string): Promise<QueueIssueBatch> {
       const batch = await listIssues(repository, "all");
+      const diagnostics = [...batch.diagnostics];
+      for (const issueNumber of new Set(batch.probeIssueNumbers)) {
+        const transitions = await listIssueTransitions(repository, issueNumber);
+        if (transitions.length > 0) {
+          diagnostics.push({ code: "MALFORMED_WORK_ISSUE", issueNumber });
+        }
+      }
       return {
         issues: batch.issues,
-        diagnostics: batch.diagnostics,
+        diagnostics,
       };
     },
 
     async listTransitions(repositoryName: string, issueNumberValue: number): Promise<readonly QueueTransition[]> {
-      const repository = validateQueueRepository(repositoryName);
-      const issueNumber = validateQueueIssueNumber(issueNumberValue);
-      const comments = await listCommentPages([
-        "api",
-        `repos/${repository.owner}/${repository.repo}/issues/${String(issueNumber)}/comments`,
-        "--method",
-        "GET",
-        "-f",
-        "per_page=100",
-      ]);
-      return comments.flatMap((comment) =>
-        comment.body.startsWith(transitionMarker)
-          ? [{
-              commentId: comment.id,
-              record: comment.body.slice(transitionMarker.length),
-            }]
-          : [],
-      );
+      return listIssueTransitions(repositoryName, issueNumberValue);
     },
 
     async appendTransition(repositoryName: string, issueNumberValue: number, recordValue: string): Promise<void> {

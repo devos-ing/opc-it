@@ -418,6 +418,9 @@ test("discovers immutable queue markers after the umbrella label is removed", as
         recoveryWithoutMarkerOrState,
       ]),
     ),
+    result(JSON.stringify([])),
+    result(JSON.stringify([])),
+    result(JSON.stringify([])),
   ];
   const requests: CommandRequest[] = [];
   const github = createGhCliGitHubAdapter({
@@ -453,12 +456,118 @@ test("discovers immutable queue markers after the umbrella label is removed", as
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 99 },
     ],
   });
-  for (const request of requests) {
+  const issueRequests = requests.filter(
+    (request) => request.args[1] === "repos/roy/app/issues",
+  );
+  for (const request of issueRequests) {
     expect(request.args).toContain("state=all");
     expect(request.args).not.toContain("labels=opc:work");
   }
-  expect(requests[0]?.args).toContain("page=1");
-  expect(requests[1]?.args).toContain("page=2");
+  expect(issueRequests[0]?.args).toContain("page=1");
+  expect(issueRequests[1]?.args).toContain("page=2");
+  expect(requests.slice(3).map((request) => request.args[1])).toEqual([
+    "repos/roy/app/issues/90/comments",
+    "repos/roy/app/issues/91/comments",
+    "repos/roy/app/issues/96/comments",
+  ]);
+});
+
+test("probes signed journals after every Issue marker and OPC label is removed", async () => {
+  const wipedJournal = {
+    number: 100,
+    body: "all queue identity was deleted",
+    labels: ["triage"],
+    created_at: "2026-08-10T00:03:00Z",
+  };
+  const ordinary = {
+    number: 101,
+    body: "ordinary issue",
+    labels: ["triage"],
+    created_at: "2026-08-10T00:04:00Z",
+  };
+  const responses = [
+    result(JSON.stringify([wipedJournal, ordinary])),
+    result(
+      `HTTP/2.0 200 OK\nlink: <https://api.github.test/issues/100/comments?page=2>; rel="next"\n\n${JSON.stringify([
+        { id: 50, body: "human note" },
+      ])}`,
+    ),
+    result(
+      JSON.stringify([
+        {
+          id: 51,
+          body: "<!-- opc-transition:v1 -->\nhostile-signed-record",
+        },
+      ]),
+    ),
+    result(JSON.stringify([])),
+  ];
+  const requests: CommandRequest[] = [];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: (request) => {
+      requests.push(request);
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected call");
+      return Promise.resolve(response);
+    },
+  });
+
+  expect(await github.listJournalCandidates("roy/app")).toEqual({
+    issues: [],
+    diagnostics: [
+      { code: "MALFORMED_WORK_ISSUE", issueNumber: 100 },
+    ],
+  });
+  expect(requests.map((request) => request.args)).toEqual([
+    [
+      "api",
+      "repos/roy/app/issues",
+      "--method",
+      "GET",
+      "-f",
+      "state=all",
+      "-f",
+      "per_page=100",
+      "-f",
+      "page=1",
+      "--include",
+    ],
+    [
+      "api",
+      "repos/roy/app/issues/100/comments",
+      "--method",
+      "GET",
+      "-f",
+      "per_page=100",
+      "-f",
+      "page=1",
+      "--include",
+    ],
+    [
+      "api",
+      "repos/roy/app/issues/100/comments",
+      "--method",
+      "GET",
+      "-f",
+      "per_page=100",
+      "-f",
+      "page=2",
+      "--include",
+    ],
+    [
+      "api",
+      "repos/roy/app/issues/101/comments",
+      "--method",
+      "GET",
+      "-f",
+      "per_page=100",
+      "-f",
+      "page=1",
+      "--include",
+    ],
+  ]);
 });
 
 test("appends and lists only OPC transition comments", async () => {
