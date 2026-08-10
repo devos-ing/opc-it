@@ -52,7 +52,6 @@ const repositoryActiveStates = new Set([
   "running",
   "reviewing",
   "result-ready",
-  "recovering",
 ]);
 
 function logicalEventFingerprint(payload: TransitionPayload): string {

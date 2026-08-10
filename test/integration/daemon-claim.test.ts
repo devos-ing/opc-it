@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  deriveRecoveryWorkId,
   pollAndClaim,
   signTransition,
   type QueueRepository,
@@ -362,25 +363,27 @@ test("a losing cross-Issue proposal can win only after the repository epoch ends
   });
 });
 
-test("recovering keeps repository authority ahead of another Ready Work", async () => {
+test("a recovering root releases its repository epoch for the child Recovery", async () => {
   const github = createInMemoryGitHub({
     now: () => "2026-08-10T00:00:00.000Z",
   });
-  const recoveringNumber = await createReadyWork(github, {
-    workId: "work-recovering-authority",
+  const rootNumber = await createReadyWork(github, {
+    workId: "work-recovery-root",
     occurredAt: "2026-08-10T00:00:10.000Z",
   });
   await createReadyWork(github, {
-    workId: "work-waits-for-recovery",
+    workId: "work-waits-behind-child",
     occurredAt: "2026-08-10T00:00:20.000Z",
   });
+  const root = await github.findWork(repository, "work-recovery-root");
+  if (root === undefined) throw new Error("missing recovery root fixture");
   const claimed = await pollAndClaim({
     repository,
     github,
     installation: { id: "installation-a", keyId: "key-a" },
     signingKey,
     verificationKeys: { "key-a": signingKey },
-    leaseId: "lease-recovering-authority",
+    leaseId: "lease-recovery-root",
     occurredAt: "2026-08-10T00:01:00.000Z",
     leaseExpiresAt: "2026-08-10T00:31:00.000Z",
   });
@@ -401,24 +404,57 @@ test("recovering keeps repository authority ahead of another Ready Work", async 
   ]) {
     await github.appendTransition(
       repository,
-      recoveringNumber,
+      rootNumber,
       JSON.stringify(
         signTransition(
           {
             version: 1,
             installation_id: "installation-a",
             key_id: "key-a",
-            issue_number: recoveringNumber,
-            work_id: "work-recovering-authority",
+            issue_number: rootNumber,
+            work_id: root.workId,
             ...transition,
-            metadata: { lease_id: "lease-recovering-authority" },
+            metadata: { lease_id: "lease-recovery-root" },
           },
           signingKey,
         ),
       ),
     );
   }
-  await github.setStateLabel(repository, recoveringNumber, "opc:recovering");
+  await github.setStateLabel(repository, rootNumber, "opc:recovering");
+  const recoveryWorkId = deriveRecoveryWorkId(root.workId, 1);
+  const recovery = await github.createWork({
+    repository,
+    workId: recoveryWorkId,
+    digest: root.digest,
+    body: root.body,
+  });
+  await github.appendTransition(
+    repository,
+    recovery.number,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-a",
+          key_id: "key-a",
+          issue_number: recovery.number,
+          work_id: recoveryWorkId,
+          from: "recovering",
+          event: "retry",
+          to: "ready",
+          occurred_at: "2026-08-10T00:01:03.000Z",
+          metadata: {
+            next_attempt: "1",
+            plan_digest: root.digest,
+            root_work_id: root.workId,
+          },
+        },
+        signingKey,
+      ),
+    ),
+  );
+  await github.setStateLabel(repository, recovery.number, "opc:ready");
 
   expect(
     await pollAndClaim({
@@ -430,15 +466,14 @@ test("recovering keeps repository authority ahead of another Ready Work", async 
         "key-a": signingKey,
         "key-b": "installation-b-secret",
       },
-      leaseId: "lease-must-wait",
+      leaseId: "lease-child-recovery",
       occurredAt: "2026-08-10T00:02:00.000Z",
       leaseExpiresAt: "2026-08-10T00:32:00.000Z",
     }),
   ).toMatchObject({
-    status: "active-claim",
-    issueNumber: recoveringNumber,
-    workId: "work-recovering-authority",
-    installationId: "installation-a",
+    status: "claimed",
+    issueNumber: recovery.number,
+    workId: recoveryWorkId,
   });
 });
 
