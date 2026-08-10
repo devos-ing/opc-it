@@ -1,4 +1,6 @@
+import { createHmac } from "node:crypto";
 import { expect, test } from "bun:test";
+import { canonicalize } from "json-canonicalize";
 import {
   signTransition,
   transitionQueueWork,
@@ -19,6 +21,15 @@ const payload = {
   occurred_at: "2026-08-10T00:00:00.000Z",
   metadata: { lease_id: "lease-a" },
 } as const;
+
+function externallySign(value: unknown): SignedTransition {
+  return {
+    payload: value as TransitionPayload,
+    hmac_sha256: createHmac("sha256", "secret-a")
+      .update(canonicalize(value))
+      .digest("hex"),
+  };
+}
 
 test("models the v2 planning, delivery, and recovery transitions", () => {
   expect(transitionQueueWork("grilling", "plan")).toBe("awaiting-approval");
@@ -111,6 +122,61 @@ test("verification stably rejects malformed external record shapes", () => {
   for (const malformed of malformedRecords) {
     expect(() =>
       verifyTransition(malformed as unknown as SignedTransition, {
+        "key-1": "secret-a",
+      }),
+    ).toThrow(/^INVALID_TRANSITION:/);
+  }
+});
+
+test("rejects correctly signed payloads outside the complete closed v1 shape", () => {
+  const incompletePayload = {
+    key_id: "key-1",
+    from: "ready",
+    event: "claim",
+    to: "claimed",
+  };
+  const requiredFields = [
+    "version",
+    "installation_id",
+    "key_id",
+    "issue_number",
+    "work_id",
+    "from",
+    "event",
+    "to",
+    "occurred_at",
+    "metadata",
+  ] as const;
+  const missingFields = requiredFields.map((field) =>
+    Object.fromEntries(Object.entries(payload).filter(([key]) => key !== field)),
+  );
+  const surprisingMetadata = Object.assign(
+    Object.create({ inherited: "authority" }) as Record<string, string>,
+    { lease_id: "lease-a" },
+  );
+  const malformedPayloads: readonly unknown[] = [
+    incompletePayload,
+    ...missingFields,
+    { ...payload, version: 2 },
+    { ...payload, installation_id: "" },
+    { ...payload, key_id: "" },
+    { ...payload, issue_number: "42" },
+    { ...payload, issue_number: 0 },
+    { ...payload, issue_number: 1.5 },
+    { ...payload, work_id: "" },
+    { ...payload, occurred_at: "2026-08-10" },
+    { ...payload, metadata: [] },
+    { ...payload, metadata: { lease_id: 42 } },
+    { ...payload, metadata: surprisingMetadata },
+    { ...payload, unexpected: "authority" },
+  ];
+
+  for (const malformedPayload of malformedPayloads) {
+    expect(() =>
+      signTransition(malformedPayload as TransitionPayload, "secret-a"),
+    ).toThrow(/^INVALID_TRANSITION:/);
+    expect(() =>
+      verifyTransition(externallySign(malformedPayload), {
         "key-1": "secret-a",
       }),
     ).toThrow(/^INVALID_TRANSITION:/);

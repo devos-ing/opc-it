@@ -28,6 +28,19 @@ export interface SignedTransition {
 }
 
 const canonicalHmacPattern = /^[0-9a-f]{64}$/;
+const payloadFieldNames = [
+  "version",
+  "installation_id",
+  "key_id",
+  "issue_number",
+  "work_id",
+  "from",
+  "event",
+  "to",
+  "occurred_at",
+  "metadata",
+] as const;
+const payloadFieldSet: ReadonlySet<string> = new Set(payloadFieldNames);
 
 function digest(payload: TransitionPayload, secret: string): string {
   return createHmac("sha256", secret).update(canonicalize(payload)).digest("hex");
@@ -40,21 +53,65 @@ function requireSecret(keyId: string, secret: string | undefined): string {
   return secret;
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isCanonicalInstant(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const timestamp = new Date(value);
+  return !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value;
+}
+
+function isPlainStringRecord(
+  value: unknown,
+): value is Readonly<Record<string, string>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Reflect.ownKeys(value).every(
+    (key) => typeof key === "string" && typeof Reflect.get(value, key) === "string",
+  );
+}
+
+function hasExactPayloadFields(
+  value: object,
+): value is Record<(typeof payloadFieldNames)[number], unknown> {
+  const keys = Reflect.ownKeys(value);
+  return (
+    keys.length === payloadFieldNames.length &&
+    keys.every((key) => typeof key === "string" && payloadFieldSet.has(key))
+  );
+}
+
 function assertTransitionSemantics(
   payload: unknown,
 ): asserts payload is TransitionPayload {
-  if (typeof payload !== "object" || payload === null) {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !hasExactPayloadFields(payload)
+  ) {
     throw new DomainError("INVALID_TRANSITION", "malformed transition payload");
   }
-  const candidate = payload as Partial<
-    Record<"from" | "event" | "to", unknown>
-  >;
+  const candidate = payload;
   if (
+    candidate.version !== 1 ||
+    !isNonEmptyString(candidate.installation_id) ||
+    !isNonEmptyString(candidate.key_id) ||
+    !Number.isInteger(candidate.issue_number) ||
+    typeof candidate.issue_number !== "number" ||
+    candidate.issue_number <= 0 ||
+    !isNonEmptyString(candidate.work_id) ||
     !isQueueWorkState(candidate.from) ||
     !isQueueWorkEvent(candidate.event) ||
-    !isQueueWorkState(candidate.to)
+    !isQueueWorkState(candidate.to) ||
+    !isCanonicalInstant(candidate.occurred_at) ||
+    !isPlainStringRecord(candidate.metadata)
   ) {
-    throw new DomainError("INVALID_TRANSITION", "unknown state or event");
+    throw new DomainError("INVALID_TRANSITION", "malformed transition payload");
   }
 
   const expected = transitionQueueWork(candidate.from, candidate.event);
