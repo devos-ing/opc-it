@@ -184,6 +184,13 @@ export function validateTelegramChatId(value: unknown): string {
   return validateCanonicalTelegramInteger(value, true);
 }
 
+export function validateTelegramToken(value: unknown): string {
+  if (typeof value !== "string" || !/^[1-9][0-9]{5,11}:[A-Za-z0-9_-]{35}$/.test(value)) {
+    throw new Error("INVALID_TELEGRAM_TOKEN");
+  }
+  return value;
+}
+
 export function validateApprovalReply(value: unknown): ApprovalReply {
   const reply = exactOwnData(value, replyFields, "INVALID_APPROVAL_REPLY");
   if (

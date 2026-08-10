@@ -3,6 +3,7 @@ import {
   exactOwnData,
   validateApprovalRequest,
   validateTelegramChatId,
+  validateTelegramToken,
   validateTelegramUserId,
   type ApprovalChannel,
   type ApprovalPollPage,
@@ -62,7 +63,6 @@ export interface TelegramApprovalChannelOptions {
   readonly now?: () => string;
 }
 
-const tokenPattern = /^[1-9][0-9]{5,11}:[A-Za-z0-9_-]{35}$/;
 const cursorPattern = /^(0|[1-9][0-9]{0,18})$/;
 const maxResponseBytes = 1_048_576;
 const maxPollReplies = 100;
@@ -422,9 +422,9 @@ function parseReplies(value: unknown, now: () => string): ApprovalPollPage {
 export function createTelegramApprovalChannel(
   options: TelegramApprovalChannelOptions,
 ): ApprovalChannel {
-  if (!tokenPattern.test(options.token)) throw new Error("INVALID_TELEGRAM_TOKEN");
+  const token = validateTelegramToken(options.token);
   const chatId = validateTelegramChatId(options.chatId);
-  const baseUrl = `https://api.telegram.org/bot${options.token}`;
+  const baseUrl = `https://api.telegram.org/bot${token}`;
   const now = options.now ?? (() => new Date().toISOString());
 
   async function invoke(method: "sendMessage" | "getUpdates", body: unknown): Promise<unknown> {

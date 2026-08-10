@@ -13,6 +13,7 @@ export {
   validateApprovalReply,
   validateApprovalTarget,
   validateTelegramChatId,
+  validateTelegramToken,
   validateTelegramUserId,
 } from "./ports.js";
 export type {

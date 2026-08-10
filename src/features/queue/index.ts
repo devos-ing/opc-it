@@ -46,11 +46,19 @@ export {
 export { deriveRecoveryWorkId } from "./recovery-work-id.js";
 export {
   appendHeartbeat,
+  analyzeLeaseTimeline,
   decideLease,
   type AppendHeartbeatInput,
   type DecideLeaseInput,
   type LeaseDecision,
 } from "./lease.js";
+export {
+  arbitrateRepositoryJournal,
+  readTrustedTimeline,
+  type RepositoryJournalEntry,
+  type TrustedTimeline,
+  type TrustedTransition,
+} from "./trusted-timeline.js";
 export {
   reconcileRepository,
   type ReconcileRepositoryInput,
