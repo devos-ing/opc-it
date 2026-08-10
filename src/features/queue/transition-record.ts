@@ -40,8 +40,15 @@ function requireSecret(keyId: string, secret: string | undefined): string {
   return secret;
 }
 
-function assertTransitionSemantics(payload: TransitionPayload): void {
-  const candidate: Partial<Record<"from" | "event" | "to", unknown>> = payload;
+function assertTransitionSemantics(
+  payload: unknown,
+): asserts payload is TransitionPayload {
+  if (typeof payload !== "object" || payload === null) {
+    throw new DomainError("INVALID_TRANSITION", "malformed transition payload");
+  }
+  const candidate = payload as Partial<
+    Record<"from" | "event" | "to", unknown>
+  >;
   if (
     !isQueueWorkState(candidate.from) ||
     !isQueueWorkEvent(candidate.event) ||
@@ -73,28 +80,40 @@ export function signTransition(
 export function verifyTransition(
   record: SignedTransition,
   keys: Readonly<Record<string, string>>,
+): TransitionPayload;
+export function verifyTransition(
+  record: unknown,
+  keys: Readonly<Record<string, string>>,
 ): TransitionPayload {
-  assertTransitionSemantics(record.payload);
-  if (!canonicalHmacPattern.test(record.hmac_sha256)) {
+  if (typeof record !== "object" || record === null) {
+    throw new DomainError("INVALID_TRANSITION", "malformed transition record");
+  }
+  const candidate = record as Partial<SignedTransition>;
+  const payload = candidate.payload;
+  assertTransitionSemantics(payload);
+  if (
+    typeof candidate.hmac_sha256 !== "string" ||
+    !canonicalHmacPattern.test(candidate.hmac_sha256)
+  ) {
     throw new DomainError(
       "INVALID_TRANSITION_SIGNATURE",
-      record.payload.work_id,
+      payload.work_id,
     );
   }
-  const keyId = record.payload.key_id;
+  const keyId = payload.key_id;
   const secret = Object.hasOwn(keys, keyId) ? keys[keyId] : undefined;
 
   const expected = Buffer.from(
-    digest(record.payload, requireSecret(keyId, secret)),
+    digest(payload, requireSecret(keyId, secret)),
     "hex",
   );
-  const actual = Buffer.from(record.hmac_sha256, "hex");
+  const actual = Buffer.from(candidate.hmac_sha256, "hex");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     throw new DomainError(
       "INVALID_TRANSITION_SIGNATURE",
-      record.payload.work_id,
+      payload.work_id,
     );
   }
 
-  return record.payload;
+  return payload;
 }

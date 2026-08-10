@@ -3,6 +3,7 @@ import {
   signTransition,
   transitionQueueWork,
   verifyTransition,
+  type SignedTransition,
   type TransitionPayload,
 } from "../../src/features/queue/index.js";
 
@@ -100,6 +101,18 @@ test("verification rejects invalid external transition semantics", () => {
         { ...record, payload: invalidPayload },
         { "key-1": "secret-a" },
       ),
+    ).toThrow(/^INVALID_TRANSITION:/);
+  }
+});
+
+test("verification stably rejects malformed external record shapes", () => {
+  const malformedRecords = [{}, { payload: null }, null, "record"] as const;
+
+  for (const malformed of malformedRecords) {
+    expect(() =>
+      verifyTransition(malformed as unknown as SignedTransition, {
+        "key-1": "secret-a",
+      }),
     ).toThrow(/^INVALID_TRANSITION:/);
   }
 });
