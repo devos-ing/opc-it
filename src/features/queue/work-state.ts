@@ -17,6 +17,7 @@ export type QueueWorkState = (typeof queueWorkStates)[number];
 export const queueWorkEvents = [
   "plan",
   "approve",
+  "invalidate",
   "claim",
   "start",
   "candidate",
@@ -39,7 +40,7 @@ type StateTransitions = Readonly<
 const transitions = {
   grilling: { plan: "awaiting-approval" },
   "awaiting-approval": { approve: "ready" },
-  ready: { claim: "claimed" },
+  ready: { claim: "claimed", invalidate: "awaiting-approval" },
   claimed: {
     start: "running",
     incident: "ready",
@@ -63,7 +64,11 @@ const transitions = {
     "request-approval": "awaiting-approval",
     block: "blocked",
   },
-  "result-ready": { publish: "delivered" },
+  "result-ready": {
+    publish: "delivered",
+    incident: "ready",
+    "outage-block": "blocked",
+  },
   delivered: {},
   blocked: {},
 } as const satisfies Readonly<Record<QueueWorkState, StateTransitions>>;

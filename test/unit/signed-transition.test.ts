@@ -53,6 +53,9 @@ test("models the v2 planning, delivery, and recovery transitions", () => {
   expect(transitionQueueWork("claimed", "outage-block")).toBe("blocked");
   expect(transitionQueueWork("running", "outage-block")).toBe("blocked");
   expect(transitionQueueWork("reviewing", "outage-block")).toBe("blocked");
+  expect(transitionQueueWork("ready", "invalidate")).toBe("awaiting-approval");
+  expect(transitionQueueWork("result-ready", "incident")).toBe("ready");
+  expect(transitionQueueWork("result-ready", "outage-block")).toBe("blocked");
 });
 
 test("keeps delivered and blocked terminal", () => {
@@ -71,6 +74,62 @@ test("accepts an untampered signed transition", () => {
     "cd983657e28bd6d440bd330a2f6acce5c2026873ab267d3b4693393183ddfe8c",
   );
   expect(verifyTransition(record, { "key-1": "secret-a" })).toEqual(payload);
+});
+
+test("signs approval invalidation and result-ready infrastructure paths", () => {
+  const requiredPaths = [
+    { ...payload, event: "invalidate", to: "awaiting-approval" },
+    { ...payload, from: "result-ready", event: "incident", to: "ready" },
+    {
+      ...payload,
+      from: "result-ready",
+      event: "outage-block",
+      to: "blocked",
+    },
+  ] as const satisfies readonly TransitionPayload[];
+
+  for (const requiredPath of requiredPaths) {
+    const signed = signTransition(requiredPath, "secret-a");
+    expect(verifyTransition(signed, { "key-1": "secret-a" })).toEqual(
+      requiredPath,
+    );
+  }
+});
+
+test("verifies an unknown adapter input through the public API", () => {
+  const untrusted: unknown = signTransition(payload, "secret-a");
+
+  expect(verifyTransition(untrusted, { "key-1": "secret-a" })).toEqual(payload);
+});
+
+test("binds HMAC authority despite inherited Object.prototype.toJSON", () => {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+  const mutable = { ...payload } as unknown as TransitionPayload & {
+    from: string;
+    event: string;
+    to: string;
+  };
+  Object.defineProperty(Object.prototype, "toJSON", {
+    configurable: true,
+    value: () => ({ polluted: true }),
+  });
+
+  try {
+    const signed = signTransition(mutable, "secret-a");
+    mutable.from = "claimed";
+    mutable.event = "start";
+    mutable.to = "running";
+
+    expect(() =>
+      verifyTransition(signed, { "key-1": "secret-a" }),
+    ).toThrow(/^INVALID_TRANSITION_SIGNATURE:/);
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(Object.prototype, "toJSON");
+    } else {
+      Object.defineProperty(Object.prototype, "toJSON", previous);
+    }
+  }
 });
 
 test("signing rejects invalid runtime transition semantics", () => {

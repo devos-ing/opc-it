@@ -46,8 +46,43 @@ const payloadFieldNames = [
 ] as const;
 const payloadFieldSet: ReadonlySet<string> = new Set(payloadFieldNames);
 
+function defineJsonField(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, key, {
+    enumerable: true,
+    value,
+  });
+}
+
+function detachedCanonicalPayload(
+  payload: TransitionPayload,
+): Readonly<Record<string, unknown>> {
+  const metadata = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(payload.metadata)) {
+    defineJsonField(metadata, key, value);
+  }
+
+  const detached = Object.create(null) as Record<string, unknown>;
+  defineJsonField(detached, "version", payload.version);
+  defineJsonField(detached, "installation_id", payload.installation_id);
+  defineJsonField(detached, "key_id", payload.key_id);
+  defineJsonField(detached, "issue_number", payload.issue_number);
+  defineJsonField(detached, "work_id", payload.work_id);
+  defineJsonField(detached, "from", payload.from);
+  defineJsonField(detached, "event", payload.event);
+  defineJsonField(detached, "to", payload.to);
+  defineJsonField(detached, "occurred_at", payload.occurred_at);
+  defineJsonField(detached, "metadata", metadata);
+  return detached;
+}
+
 function digest(payload: TransitionPayload, secret: string): string {
-  return createHmac("sha256", secret).update(canonicalize(payload)).digest("hex");
+  return createHmac("sha256", secret)
+    .update(canonicalize(detachedCanonicalPayload(payload)))
+    .digest("hex");
 }
 
 function requireSecret(keyId: string, secret: string | undefined): string {
@@ -160,10 +195,6 @@ export function signTransition(
   };
 }
 
-export function verifyTransition(
-  record: SignedTransition,
-  keys: Readonly<Record<string, string>>,
-): TransitionPayload;
 export function verifyTransition(
   record: unknown,
   keys: Readonly<Record<string, string>>,
