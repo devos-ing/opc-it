@@ -37,11 +37,12 @@
 
 **Files:**
 - Create: `src/features/queue/ports.ts`
+- Modify: `src/features/queue/index.ts`
 - Create: `src/platform/journal/sqlite-journal-adapter.ts`
 - Create: `src/platform/journal/in-memory-journal-adapter.ts`
 - Test: `test/contract/journal-adapter.test.ts`
 
-- [ ] **Step 1: Write the failing shared adapter contract**
+- [x] **Step 1: Write the failing shared adapter contract**
 
 ```ts
 import { describe, expect, test } from "bun:test";
@@ -65,13 +66,13 @@ for (const [name, create] of [
 }
 ```
 
-- [ ] **Step 2: Run the contract and verify both adapters are missing**
+- [x] **Step 2: Run the contract and verify both adapters are missing**
 
 Run: `rtk bun test test/contract/journal-adapter.test.ts`
 
 Expected: FAIL with missing journal adapter modules.
 
-- [ ] **Step 3: Define the port and implement both adapters**
+- [x] **Step 3: Define the port and implement both adapters**
 
 ```ts
 // src/features/queue/ports.ts
@@ -85,24 +86,36 @@ export interface LocalJournal {
 }
 ```
 
+Export `InstallationRecord`, `PollCursor`, and `LocalJournal` as types from
+`src/features/queue/index.ts` so platform adapters consume the feature's public
+interface rather than deep-importing `ports.ts`.
+
 The SQLite adapter must create `installation(id TEXT PRIMARY KEY, key_id TEXT NOT NULL)` and `poll_cursor(repository TEXT PRIMARY KEY, etag TEXT, checked_at TEXT NOT NULL)` in one migration transaction, then use prepared statements. The in-memory adapter must use one installation variable and `Map<string, PollCursor>`; neither adapter may expose its storage through the interface.
 
-- [ ] **Step 4: Verify adapter parity**
+- [x] **Step 4: Verify adapter parity**
 
 Run: `rtk bun test test/contract/journal-adapter.test.ts`
 
-Expected: PASS for both adapters, 2 tests and 0 failures.
+Expected: PASS for both adapters and SQLite durability, 12 tests and 0 failures.
 
 Run: `rtk bun run typecheck`
 
 Expected: exit 0.
 
-- [ ] **Step 5: Commit the journal seam**
+- [x] **Step 5: Commit the journal seam**
 
 ```bash
-rtk git add src/features/queue/ports.ts src/platform/journal test/contract/journal-adapter.test.ts
+rtk git add src/features/queue/ports.ts src/features/queue/index.ts src/platform/journal test/contract/journal-adapter.test.ts
 rtk git commit -m "feat: add daemon local journal"
 ```
+
+**Task 1 evidence (2026-08-10):** The initial contract failed during module
+loading because both referenced journal adapter modules were absent (Bun
+reported the first unresolved import). The completed shared contract passes
+12/12 cases across memory and SQLite, including replacement, cursor isolation,
+snapshot isolation, optional ETag, database reopen persistence, and a strict
+close proving no transaction wrapper remains pending. Typecheck, lint, the
+490-test full suite, and diff-check all exit 0.
 
 ### Task 2: Implement the `gh` queue adapter
 
