@@ -41,9 +41,9 @@ Evidence: five focused commits; lint, typecheck, tests, build, and diff check pa
 
 Evidence: SQLite/in-memory adapter parity; same-digest submit idempotency; one-winner claim; exact lease boundaries; disabled loop has zero GitHub calls.
 
-- [ ] **Checkpoint 3: Complete M3 and review every capability grant**
+- [x] **Checkpoint 3: Complete M3 and review every capability grant**
 
-Evidence: preview/apply digest binding; current `gh` identity and per-repository grant; independent `CODEX_HOME`; Telegram replay protection; LaunchAgent still disabled.
+Evidence: distinct onboarding/install/pairing/activation/uninstall digests; current `gh` identity and per-repository grants; independent `CODEX_HOME`; one-time durable Telegram pairing and replay-safe approval; config/SQLite/lifecycle authority fail closed across crash recovery; safe current-user LaunchAgent preview remains unactivated. Final M3 focused gate passes 149 tests / 884 expectations, full suite passes 763 tests / 2,251 expectations, lint/typecheck/build/diff checks pass, and independent whole-M3 Spec and Standards/security reviews report 0 findings.
 
 - [ ] **Checkpoint 4: Complete M4 and review security probes before publication**
 
