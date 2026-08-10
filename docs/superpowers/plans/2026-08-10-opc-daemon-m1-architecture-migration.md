@@ -98,7 +98,7 @@ Add `Status: Superseded in part by ADR 0019` below the title of ADR 0003 and ADR
 
 Run: `rtk bun test test/contract/daemon-architecture-docs.test.ts`
 
-Expected: PASS, 1 test and 0 failures.
+Expected: PASS with 0 failures.
 
 Run: `rtk proxy git diff --check`
 
@@ -188,7 +188,7 @@ export function parseEnabled(value: string | undefined): boolean {
 
 Run: `rtk bun test test/unit/delivery-loop.test.ts`
 
-Expected: PASS, 1 test and 0 failures.
+Expected: PASS with 0 failures.
 
 Run: `rtk bun run typecheck`
 
@@ -478,7 +478,7 @@ Export the two functions and record types from `src/features/queue/index.ts`.
 
 Run: `rtk bun test test/unit/signed-transition.test.ts`
 
-Expected: PASS, 2 tests and 0 failures.
+Expected: PASS with 0 failures.
 
 Run: `rtk bun run typecheck`
 
@@ -542,7 +542,7 @@ Add an override for `src/features/**/*.ts` to the existing flat config:
 
 Run: `rtk bun test test/contract/feature-imports.test.ts test/unit/delivery-loop.test.ts test/unit/execution-contract-v2.test.ts test/unit/signed-transition.test.ts`
 
-Expected: PASS, 7 tests and 0 failures.
+Expected: PASS with 0 failures.
 
 Run: `rtk bun run lint`
 
@@ -565,7 +565,7 @@ rtk git commit -m "test: enforce feature module seams"
 
 ## M1 completion evidence
 
-Before starting M2, record:
+Before starting M2, record the following evidence. Commit `7d49e3e` is the approved umbrella implementation plan immediately before M1 work began, so the pinned range covers every M1 implementation and review-fix commit even when the number of task commits changes.
 
 ```bash
 rtk git status --short
@@ -573,7 +573,7 @@ rtk bun run lint
 rtk bun run typecheck
 rtk bun test
 rtk bun run build
-rtk proxy git diff --check HEAD~5..HEAD
+rtk proxy git diff --check 7d49e3e...HEAD
 ```
 
 Expected: clean worktree; every command exits 0; the legacy Action artifact still builds; no LaunchAgent, Keychain, Telegram, GitHub Issue, or local user configuration has been changed.
