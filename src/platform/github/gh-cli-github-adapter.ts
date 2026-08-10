@@ -34,6 +34,10 @@ const maximumPageCount = 100;
 const stateLabelSet: ReadonlySet<string> = new Set(
   queueWorkStates.map((state) => `opc:${state}`),
 );
+const queueDiscoveryLabelSet: ReadonlySet<string> = new Set([
+  "opc:work",
+  ...stateLabelSet,
+]);
 
 interface ParsedIssueBatch extends QueueIssueBatch {
   readonly candidateCount: number;
@@ -186,6 +190,18 @@ function isMarkerCandidate(value: unknown): boolean {
   );
 }
 
+function hasKnownQueueLabel(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.labels)) return false;
+  return value.labels.some((label) => {
+    if (typeof label === "string") return queueDiscoveryLabelSet.has(label);
+    return (
+      isRecord(label) &&
+      typeof label.name === "string" &&
+      queueDiscoveryLabelSet.has(label.name)
+    );
+  });
+}
+
 function parseIssueList(
   value: unknown,
   repository: string,
@@ -197,7 +213,13 @@ function parseIssueList(
   const issues: QueueWorkIssue[] = [];
   const diagnostics: QueueIssueDiagnostic[] = [];
   for (const candidate of value) {
-    if (selection === "marker" && !isMarkerCandidate(candidate)) continue;
+    if (
+      selection === "marker" &&
+      !isMarkerCandidate(candidate) &&
+      !hasKnownQueueLabel(candidate)
+    ) {
+      continue;
+    }
     try {
       issues.push(parseIssue(candidate, repository, selection === "labelled"));
     } catch {
