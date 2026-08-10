@@ -17,7 +17,7 @@
 - Create `src/platform/github/gh-identity-adapter.ts`.
 - Create `src/platform/codex/codex-cli-adapter.ts`.
 - Create `src/features/approvals/{ports,pair-telegram,request-approval,consume-approval,outbox,index}.ts`.
-- Create `src/platform/approvals/{telegram-approval-adapter,in-memory-approval-adapter}.ts`.
+- Create `src/platform/approvals/{telegram-approval-adapter,in-memory-approval-adapter,hmac-approval-transition-signer}.ts`.
 - Create `src/cli/commands/{onboard,submit,status,pause,resume,doctor,uninstall}.ts`.
 - Modify `src/cli/main.ts` and `scripts/build.ts`.
 - Test with `test/unit/permission-manifest.test.ts`, `test/contract/credential-store.test.ts`, `test/integration/onboard-v2.test.ts`, `test/integration/telegram-approval.test.ts`, and `test/acceptance/current-user-launch-agent.test.ts`.
@@ -74,11 +74,11 @@ Task 2 evidence: the initial focused run failed closed with the required missing
 
 ### Task 3: Pair Telegram and consume replay-safe approvals
 
-**Files:** Create `src/features/approvals/ports.ts`, `pair-telegram.ts`, `request-approval.ts`, `consume-approval.ts`, `outbox.ts`, `index.ts`; create both approval adapters; test `test/integration/telegram-approval.test.ts`.
+**Files:** Create `src/features/approvals/ports.ts`, `pair-telegram.ts`, `request-approval.ts`, `consume-approval.ts`, `outbox.ts`, `index.ts`; create `src/platform/approvals/telegram-approval-adapter.ts`, `in-memory-approval-adapter.ts`, `hmac-approval-transition-signer.ts`; test `test/integration/telegram-approval.test.ts`.
 
-- [ ] Write failing tests for correct user/chat, wrong user, reused nonce, expired nonce, changed digest, Telegram outage outbox retry, and a future in-memory channel using the same interface.
-- [ ] Run `rtk bun test test/integration/telegram-approval.test.ts`; expect missing feature.
-- [ ] Implement the small seam:
+- [x] Write failing tests for correct user/chat, wrong user, reused nonce, expired nonce, changed digest, Telegram outage outbox retry, and a future in-memory channel using the same interface.
+- [x] Run `rtk bun test test/integration/telegram-approval.test.ts`; expect missing feature.
+- [x] Implement the small seam:
 
 ```ts
 export interface ApprovalChannel {
@@ -90,8 +90,10 @@ export type ApprovalDecision = { readonly status: "approved" | "rejected"; reado
 ```
 
 Use Telegram `getUpdates`/`sendMessage` with fixed endpoints, exact paired IDs, callback data containing only nonce and decision, and SQLite-backed nonce consumption/outbox. On approval, write the signed GitHub approval transition before relabeling Ready.
-- [ ] Run the focused test and replay it twice; expect all cases pass with one GitHub transition.
-- [ ] Commit `feat: add Telegram approval channel`.
+- [x] Run the focused test and replay it twice; expect all cases pass with one GitHub transition.
+- [x] Commit `feat: add Telegram approval channel`.
+
+Task 3 evidence: the initial focused RED failed with the required missing `src/features/approvals/index.js` module (0 pass, 1 fail), a later RED cycle exposed consumed nonces remaining loadable, and independent review caught hostile signer output before completion. The approvals-owned closed ports now pair one canonical safe-integer Telegram user/chat, expose a bounded poll page with a durable watermark independent of accepted callbacks, consume each nonce once in SQLite, and preserve both message and signed-transition outboxes across restart. Telegram uses injected transport with only fixed `sendMessage`/`getUpdates` endpoints, 30-second and 1 MiB bounds, a 100-update page, a 4,096-character message ceiling, sanitized errors, and callback data containing only decision plus nonce. Approval evaluation reads one trusted clock after polling, expires at the exact boundary, rejects identity/digest/state drift, validates canonical signer output against the exact issue/work/digest/actor/nonce before nonce consumption, and requires an existing transition instead of backfilling an unauthorized Ready label. Crash tests prove transition-before-label ordering, label-before-outbox-ack replay, and one logical GitHub transition. Focused approval plus feature-seam verification passes twice at 42 tests / 118 expectations; the full suite passes 658 tests / 1,568 expectations; lint, typecheck, build, and diff checks pass; credential/real-call scans are empty. Independent Spec and Standards reviews report 0 findings each. No real Telegram, GitHub, Keychain, filesystem-host mutation, or credential command ran.
 
 ### Task 4: Install a disabled user LaunchAgent
 
