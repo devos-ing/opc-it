@@ -248,7 +248,7 @@ const contract = {
 test("validates and deterministically digests a v2 contract", () => {
   const validated = validateExecutionContract(contract);
   expect(executionContractDigest(validated)).toBe(
-    "sha256:2070a553f83c78b78b98b2269ee676d6482cecfe6393065f814cb8eb9ad36e84",
+    "sha256:5821e5cd2e0dab24536ee79369ea29d8a0a71ff9ce0f81ce21291d26ca9ce164",
   );
 });
 
@@ -256,6 +256,12 @@ test("validates and deterministically digests a v2 contract", () => {
 // every root/nested additional-property boundary, invalid SHA, required-array
 // minItems/duplicates, timeout and attempt bounds (including valid endpoints),
 // and every mandatory goal/command/capability/Codex authority field.
+```
+
+Independent oracle for this ASCII/integer fixture: expand `base_sha` to 40 lowercase `a` characters and save the sample contract value as `sample-contract.json`. Then run this command, which deliberately does not call OPC's production digest helper:
+
+```bash
+rtk proxy sh -c 'jq -cS . sample-contract.json | tr -d "\n" | shasum -a 256'
 ```
 
 - [ ] **Step 2: Run the tests and verify the incomplete authority model fails**
