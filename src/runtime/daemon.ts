@@ -122,6 +122,10 @@ async function sleepUntilReady(
 export async function runDaemon(dependencies: RunDaemonDependencies): Promise<void> {
   const ownerId = snapshotProcessLockOwnerId(dependencies.ownerId);
   const lease = await dependencies.processLock.acquire(ownerId);
+  let daemonFailed = false;
+  let daemonFailure: unknown;
+  let releaseFailed = false;
+  let releaseFailure: unknown;
   try {
     let retryAttempt = 0;
     let previousNowMs: number | undefined;
@@ -135,7 +139,7 @@ export async function runDaemon(dependencies: RunDaemonDependencies): Promise<vo
           dependencies.signal,
         );
       } catch (error) {
-        if (isAborted(dependencies.signal)) return;
+        if (isAborted(dependencies.signal)) break;
         const delayMs = retryDelay(error, polledAt.getTime(), retryAttempt);
         retryAttempt += 1;
         await sleepUntilReady(dependencies, delayMs);
@@ -145,13 +149,29 @@ export async function runDaemon(dependencies: RunDaemonDependencies): Promise<vo
       if (result.status !== "disabled" && result.repositoriesChecked > 0) {
         await dependencies.onHealth(new Date(polledAt.getTime()));
       }
-      if (isAborted(dependencies.signal)) return;
+      if (isAborted(dependencies.signal)) break;
       await sleepUntilReady(
         dependencies,
         nextSuccessfulPollDelay(dependencies.random),
       );
     }
+  } catch (error) {
+    daemonFailed = true;
+    daemonFailure = error;
   } finally {
-    await lease.release();
+    try {
+      await lease.release();
+    } catch (error) {
+      releaseFailed = true;
+      releaseFailure = error;
+    }
   }
+  if (daemonFailed && releaseFailed) {
+    throw new AggregateError(
+      [daemonFailure, releaseFailure],
+      "DAEMON_AND_PROCESS_LOCK_RELEASE_FAILED",
+    );
+  }
+  if (daemonFailed) throw daemonFailure;
+  if (releaseFailed) throw releaseFailure;
 }

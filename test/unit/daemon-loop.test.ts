@@ -205,6 +205,59 @@ test("the process lease is released on a fatal tick error", async () => {
   expect(processLock.releases()).toBe(1);
 });
 
+test("a release failure preserves the fatal daemon error", async () => {
+  const daemonFailure = new Error("FATAL_TICK_ERROR");
+  const releaseFailure = new Error("PROCESS_LOCK_RELEASE_FAILED");
+  const error = await rejectionOf(() => runDaemonWithProcessLock({
+    processLock: {
+      acquire: () => Promise.resolve({
+        ownerId: "daemon:release-failure",
+        release: () => Promise.reject(releaseFailure),
+      }),
+    },
+    ownerId: "daemon:release-failure",
+    loop: { tick: () => Promise.reject(daemonFailure) },
+    sleep: () => Promise.resolve(),
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: new AbortController().signal,
+    onHealth: () => undefined,
+  }));
+
+  expect(error).toBeInstanceOf(AggregateError);
+  expect(error).toMatchObject({
+    message: "DAEMON_AND_PROCESS_LOCK_RELEASE_FAILED",
+    errors: [daemonFailure, releaseFailure],
+  });
+});
+
+test("a release failure is reported directly after a successful daemon exit", async () => {
+  const controller = new AbortController();
+  const releaseFailure = new Error("PROCESS_LOCK_RELEASE_FAILED");
+  const error = await rejectionOf(() => runDaemonWithProcessLock({
+    processLock: {
+      acquire: () => Promise.resolve({
+        ownerId: "daemon:release-only-failure",
+        release: () => Promise.reject(releaseFailure),
+      }),
+    },
+    ownerId: "daemon:release-only-failure",
+    loop: {
+      tick: () => Promise.resolve({ status: "idle", repositoriesChecked: 0 }),
+    },
+    sleep: () => {
+      controller.abort();
+      return Promise.resolve();
+    },
+    random: () => 0,
+    now: () => new Date("2026-08-10T00:00:00.000Z"),
+    signal: controller.signal,
+    onHealth: () => undefined,
+  }));
+
+  expect(error).toBe(releaseFailure);
+});
+
 test("the process lease is released after a successful poll exits during sleep", async () => {
   const controller = new AbortController();
   const processLock = createExclusiveTestProcessLock();
