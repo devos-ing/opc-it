@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { signTransition, verifyTransition } from "../../src/features/queue/index.js";
+import {
+  signTransition,
+  verifyTransition,
+  type TransitionPayload,
+} from "../../src/features/queue/index.js";
 
 const payload = {
   version: 1,
@@ -62,4 +66,22 @@ test("accepts active and previous key ids during rotation", () => {
 
   expect(verifyTransition(previous, keyring)).toEqual(payload);
   expect(verifyTransition(active, keyring)).toEqual(nextPayload);
+});
+
+test("types transition states and events with the domain vocabulary", () => {
+  const valid: TransitionPayload = payload;
+  const invalidState: TransitionPayload = {
+    ...payload,
+    // @ts-expect-error queue records reject unknown domain states
+    from: "not-a-work-state",
+  };
+  const invalidEvent: TransitionPayload = {
+    ...payload,
+    // @ts-expect-error queue records reject unknown domain events
+    event: "not-a-work-event",
+  };
+
+  expect(valid).toEqual(payload);
+  void invalidState;
+  void invalidEvent;
 });

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { canonicalize } from "json-canonicalize";
 import { DomainError } from "../../domain/errors.js";
+import type { WorkEvent, WorkState } from "../../domain/state.js";
 
 export interface TransitionPayload {
   readonly version: 1;
@@ -8,9 +9,9 @@ export interface TransitionPayload {
   readonly key_id: string;
   readonly issue_number: number;
   readonly work_id: string;
-  readonly from: string;
-  readonly event: string;
-  readonly to: string;
+  readonly from: WorkState;
+  readonly event: WorkEvent;
+  readonly to: WorkState;
   readonly occurred_at: string;
   readonly metadata: Readonly<Record<string, string>>;
 }
