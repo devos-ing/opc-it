@@ -29,6 +29,7 @@ export interface GhCliGitHubAdapterOptions {
 
 const queueMarkerPattern = /^<!-- opc-queue:v1 (\{[^\r\n]*\}) -->\r?\n/;
 const transitionMarker = "<!-- opc-transition:v1 -->\n";
+const maximumPageCount = 100;
 const stateLabelSet: ReadonlySet<string> = new Set(
   queueWorkStates.map((state) => `opc:${state}`),
 );
@@ -188,21 +189,6 @@ function parseIssueList(value: unknown, repository: string): ParsedIssueBatch {
   return { issues, diagnostics, candidateCount: value.length };
 }
 
-function parseIssuePages(value: unknown, repository: string): ParsedIssueBatch {
-  if (!Array.isArray(value)) {
-    throw new Error("MALFORMED_GITHUB_RESPONSE: issue pages");
-  }
-  const batches = value.map((page) => parseIssueList(page, repository));
-  return {
-    issues: batches.flatMap((batch) => batch.issues),
-    diagnostics: batches.flatMap((batch) => batch.diagnostics),
-    candidateCount: batches.reduce(
-      (total, batch) => total + batch.candidateCount,
-      0,
-    ),
-  };
-}
-
 function parseComment(value: unknown): { readonly id: number; readonly body: string } {
   if (
     !isRecord(value) ||
@@ -221,13 +207,6 @@ function parseCommentList(value: unknown): readonly { readonly id: number; reado
     throw new Error("MALFORMED_GITHUB_RESPONSE: comment list");
   }
   return value.map(parseComment);
-}
-
-function parseCommentPages(value: unknown): readonly { readonly id: number; readonly body: string }[] {
-  if (!Array.isArray(value)) {
-    throw new Error("MALFORMED_GITHUB_RESPONSE: comment pages");
-  }
-  return value.flatMap(parseCommentList);
 }
 
 function parseIncluded(stdout: string): {
@@ -301,6 +280,18 @@ export function createGhCliGitHubAdapter(
   }
 
   async function execute(args: readonly string[], input?: string): Promise<CommandResult> {
+    const { command, included } = await requestIncluded(args, input);
+    requireSuccessfulIncluded(command, included);
+    return { ...command, stdout: included.body };
+  }
+
+  async function requestIncluded(
+    args: readonly string[],
+    input?: string,
+  ): Promise<{
+    readonly command: CommandResult;
+    readonly included: ReturnType<typeof parseIncluded>;
+  }> {
     const command = await invoke(
       args.includes("--include") ? args : [...args, "--include"],
       input,
@@ -311,6 +302,13 @@ export function createGhCliGitHubAdapter(
       });
     }
     const included = parseCommandIncluded(command);
+    return { command, included };
+  }
+
+  function requireSuccessfulIncluded(
+    command: CommandResult,
+    included: ReturnType<typeof parseIncluded>,
+  ): void {
     if (
       command.status !== "pass" ||
       included.statusCode < 200 ||
@@ -322,7 +320,6 @@ export function createGhCliGitHubAdapter(
         included.retryAfter,
       );
     }
-    return { ...command, stdout: included.body };
   }
 
   function parseCommandIncluded(command: CommandResult): ReturnType<typeof parseIncluded> {
@@ -359,6 +356,54 @@ export function createGhCliGitHubAdapter(
     });
   }
 
+  function mergeIssueBatches(
+    batches: readonly ParsedIssueBatch[],
+  ): ParsedIssueBatch {
+    return {
+      issues: batches.flatMap((batch) => batch.issues),
+      diagnostics: batches.flatMap((batch) => batch.diagnostics),
+      candidateCount: batches.reduce(
+        (total, batch) => total + batch.candidateCount,
+        0,
+      ),
+    };
+  }
+
+  async function listIssuePages(
+    baseArgs: readonly string[],
+    repository: string,
+  ): Promise<ParsedIssueBatch> {
+    const batches: ParsedIssueBatch[] = [];
+    for (let page = 1; page <= maximumPageCount; page += 1) {
+      const { command, included } = await requestIncluded([
+        ...baseArgs,
+        "-f",
+        `page=${String(page)}`,
+      ]);
+      requireSuccessfulIncluded(command, included);
+      batches.push(parseIssueList(parseJson(included.body), repository));
+      if (!included.hasNextPage) return mergeIssueBatches(batches);
+    }
+    throw new QueueTransportError({ code: "fatal" });
+  }
+
+  async function listCommentPages(
+    baseArgs: readonly string[],
+  ): Promise<readonly { readonly id: number; readonly body: string }[]> {
+    const comments: { readonly id: number; readonly body: string }[] = [];
+    for (let page = 1; page <= maximumPageCount; page += 1) {
+      const { command, included } = await requestIncluded([
+        ...baseArgs,
+        "-f",
+        `page=${String(page)}`,
+      ]);
+      requireSuccessfulIncluded(command, included);
+      comments.push(...parseCommentList(parseJson(included.body)));
+      if (!included.hasNextPage) return comments;
+    }
+    throw new QueueTransportError({ code: "fatal" });
+  }
+
   async function listIssues(
     repositoryName: string,
     state: "all" | "open" = "all",
@@ -376,24 +421,7 @@ export function createGhCliGitHubAdapter(
       "-f",
       "per_page=100",
     ];
-    const command = await invoke([...baseArgs, "--include"]);
-    if (command.status !== "pass" && command.status !== "fail") {
-      throw new QueueTransportError({
-        code: command.status === "output-limit" ? "fatal" : "transient",
-      });
-    }
-    const included = parseCommandIncluded(command);
-    if (command.status !== "pass" || included.statusCode !== 200) {
-      throwIncludedTransport(
-        command,
-        included.statusCode,
-        included.retryAfter,
-      );
-    }
-    const first = parseIssueList(parseJson(included.body), repository.canonical);
-    if (!included.hasNextPage) return first;
-    const response = await execute([...baseArgs, "--paginate", "--slurp"]);
-    return parseIssuePages(parseJson(response.stdout), repository.canonical);
+    return listIssuePages(baseArgs, repository.canonical);
   }
 
   return {
@@ -453,18 +481,13 @@ export function createGhCliGitHubAdapter(
       ];
       const args = [
         ...baseArgs,
-        "--include",
+        "-f",
+        "page=1",
         ...(previousEtag === undefined
           ? []
           : ["-H", `If-None-Match: ${requireEtag(previousEtag)}`]),
       ];
-      const command = await invoke(args);
-      if (command.status !== "pass" && command.status !== "fail") {
-        throw new QueueTransportError({
-          code: command.status === "output-limit" ? "fatal" : "transient",
-        });
-      }
-      const included = parseCommandIncluded(command);
+      const { command, included } = await requestIncluded(args);
       if (included.statusCode === 304) {
         if (previousEtag === undefined) {
           throw new Error("GH_API_FAILED: unexpected 304");
@@ -481,17 +504,27 @@ export function createGhCliGitHubAdapter(
           included.retryAfter,
         );
       }
-      const batch = included.hasNextPage
-        ? parseIssuePages(
-            parseJson(
-              (await execute([...baseArgs, "--paginate", "--slurp"])).stdout,
-            ),
-            repository.canonical,
-          )
-        : parseIssueList(parseJson(included.body), repository.canonical);
+      const batches = [
+        parseIssueList(parseJson(included.body), repository.canonical),
+      ];
+      let hasNextPage = included.hasNextPage;
+      for (let page = 2; hasNextPage && page <= maximumPageCount; page += 1) {
+        const next = await requestIncluded([
+          ...baseArgs,
+          "-f",
+          `page=${String(page)}`,
+        ]);
+        requireSuccessfulIncluded(next.command, next.included);
+        batches.push(
+          parseIssueList(parseJson(next.included.body), repository.canonical),
+        );
+        hasNextPage = next.included.hasNextPage;
+      }
+      if (hasNextPage) throw new QueueTransportError({ code: "fatal" });
+      const batch = mergeIssueBatches(batches);
       return {
         status: "ok",
-        ...(!included.hasNextPage &&
+        ...(batches.length === 1 &&
         batch.candidateCount < 100 &&
         batch.diagnostics.length === 0 &&
         included.etag !== undefined
@@ -505,7 +538,7 @@ export function createGhCliGitHubAdapter(
     },
 
     async listJournalCandidates(repository: string): Promise<QueueIssueBatch> {
-      const batch = await listIssues(repository, "open");
+      const batch = await listIssues(repository, "all");
       return {
         issues: batch.issues,
         diagnostics: batch.diagnostics,
@@ -515,17 +548,15 @@ export function createGhCliGitHubAdapter(
     async listTransitions(repositoryName: string, issueNumberValue: number): Promise<readonly QueueTransition[]> {
       const repository = validateQueueRepository(repositoryName);
       const issueNumber = validateQueueIssueNumber(issueNumberValue);
-      const response = await execute([
+      const comments = await listCommentPages([
         "api",
         `repos/${repository.owner}/${repository.repo}/issues/${String(issueNumber)}/comments`,
         "--method",
         "GET",
         "-f",
         "per_page=100",
-        "--paginate",
-        "--slurp",
       ]);
-      return parseCommentPages(parseJson(response.stdout)).flatMap((comment) =>
+      return comments.flatMap((comment) =>
         comment.body.startsWith(transitionMarker)
           ? [{
               commentId: comment.id,

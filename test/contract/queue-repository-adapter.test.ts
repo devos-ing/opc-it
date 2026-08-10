@@ -179,6 +179,8 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
       "labels=opc:work",
       "-f",
       "per_page=100",
+      "-f",
+      "page=1",
       "--include",
     ],
     [
@@ -192,9 +194,11 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
       "labels=opc:work",
       "-f",
       "per_page=100",
-      "--include",
+      "-f",
+      "page=1",
       "-H",
       'If-None-Match: "queue-v2"',
+      "--include",
     ],
   ]);
 });
@@ -251,10 +255,11 @@ test("preserves Retry-After on production transition writes", async () => {
   }
 });
 
-test("finds Work and lists every journal candidate through closed issue records", async () => {
+test("finds Work and lists closed active journal candidates through the umbrella label", async () => {
   const claimedIssue = {
     ...readyIssue,
     number: 9,
+    state: "closed",
     body: '<!-- opc-queue:v1 {"digest":"sha256:c","work_id":"w-3"} -->\nactive payload',
     labels: [{ name: "opc:work" }, { name: "opc:claimed" }],
   };
@@ -320,7 +325,7 @@ test("finds Work and lists every journal candidate through closed issue records"
     ],
     diagnostics: [],
   });
-  expect(requests[1]?.args).toContain("state=open");
+  expect(requests[1]?.args).toContain("state=all");
 });
 
 test("appends and lists only OPC transition comments", async () => {
@@ -333,10 +338,14 @@ test("appends and lists only OPC transition comments", async () => {
       }),
     ),
     result(
-      JSON.stringify([[
-          { id: 40, body: "human note" },
-          { id: 41, body: "<!-- opc-transition:v1 -->\nsigned-record" },
-        ]]),
+      `HTTP/2.0 200 OK\nlink: <https://api.github.test/comments?page=2>; rel="next"\n\n${JSON.stringify([
+        { id: 40, body: "human note" },
+      ])}`,
+    ),
+    result(
+      `HTTP/2.0 200 OK\n\n${JSON.stringify([
+        { id: 41, body: "<!-- opc-transition:v1 -->\nsigned-record" },
+      ])}`,
     ),
   ];
   const github = createGhCliGitHubAdapter({
@@ -366,8 +375,10 @@ test("appends and lists only OPC transition comments", async () => {
   expect(requests[0]?.input).toBe(
     JSON.stringify({ body: "<!-- opc-transition:v1 -->\nsigned-record" }),
   );
-  expect(requests[1]?.args).toContain("--paginate");
-  expect(requests[1]?.args).toContain("--slurp");
+  expect(requests[1]?.args).toContain("page=1");
+  expect(requests[2]?.args).toContain("page=2");
+  expect(requests[1]?.args).not.toContain("--paginate");
+  expect(requests[2]?.args).not.toContain("--slurp");
 });
 
 test("relabels one Work while preserving non-state labels", async () => {
@@ -510,7 +521,9 @@ test("paginates every ready Work and withholds a partial-page ETag", async () =>
     result(
       `HTTP/2.0 200 OK\netag: "partial"\nlink: <https://api.github.test/page/2>; rel="next"\n\n${JSON.stringify(firstPage)}`,
     ),
-    result(JSON.stringify([firstPage, lastPage])),
+    result(
+      `HTTP/2.0 200 OK\n\n${JSON.stringify(lastPage)}`,
+    ),
   ];
   const github = createGhCliGitHubAdapter({
     cwd: "/opt/opc",
@@ -528,8 +541,76 @@ test("paginates every ready Work and withholds a partial-page ETag", async () =>
   if (listed.status !== "ok") throw new Error("expected ready list");
   expect(listed.issues).toHaveLength(101);
   expect(listed.etag).toBeUndefined();
-  expect(requests[1]?.args).toContain("--paginate");
-  expect(requests[1]?.args).toContain("--slurp");
+  expect(requests[0]?.args).toContain("page=1");
+  expect(requests[1]?.args).toContain("page=2");
+  expect(requests[0]?.args).not.toContain("--paginate");
+  expect(requests[1]?.args).not.toContain("--slurp");
+});
+
+test("preserves Retry-After from a later explicit page", async () => {
+  const responses: CommandResult[] = [
+    result(
+      `HTTP/2.0 200 OK\nlink: <https://api.github.test/issues?page=2>; rel="next"\n\n[]`,
+    ),
+    {
+      status: "fail",
+      exitCode: 1,
+      stdout: "HTTP/2.0 429 Too Many Requests\nretry-after: 45\n\n{}",
+      stderr: "ignored",
+      durationMs: 1,
+    },
+  ];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: () => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected call");
+      return Promise.resolve(response);
+    },
+  });
+
+  try {
+    await github.listJournalCandidates("roy/app");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({
+      code: "rate-limited",
+      statusCode: 429,
+      retryAfter: "45",
+    });
+  }
+});
+
+test("ignores hostile repeated Link targets and fails closed at the page bound", async () => {
+  const requests: CommandRequest[] = [];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: (request) => {
+      requests.push(request);
+      return Promise.resolve(
+        result(
+          'HTTP/2.0 200 OK\nlink: <https://evil.test/repos/other/issues?page=1&x=Injected>; rel="next"\n\n[]',
+        ),
+      );
+    },
+  });
+
+  try {
+    await github.listJournalCandidates("roy/app");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({ code: "fatal" });
+  }
+  expect(requests).toHaveLength(100);
+  expect(requests[0]?.args).toContain("page=1");
+  expect(requests[1]?.args).toContain("page=2");
+  expect(requests[99]?.args).toContain("page=100");
+  expect(JSON.stringify(requests)).not.toContain("evil.test");
+  expect(JSON.stringify(requests)).not.toContain("Injected");
 });
 
 test("withholds ETag at the exact GitHub page boundary", async () => {
