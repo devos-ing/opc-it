@@ -56,9 +56,9 @@ Task 1 evidence: the initial focused run failed with the required missing `src/f
 
 **Files:** Create `src/features/onboarding/onboard-repository.ts`, `src/platform/github/gh-identity-adapter.ts`, `src/platform/codex/codex-cli-adapter.ts`, `src/platform/macos/keychain.ts`, `src/platform/macos/in-memory-keychain.ts`; test `test/contract/credential-store.test.ts`, `test/integration/onboard-v2.test.ts`.
 
-- [ ] Write failing tests proving `gh auth status` identity is displayed before grant, each private same-owner repo is granted separately, Codex uses only the manifest `CODEX_HOME`, and a missing/changed manifest digest prevents all writes.
-- [ ] Run the two tests; expect missing adapters/use case.
-- [ ] Define feature-owned ports:
+- [x] Write failing tests proving `gh auth status` identity is displayed before grant, each private same-owner repo is granted separately, Codex uses only the manifest `CODEX_HOME`, and a missing/changed manifest digest prevents all writes.
+- [x] Run the two tests; expect missing adapters/use case.
+- [x] Define feature-owned ports:
 
 ```ts
 export interface GitHubIdentity { inspect(): Promise<{ login: string; host: string }>; inspectRepository(name: string): Promise<{ private: boolean; fork: boolean; owner: string }> }
@@ -67,8 +67,10 @@ export interface CodexIdentity { inspect(home: string): Promise<{ authenticated:
 ```
 
 Production adapters use fixed argv `gh auth status --json hosts`, `gh api repos/{owner}/{repo}`, and `codex login status`; the Codex child environment sets `CODEX_HOME` to `manifest.paths.codexHome`. Keychain calls use `/usr/bin/security`. Generate the 32-byte transition key with `randomBytes(32)` only after digest approval. Never log command stdout containing secrets.
-- [ ] Run adapter contract, onboarding integration, typecheck, and secret scan; all pass and `rtk rg -n 'auth token|GH_TOKEN' src/features/onboarding src/platform` returns no credential extraction.
-- [ ] Commit `feat: grant daemon identities safely`.
+- [x] Run adapter contract, onboarding integration, typecheck, and secret scan; all pass and `rtk rg -n 'auth token|GH_TOKEN' src/features/onboarding src/platform` returns no credential extraction.
+- [x] Commit `feat: grant daemon identities safely`.
+
+Task 2 evidence: the initial focused run failed closed with the required missing in-memory Keychain and Codex adapter modules (0 pass, 2 fail). The public apply seam re-canonicalizes the exact frozen Task 1 preview before any dependency call, rejects missing/changed or forged digest-valid manifests with zero writes, displays the current `github.com` identity before separately approving every live private, non-fork, same-owner repository, and binds Codex inspection to only the manifest `CODEX_HOME`. Production adapters use bounded injected runners with fixed argv, canonical absolute paths, an explicit current-user `GH_CONFIG_DIR`, closed child environments, closed JSON parsing, and no real commands in tests. A 32-byte transition key is generated only after every approval and identity check, stored without appearing in the result, and an existing valid key is preserved. RED/GREEN hardening also rejects truthy non-boolean approvals, hostile credential coercion, daily-Codex forged manifests, Enterprise host drift, and command injection. Focused verification passes 14 tests / 88 expectations; the full suite, lint, typecheck, build, diff checks, and credential scans pass. Independent Spec and Standards reviews report 0 findings each.
 
 ### Task 3: Pair Telegram and consume replay-safe approvals
 
