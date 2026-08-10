@@ -23,7 +23,10 @@ import {
   type TelegramHttpRequest,
 } from "../../src/platform/approvals/telegram-approval-adapter.js";
 import { createHmacApprovalTransitionSigner } from "../../src/platform/approvals/hmac-approval-transition-signer.js";
-import { verifyTransition } from "../../src/features/queue/index.js";
+import { pollAndClaim, verifyTransition } from "../../src/features/queue/index.js";
+import { submitWork } from "../../src/features/planning/index.js";
+import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
+import { validV2Contract } from "../fixtures/v2-contract.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
 const nonce = "nonce_0123456789abcdef";
@@ -413,7 +416,7 @@ describe("Telegram approvals", () => {
       "key-1": consumeInput.transitionKey,
     });
     expect(verified.event).toBe("approve");
-    expect(verified.metadata.approval_digest).toBe(digest);
+    expect(verified.metadata.plan_digest).toBe(digest);
   });
 
   test("rejects accessor-bearing requests without invoking them", async () => {
@@ -863,10 +866,10 @@ describe("Telegram approvals", () => {
       {
         sign: (input: Parameters<typeof transitionSigner.sign>[0]) => {
           const parsed = JSON.parse(transitionSigner.sign(input)) as {
-            payload: { metadata: { approval_digest: string } };
+            payload: { metadata: { plan_digest: string } };
             hmac_sha256: string;
           };
-          parsed.payload.metadata.approval_digest = `sha256:${"b".repeat(64)}`;
+          parsed.payload.metadata.plan_digest = `sha256:${"b".repeat(64)}`;
           return canonicalize(parsed);
         },
       },
@@ -1128,6 +1131,108 @@ describe("Telegram approvals", () => {
     expect(credentialReads).toEqual(["telegram-token", "transition-key"]);
     expect(JSON.stringify(result)).not.toContain(token);
     expect(JSON.stringify(result)).not.toContain("11".repeat(32));
+  });
+
+  test("moves an approved Work through Ready into a trusted queue claim", async () => {
+    const repository = validV2Contract.repository;
+    const transitionKey = "11".repeat(32);
+    const github = createInMemoryGitHub({
+      now: () => "2026-08-11T00:00:00.000Z",
+    });
+    const submitted = await submitWork(
+      { ...validV2Contract, work_id: "work-approval-e2e" },
+      github,
+    );
+    const approvalIssueUrl = `https://github.com/${repository}/issues/${String(submitted.number)}`;
+    const approvalNonce = Buffer.from(new Uint8Array(32).fill(12)).toString(
+      "base64url",
+    );
+    const channel = createInMemoryApprovalChannel();
+    await completePairing(channel.store);
+    channel.pushReply({
+      externalId: "approval-e2e",
+      cursor: "1",
+      userId: "42",
+      chatId: "99",
+      nonce: approvalNonce,
+      decision: "approved",
+      receivedAt: "2026-08-11T00:01:00.000Z",
+    });
+    let ready = false;
+    const approvalQueue: ApprovalTickQueue = {
+      listAwaitingApprovals: () =>
+        Promise.resolve(
+          ready
+            ? []
+            : [
+                {
+                  issueUrl: approvalIssueUrl,
+                  digest: submitted.digest,
+                  summary: "Claim the approved Work",
+                },
+              ],
+        ),
+      resolveApprovalTarget: () =>
+        Promise.resolve({
+          repository,
+          issueNumber: submitted.number,
+          workId: "work-approval-e2e",
+          digest: submitted.digest,
+          state: ready ? "ready" : "awaiting-approval",
+        }),
+      appendApprovalTransition: async ({ record }) => {
+        await github.appendTransition(repository, submitted.number, record);
+        return "created";
+      },
+      markReady: async () => {
+        await github.setStateLabel(repository, submitted.number, "opc:ready");
+        ready = true;
+      },
+    };
+
+    expect(
+      await approvalTick(
+        { installationId: "install-1", keyId: "key-1" },
+        {
+          store: channel.store,
+          credentials: {
+            read: (name) =>
+              Promise.resolve(
+                name === "telegram-token"
+                  ? "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+                  : transitionKey,
+              ),
+          },
+          queue: approvalQueue,
+          signer: transitionSigner,
+          createChannel: () => channel,
+          randomBytes: () => new Uint8Array(32).fill(12),
+          now: () => "2026-08-11T00:01:00.000Z",
+        },
+      ),
+    ).toMatchObject({
+      requested: 1,
+      delivery: "sent",
+      decisions: [{ status: "approved", digest: submitted.digest }],
+    });
+
+    expect(
+      await pollAndClaim({
+        repository,
+        github,
+        installation: { id: "install-1", keyId: "key-1" },
+        signingKey: transitionKey,
+        verificationKeys: { "key-1": transitionKey },
+        leaseId: "lease-approval-e2e",
+        occurredAt: "2026-08-11T00:02:00.000Z",
+        leaseExpiresAt: "2026-08-11T00:32:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "claimed",
+      issueNumber: submitted.number,
+      workId: "work-approval-e2e",
+      digest: submitted.digest,
+    });
   });
 
   test("keeps one SQLite-backed request through a send outage and retries without duplicating it", async () => {

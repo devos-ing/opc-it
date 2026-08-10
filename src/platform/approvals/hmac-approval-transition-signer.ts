@@ -17,7 +17,7 @@ export function createHmacApprovalTransitionSigner(): ApprovalTransitionSigner {
         occurred_at: input.occurredAt,
         metadata: {
           approval_nonce: input.nonce,
-          approval_digest: input.digest,
+          plan_digest: input.digest,
           approval_actor: input.actor,
         },
       } as const;

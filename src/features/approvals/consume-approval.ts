@@ -91,7 +91,7 @@ function validateSignedApprovalRecord(
   );
   const metadata = exactOwnData(
     payload.metadata,
-    ["approval_nonce", "approval_digest", "approval_actor"],
+    ["approval_nonce", "plan_digest", "approval_actor"],
     "INVALID_APPROVAL_TRANSITION_RECORD",
   );
   if (
@@ -108,7 +108,7 @@ function validateSignedApprovalRecord(
     payload.to !== "ready" ||
     payload.occurred_at !== expected.occurredAt ||
     metadata.approval_nonce !== expected.nonce ||
-    metadata.approval_digest !== expected.digest ||
+    metadata.plan_digest !== expected.digest ||
     metadata.approval_actor !== expected.actor ||
     canonicalize(parsed) !== value
   ) {
