@@ -8,21 +8,33 @@ export type TickResult =
   | EnabledTickResult;
 
 export interface DeliveryLoop {
-  tick(now: Date): Promise<TickResult>;
+  tick(now: Date, signal?: AbortSignal): Promise<TickResult>;
 }
 
+export type EnabledTickRunner = (
+  now: Date,
+  signal: AbortSignal,
+) => Promise<EnabledTickResult>;
+
 export interface DeliveryLoopDependencies {
-  readonly isEnabled: () => Promise<boolean>;
-  readonly runEnabledTick: (now: Date) => Promise<EnabledTickResult>;
+  readonly isEnabled: (signal: AbortSignal) => Promise<boolean>;
+  readonly runEnabledTick: EnabledTickRunner;
+}
+
+function isAborted(signal: AbortSignal): boolean {
+  return signal.aborted;
 }
 
 export function createDeliveryLoop(dependencies: DeliveryLoopDependencies): DeliveryLoop {
   return {
-    async tick(now) {
-      if (!(await dependencies.isEnabled())) {
+    async tick(now, requestedSignal) {
+      const signal = requestedSignal ?? new AbortController().signal;
+      if (isAborted(signal)) throw signal.reason;
+      if (!(await dependencies.isEnabled(signal))) {
         return { status: "disabled", repositoriesChecked: 0 };
       }
-      return dependencies.runEnabledTick(now);
+      if (isAborted(signal)) throw signal.reason;
+      return dependencies.runEnabledTick(now, signal);
     },
   };
 }

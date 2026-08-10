@@ -3,6 +3,7 @@ import type {
   CommandRequest,
   CommandResult,
 } from "../../src/adapters/local/process-runner.js";
+import { QueueTransportError } from "../../src/features/queue/index.js";
 import { createGhCliGitHubAdapter } from "../../src/platform/github/gh-cli-github-adapter.js";
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 
@@ -10,7 +11,9 @@ function result(stdout: string): CommandResult {
   return {
     status: "pass",
     exitCode: 0,
-    stdout,
+    stdout: stdout.startsWith("HTTP/")
+      ? stdout
+      : `HTTP/2.0 200 OK\n\n${stdout}`,
     stderr: "",
     durationMs: 1,
   };
@@ -96,7 +99,15 @@ test("creates Work through fixed gh argv, controlled environment, and stdin", as
   expect(requests).toEqual([
     {
       command: "gh",
-      args: ["api", "repos/roy/app/issues", "--method", "POST", "--input", "-"],
+      args: [
+        "api",
+        "repos/roy/app/issues",
+        "--method",
+        "POST",
+        "--input",
+        "-",
+        "--include",
+      ],
       cwd: "/opt/opc",
       env: {
         PATH: "/usr/local/bin:/usr/bin:/bin",
@@ -188,6 +199,58 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
   ]);
 });
 
+test("preserves a validated Retry-After from a production queue poll", async () => {
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: () => Promise.resolve({
+      status: "fail",
+      exitCode: 1,
+      stdout: "HTTP/2.0 429 Too Many Requests\nretry-after: 120\n\n{}",
+      stderr: "untrusted prose is ignored",
+      durationMs: 1,
+    }),
+  });
+
+  try {
+    await github.listJournalCandidates("roy/app");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({
+      code: "rate-limited",
+      statusCode: 429,
+      retryAfter: "120",
+    });
+  }
+});
+
+test("preserves Retry-After on production transition writes", async () => {
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: () => Promise.resolve({
+      status: "fail",
+      exitCode: 1,
+      stdout: "HTTP/2.0 403 Forbidden\nretry-after: 60\n\n{}",
+      stderr: "ignored",
+      durationMs: 1,
+    }),
+  });
+
+  try {
+    await github.appendTransition("roy/app", 8, "signed-record");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({
+      code: "rate-limited",
+      statusCode: 403,
+      retryAfter: "60",
+    });
+  }
+});
+
 test("finds Work and lists every journal candidate through closed issue records", async () => {
   const claimedIssue = {
     ...readyIssue,
@@ -206,8 +269,8 @@ test("finds Work and lists every journal candidate through closed issue records"
     ],
   };
   const responses = [
-    result(JSON.stringify([[readyIssue, claimedIssue, recoveryIssue]])),
-    result(JSON.stringify([[readyIssue, claimedIssue, recoveryIssue]])),
+    result(`HTTP/2.0 200 OK\n\n${JSON.stringify([readyIssue, claimedIssue, recoveryIssue])}`),
+    result(`HTTP/2.0 200 OK\n\n${JSON.stringify([readyIssue, claimedIssue, recoveryIssue])}`),
   ];
   const requests: CommandRequest[] = [];
   const github = createGhCliGitHubAdapter({
@@ -298,6 +361,7 @@ test("appends and lists only OPC transition comments", async () => {
     "POST",
     "--input",
     "-",
+    "--include",
   ]);
   expect(requests[0]?.input).toBe(
     JSON.stringify({ body: "<!-- opc-transition:v1 -->\nsigned-record" }),
@@ -412,7 +476,7 @@ test("fails closed when a timeout carries forged 304 output", async () => {
 
   await expectRejection(
     () => github.listReady("roy/app", '"old"'),
-    "GH_API_FAILED",
+    "QUEUE_TRANSPORT_ERROR: transient",
   );
 });
 
@@ -513,7 +577,7 @@ test("isolates malformed Work while returning valid ready and active batches", a
     result(
       `HTTP/2.0 200 OK\netag: "mixed"\n\n${JSON.stringify([malformedReady, readyIssue])}`,
     ),
-    result(JSON.stringify([[malformedActive, claimed]])),
+    result(`HTTP/2.0 200 OK\n\n${JSON.stringify([malformedActive, claimed])}`),
   ];
   const github = createGhCliGitHubAdapter({
     cwd: "/opt/opc",
@@ -690,11 +754,10 @@ test("both adapters fail closed for duplicate Work ids", async () => {
     trustedPath: "/usr/bin:/bin",
     run: () =>
       Promise.resolve(
-        result(
-          JSON.stringify([
-            [duplicateIssue, { ...duplicateIssue, number: 9 }],
-          ]),
-        ),
+        result(`HTTP/2.0 200 OK\n\n${JSON.stringify([
+          duplicateIssue,
+          { ...duplicateIssue, number: 9 },
+        ])}`),
       ),
   });
 

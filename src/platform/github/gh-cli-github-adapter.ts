@@ -5,6 +5,7 @@ import {
 } from "../../adapters/local/process-runner.js";
 import {
   queueWorkStates,
+  QueueTransportError,
   validateQueueIdentifier,
   validateQueueIssueNumber,
   validateQueueRepository,
@@ -232,6 +233,7 @@ function parseCommentPages(value: unknown): readonly { readonly id: number; read
 function parseIncluded(stdout: string): {
   readonly statusCode: number;
   readonly etag?: string;
+  readonly retryAfter?: string;
   readonly hasNextPage: boolean;
   readonly body: string;
 } {
@@ -252,12 +254,29 @@ function parseIncluded(stdout: string): {
   if (etags.length > 1) {
     throw new Error("MALFORMED_GITHUB_RESPONSE: duplicate etag");
   }
+  const retryAfters = lines.slice(1).flatMap((line) => {
+    const match = /^retry-after:\s*(.+)$/i.exec(line);
+    return match?.[1] === undefined ? [] : [match[1]];
+  });
+  if (retryAfters.length > 1) {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: duplicate retry-after");
+  }
+  const retryAfter = retryAfters[0];
+  if (
+    retryAfter !== undefined &&
+    !(/^(?:0|[1-9]\d*)$/.test(retryAfter) ||
+      (/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(retryAfter) &&
+        new Date(Date.parse(retryAfter)).toUTCString() === retryAfter))
+  ) {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: retry-after");
+  }
   return {
     statusCode,
     hasNextPage: lines.slice(1).some(
       (line) => /^link:/i.test(line) && /rel="next"/.test(line),
     ),
     ...(etags[0] === undefined ? {} : { etag: etags[0] }),
+    ...(retryAfter === undefined ? {} : { retryAfter }),
     body,
   };
 }
@@ -282,11 +301,62 @@ export function createGhCliGitHubAdapter(
   }
 
   async function execute(args: readonly string[], input?: string): Promise<CommandResult> {
-    const command = await invoke(args, input);
-    if (command.status !== "pass") {
-      throw new Error(`GH_API_FAILED: ${command.status}:${String(command.exitCode)}`);
+    const command = await invoke(
+      args.includes("--include") ? args : [...args, "--include"],
+      input,
+    );
+    if (command.status !== "pass" && command.status !== "fail") {
+      throw new QueueTransportError({
+        code: command.status === "output-limit" ? "fatal" : "transient",
+      });
     }
-    return command;
+    const included = parseCommandIncluded(command);
+    if (
+      command.status !== "pass" ||
+      included.statusCode < 200 ||
+      included.statusCode >= 300
+    ) {
+      throwIncludedTransport(
+        command,
+        included.statusCode,
+        included.retryAfter,
+      );
+    }
+    return { ...command, stdout: included.body };
+  }
+
+  function parseCommandIncluded(command: CommandResult): ReturnType<typeof parseIncluded> {
+    if (
+      command.status === "fail" &&
+      !/^HTTP\/\S+ \d{3}(?: |$)/.test(command.stdout)
+    ) {
+      throw new QueueTransportError({ code: "transient" });
+    }
+    return parseIncluded(command.stdout);
+  }
+
+  function throwIncludedTransport(
+    command: CommandResult,
+    statusCode: number,
+    retryAfter?: string,
+  ): never {
+    if (statusCode === 403 || statusCode === 429) {
+      throw new QueueTransportError({
+        code: "rate-limited",
+        statusCode,
+        ...(retryAfter === undefined ? {} : { retryAfter }),
+      });
+    }
+    throw new QueueTransportError({
+      code:
+        command.status === "timeout" ||
+        statusCode === 408 ||
+        statusCode === 425 ||
+        statusCode >= 500
+          ? "transient"
+          : "fatal",
+      statusCode,
+    });
   }
 
   async function listIssues(
@@ -294,7 +364,7 @@ export function createGhCliGitHubAdapter(
     state: "all" | "open" = "all",
   ): Promise<ParsedIssueBatch> {
     const repository = validateQueueRepository(repositoryName);
-    const response = await execute([
+    const baseArgs = [
       "api",
       `repos/${repository.owner}/${repository.repo}/issues`,
       "--method",
@@ -305,9 +375,24 @@ export function createGhCliGitHubAdapter(
       "labels=opc:work",
       "-f",
       "per_page=100",
-      "--paginate",
-      "--slurp",
-    ]);
+    ];
+    const command = await invoke([...baseArgs, "--include"]);
+    if (command.status !== "pass" && command.status !== "fail") {
+      throw new QueueTransportError({
+        code: command.status === "output-limit" ? "fatal" : "transient",
+      });
+    }
+    const included = parseCommandIncluded(command);
+    if (command.status !== "pass" || included.statusCode !== 200) {
+      throwIncludedTransport(
+        command,
+        included.statusCode,
+        included.retryAfter,
+      );
+    }
+    const first = parseIssueList(parseJson(included.body), repository.canonical);
+    if (!included.hasNextPage) return first;
+    const response = await execute([...baseArgs, "--paginate", "--slurp"]);
     return parseIssuePages(parseJson(response.stdout), repository.canonical);
   }
 
@@ -375,9 +460,11 @@ export function createGhCliGitHubAdapter(
       ];
       const command = await invoke(args);
       if (command.status !== "pass" && command.status !== "fail") {
-        throw new Error(`GH_API_FAILED: ${command.status}:${String(command.exitCode)}`);
+        throw new QueueTransportError({
+          code: command.status === "output-limit" ? "fatal" : "transient",
+        });
       }
-      const included = parseIncluded(command.stdout);
+      const included = parseCommandIncluded(command);
       if (included.statusCode === 304) {
         if (previousEtag === undefined) {
           throw new Error("GH_API_FAILED: unexpected 304");
@@ -388,7 +475,11 @@ export function createGhCliGitHubAdapter(
         };
       }
       if (command.status !== "pass" || included.statusCode !== 200) {
-        throw new Error(`GH_API_FAILED: ${command.status}:${String(included.statusCode)}`);
+        throwIncludedTransport(
+          command,
+          included.statusCode,
+          included.retryAfter,
+        );
       }
       const batch = included.hasNextPage
         ? parseIssuePages(

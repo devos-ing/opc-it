@@ -15,11 +15,14 @@ export type {
   QueueRepositoryPath,
   QueueStateLabel,
   QueueTransition,
+  QueueTransportErrorCode,
+  QueueTransportErrorOptions,
   QueueWorkIssue,
   ReadyWorkResult,
 } from "./ports.js";
 export {
   isActiveQueueStateLabel,
+  QueueTransportError,
   validateQueueIdentifier,
   validateQueueIssueNumber,
   validateQueueRepository,

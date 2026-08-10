@@ -15,6 +15,48 @@ export interface LocalJournal {
   saveCursor(repository: string, cursor: PollCursor): Promise<void>;
 }
 
+export type QueueTransportErrorCode = "rate-limited" | "transient" | "fatal";
+
+export interface QueueTransportErrorOptions {
+  readonly code: QueueTransportErrorCode;
+  readonly statusCode?: number;
+  readonly retryAfter?: string;
+}
+
+const queueTransportErrorCodes: ReadonlySet<string> = new Set([
+  "rate-limited",
+  "transient",
+  "fatal",
+]);
+
+export class QueueTransportError extends Error {
+  readonly code: QueueTransportErrorCode;
+  readonly statusCode: number | undefined;
+  readonly retryAfter: string | undefined;
+
+  constructor(options: QueueTransportErrorOptions) {
+    super(`QUEUE_TRANSPORT_ERROR: ${options.code}`);
+    if (
+      !queueTransportErrorCodes.has(options.code) ||
+      (options.statusCode !== undefined &&
+        (!Number.isInteger(options.statusCode) ||
+          options.statusCode < 100 ||
+          options.statusCode > 599)) ||
+      (options.retryAfter !== undefined &&
+        (options.retryAfter.length === 0 ||
+          options.retryAfter.length > 128 ||
+          /[^\x20-\x7e]/.test(options.retryAfter))) ||
+      (options.retryAfter !== undefined && options.code !== "rate-limited")
+    ) {
+      throw new TypeError("INVALID_QUEUE_TRANSPORT_ERROR");
+    }
+    this.name = "QueueTransportError";
+    this.code = options.code;
+    this.statusCode = options.statusCode;
+    this.retryAfter = options.retryAfter;
+  }
+}
+
 export type QueueStateLabel = `opc:${QueueWorkState}`;
 
 export interface QueueRepositoryPath {

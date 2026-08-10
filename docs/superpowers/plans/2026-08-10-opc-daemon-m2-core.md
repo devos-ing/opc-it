@@ -377,21 +377,21 @@ findings.
 - Modify: `src/runtime/delivery-loop.ts`
 - Test: `test/unit/daemon-loop.test.ts`
 
-- [ ] **Step 1: Write failing virtual-clock tests**
+- [x] **Step 1: Write failing virtual-clock tests**
 
 Inject `sleep`, `random`, `now`, and `AbortSignal`. Assert a disabled loop never calls GitHub, successful polls wait 60 seconds plus bounded jitter, 403/429 responses honor retry-after, transient failures exponentially back off up to 15 minutes, and abort stops without another tick.
 
-- [ ] **Step 2: Run and verify daemon runtime is missing**
+- [x] **Step 2: Run and verify daemon runtime is missing**
 
 Run: `rtk bun test test/unit/daemon-loop.test.ts`
 
 Expected: FAIL with missing daemon runtime.
 
-- [ ] **Step 3: Implement the loop without hidden dependencies**
+- [x] **Step 3: Implement the loop without hidden dependencies**
 
 Export `runDaemon({ loop, sleep, random, now, signal, onHealth })`. Keep retry state inside `runDaemon`, call `loop.tick(now())`, publish the last successful poll timestamp through `onHealth`, and never call `process.exit`. `runEnabledTick` must process onboarded repositories sequentially and perform `reconcileRepository` before `pollAndClaim` for each repository.
 
-- [ ] **Step 4: Run the M2 gate**
+- [x] **Step 4: Run the M2 gate**
 
 Run: `rtk bun test test/unit/daemon-loop.test.ts test/contract/journal-adapter.test.ts test/contract/queue-repository-adapter.test.ts test/integration/submit-work-v2.test.ts test/integration/daemon-claim.test.ts test/integration/daemon-reconcile.test.ts`
 
@@ -407,12 +407,26 @@ Run: `rtk bun run build`
 
 Expected: each command exits 0.
 
-- [ ] **Step 5: Commit daemon core**
+- [x] **Step 5: Commit daemon core**
 
 ```bash
 rtk git add src/runtime test/unit/daemon-loop.test.ts
 rtk git commit -m "feat: add durable daemon poll loop"
 ```
+
+**Task 6 evidence (2026-08-10):** The first virtual-clock tracer failed during
+module loading because the daemon runtime did not exist. The completed daemon
+loop suite passes 20/20 cases, and the combined M2 gate passes 116/116. Coverage
+includes the disabled zero-GitHub boundary, successful-poll health, bounded
+jitter, validated `Retry-After` seconds and HTTP dates, capped exponential
+backoff with reset, production `gh` transport classification, cooperative
+tick/sleep cancellation without orphan work, hostile dependency rejection,
+configuration snapshots, duplicate-repository rejection before effects,
+sequential reconcile-before-poll composition, per-repository gates, diagnostic
+aggregation, cursor commit-after-success, transport aborts, and active-claim
+isolation across repositories. The fresh full suite passes 595/595 tests with
+1,277 assertions; lint, typecheck, build, and diff-check exit 0. Final
+independent Spec and Standards reviews report 0 findings.
 
 ## M2 completion evidence
 
