@@ -209,7 +209,7 @@ rtk git commit -m "feat: add daemon delivery loop seam"
 - Create: `src/features/planning/index.ts`
 - Test: `test/unit/execution-contract-v2.test.ts`
 
-- [ ] **Step 1: Write failing schema and digest tests**
+- [ ] **Step 1: Write failing full-authority schema and digest tests**
 
 ```ts
 import { expect, test } from "bun:test";
@@ -225,34 +225,55 @@ const contract = {
   base_sha: "a".repeat(40),
   target_branch: "opc/work-42",
   milestone: "Add the daemon health endpoint",
+  goal: "Expose local daemon health without widening repository authority",
   acceptance: [{ id: "AC-1", statement: "doctor reports healthy", evidence: "bun test" }],
   paths: { writable: ["src/**", "test/**"], forbidden: [".github/**"] },
-  commands: { bootstrap: "bun install --frozen-lockfile", evidence: [{ id: "tests", run: "bun test" }] },
+  commands: {
+    bootstrap: "bun install --frozen-lockfile",
+    test: "bun test",
+    evidence: [{ id: "tests", run: "bun test" }],
+  },
   limits: { timeout_minutes: 30, attempts: 3 },
-  network: { mode: "deny", allow_domains: [] },
-  codex: { executor_profile: "opc-executor", reviewer_profile: "opc-reviewer" },
+  capabilities: {
+    network: { mode: "deny", allow_domains: [] },
+    host_directories: { readable: [], writable: [] },
+    other: [],
+  },
+  codex: {
+    executor: { profile: "opc-executor", model: "gpt-5.6-luna", effort: "high" },
+    reviewer: { profile: "opc-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+  },
 } as const;
 
 test("validates and deterministically digests a v2 contract", () => {
   const validated = validateExecutionContract(contract);
-  expect(executionContractDigest(validated)).toMatch(/^sha256:[0-9a-f]{64}$/);
-  expect(executionContractDigest({ ...validated })).toBe(executionContractDigest(validated));
+  expect(executionContractDigest(validated)).toBe(
+    "sha256:2070a553f83c78b78b98b2269ee676d6482cecfe6393065f814cb8eb9ad36e84",
+  );
 });
 
-test("rejects authority outside the closed schema", () => {
-  expect(() => validateExecutionContract({ ...contract, sudo: true })).toThrow("INVALID_CONTRACT");
-});
+// Also cover recursively reordered keys, caller mutation after validation,
+// every root/nested additional-property boundary, invalid SHA, required-array
+// minItems/duplicates, timeout and attempt bounds (including valid endpoints),
+// and every mandatory goal/command/capability/Codex authority field.
 ```
 
-- [ ] **Step 2: Run the test and verify the feature is missing**
+- [ ] **Step 2: Run the tests and verify the incomplete authority model fails**
 
 Run: `rtk bun test test/unit/execution-contract-v2.test.ts`
 
-Expected: FAIL with a missing planning module.
+Expected: FAIL because the current contract does not require the newly approved authority fields, does not detach/freeze validated values, and the digest accepts an unvalidated contract.
 
-- [ ] **Step 3: Implement the closed TypeBox contract and canonical digest**
+- [ ] **Step 3: Implement the closed TypeBox contract and opaque validated value**
 
-In `execution-contract.ts`, define a closed `ExecutionContractSchema` with the exact fields used by the test, `additionalProperties: false`, unique non-empty path arrays, SHA validation, timeout 1–90, and attempts 1–3. Export:
+In `execution-contract.ts`, define a closed `ExecutionContractSchema` with the exact fields used by the test. Every object boundary uses `additionalProperties: false`. Keep the repository owner/name pattern, 40-character lowercase SHA validation, unique non-empty repository path arrays, timeout 1–90, and attempts 1–3. Add:
+
+- required `goal`;
+- distinct `commands.bootstrap`, `commands.test`, and non-empty `commands.evidence`;
+- `capabilities.network`, absolute host-directory `readable`/`writable` grants, and explicit `other` grants;
+- independent executor/reviewer `profile`, `model`, and `effort` bindings.
+
+The public validator returns only a detached, recursively frozen, opaque/branded `ValidatedExecutionContract`. Clone only after AJV accepts the input, recursively freeze the clone, and keep the brand private to this module so callers cannot construct a digestible value without validation.
 
 ```ts
 import { Type, type Static } from "@sinclair/typebox";
@@ -269,9 +290,10 @@ export const ExecutionContractSchema = Type.Object({
   base_sha: Sha,
   target_branch: NonEmpty,
   milestone: NonEmpty,
+  goal: NonEmpty,
   acceptance: Type.Array(
     Type.Object({ id: NonEmpty, statement: NonEmpty, evidence: NonEmpty }, { additionalProperties: false }),
-    { minItems: 1 },
+    { minItems: 1, uniqueItems: true },
   ),
   paths: Type.Object({
     writable: Type.Array(NonEmpty, { minItems: 1, uniqueItems: true }),
@@ -279,50 +301,66 @@ export const ExecutionContractSchema = Type.Object({
   }, { additionalProperties: false }),
   commands: Type.Object({
     bootstrap: NonEmpty,
+    test: NonEmpty,
     evidence: Type.Array(
       Type.Object({ id: NonEmpty, run: NonEmpty }, { additionalProperties: false }),
-      { minItems: 1 },
+      { minItems: 1, uniqueItems: true },
     ),
   }, { additionalProperties: false }),
   limits: Type.Object({
     timeout_minutes: Type.Integer({ minimum: 1, maximum: 90 }),
     attempts: Type.Integer({ minimum: 1, maximum: 3 }),
   }, { additionalProperties: false }),
-  network: Type.Object({
-    mode: Type.Union([Type.Literal("deny"), Type.Literal("allowlist")]),
-    allow_domains: Type.Array(NonEmpty, { uniqueItems: true }),
+  capabilities: Type.Object({
+    network: Type.Object({
+      mode: Type.Union([Type.Literal("deny"), Type.Literal("allowlist")]),
+      allow_domains: Type.Array(NonEmpty, { uniqueItems: true }),
+    }, { additionalProperties: false }),
+    host_directories: Type.Object({
+      readable: Type.Array(Type.String({ pattern: "^/" }), { uniqueItems: true }),
+      writable: Type.Array(Type.String({ pattern: "^/" }), { uniqueItems: true }),
+    }, { additionalProperties: false }),
+    other: Type.Array(NonEmpty, { uniqueItems: true }),
   }, { additionalProperties: false }),
-  codex: Type.Object({ executor_profile: NonEmpty, reviewer_profile: NonEmpty }, { additionalProperties: false }),
+  codex: Type.Object({
+    executor: Type.Object({ profile: NonEmpty, model: NonEmpty, effort: NonEmpty }, { additionalProperties: false }),
+    reviewer: Type.Object({ profile: NonEmpty, model: NonEmpty, effort: NonEmpty }, { additionalProperties: false }),
+  }, { additionalProperties: false }),
 }, { additionalProperties: false });
 
-export type ExecutionContract = Static<typeof ExecutionContractSchema>;
+type ExecutionContract = Static<typeof ExecutionContractSchema>;
+declare const validatedExecutionContract: unique symbol;
+export type ValidatedExecutionContract = DeepReadonly<ExecutionContract> & {
+  readonly [validatedExecutionContract]: true;
+};
 const validator = new Ajv({ allErrors: true }).compile(ExecutionContractSchema);
 
-export function validateExecutionContract(value: unknown): ExecutionContract {
+export function validateExecutionContract(value: unknown): ValidatedExecutionContract {
   if (!validator(value)) throw new DomainError("INVALID_CONTRACT", JSON.stringify(validator.errors));
-  return value as ExecutionContract;
+  const detached = structuredClone(value);
+  deepFreeze(detached);
+  return detached as ValidatedExecutionContract;
 }
 ```
 
-In `plan-digest.ts`, canonicalize and hash the validated value:
+In `plan-digest.ts`, reuse the canonical SHA helper already owned by `src/domain/identity.ts`; do not duplicate `node:crypto` or `json-canonicalize`:
 
 ```ts
-import { createHash } from "node:crypto";
-import { canonicalize } from "json-canonicalize";
-import type { ExecutionContract } from "./execution-contract.js";
+import { digestCanonical, type Sha256 } from "../../domain/identity.js";
+import type { ValidatedExecutionContract } from "./execution-contract.js";
 
-export function executionContractDigest(contract: ExecutionContract): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(canonicalize(contract)).digest("hex")}`;
+export function executionContractDigest(contract: ValidatedExecutionContract): Sha256 {
+  return digestCanonical(contract);
 }
 ```
 
-Export only `ExecutionContract`, `validateExecutionContract`, and `executionContractDigest` from `index.ts`.
+Export only `ValidatedExecutionContract`, `validateExecutionContract`, and `executionContractDigest` from `index.ts`.
 
 - [ ] **Step 4: Verify the feature through its public interface**
 
 Run: `rtk bun test test/unit/execution-contract-v2.test.ts`
 
-Expected: PASS, 2 tests and 0 failures.
+Expected: all planning contract tests pass with 0 failures.
 
 Run: `rtk bun run typecheck`
 

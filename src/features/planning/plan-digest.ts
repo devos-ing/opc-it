@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto";
-import { canonicalize } from "json-canonicalize";
-import type { ExecutionContract } from "./execution-contract.js";
+import { digestCanonical, type Sha256 } from "../../domain/identity.js";
+import type { ValidatedExecutionContract } from "./execution-contract.js";
 
-export function executionContractDigest(contract: ExecutionContract): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(canonicalize(contract)).digest("hex")}`;
+export function executionContractDigest(contract: ValidatedExecutionContract): Sha256 {
+  return digestCanonical(contract);
 }

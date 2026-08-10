@@ -4,6 +4,11 @@ import { DomainError } from "../../domain/errors.js";
 
 const NonEmpty = Type.String({ minLength: 1 });
 const Sha = Type.String({ pattern: "^[0-9a-f]{40}$" });
+const HostDirectory = Type.String({ pattern: "^/" });
+const CodexRoute = Type.Object(
+  { profile: NonEmpty, model: NonEmpty, effort: NonEmpty },
+  { additionalProperties: false },
+);
 
 export const ExecutionContractSchema = Type.Object(
   {
@@ -13,12 +18,13 @@ export const ExecutionContractSchema = Type.Object(
     base_sha: Sha,
     target_branch: NonEmpty,
     milestone: NonEmpty,
+    goal: NonEmpty,
     acceptance: Type.Array(
       Type.Object(
         { id: NonEmpty, statement: NonEmpty, evidence: NonEmpty },
         { additionalProperties: false },
       ),
-      { minItems: 1 },
+      { minItems: 1, uniqueItems: true },
     ),
     paths: Type.Object(
       {
@@ -30,9 +36,10 @@ export const ExecutionContractSchema = Type.Object(
     commands: Type.Object(
       {
         bootstrap: NonEmpty,
+        test: NonEmpty,
         evidence: Type.Array(
           Type.Object({ id: NonEmpty, run: NonEmpty }, { additionalProperties: false }),
-          { minItems: 1 },
+          { minItems: 1, uniqueItems: true },
         ),
       },
       { additionalProperties: false },
@@ -44,28 +51,63 @@ export const ExecutionContractSchema = Type.Object(
       },
       { additionalProperties: false },
     ),
-    network: Type.Object(
+    capabilities: Type.Object(
       {
-        mode: Type.Union([Type.Literal("deny"), Type.Literal("allowlist")]),
-        allow_domains: Type.Array(NonEmpty, { uniqueItems: true }),
+        network: Type.Object(
+          {
+            mode: Type.Union([Type.Literal("deny"), Type.Literal("allowlist")]),
+            allow_domains: Type.Array(NonEmpty, { uniqueItems: true }),
+          },
+          { additionalProperties: false },
+        ),
+        host_directories: Type.Object(
+          {
+            readable: Type.Array(HostDirectory, { uniqueItems: true }),
+            writable: Type.Array(HostDirectory, { uniqueItems: true }),
+          },
+          { additionalProperties: false },
+        ),
+        other: Type.Array(NonEmpty, { uniqueItems: true }),
       },
       { additionalProperties: false },
     ),
     codex: Type.Object(
-      { executor_profile: NonEmpty, reviewer_profile: NonEmpty },
+      {
+        executor: CodexRoute,
+        reviewer: CodexRoute,
+      },
       { additionalProperties: false },
     ),
   },
   { additionalProperties: false },
 );
 
-export type ExecutionContract = Static<typeof ExecutionContractSchema>;
+type ExecutionContract = Static<typeof ExecutionContractSchema>;
+type DeepReadonly<Value> = Value extends readonly (infer Item)[]
+  ? readonly DeepReadonly<Item>[]
+  : Value extends object
+    ? { readonly [Key in keyof Value]: DeepReadonly<Value[Key]> }
+    : Value;
+
+declare const validatedExecutionContract: unique symbol;
+
+export type ValidatedExecutionContract = DeepReadonly<ExecutionContract> & {
+  readonly [validatedExecutionContract]: true;
+};
 
 const validator = new Ajv({ allErrors: true }).compile(ExecutionContractSchema);
 
-export function validateExecutionContract(value: unknown): ExecutionContract {
+function deepFreeze(value: unknown): void {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  Object.freeze(value);
+}
+
+export function validateExecutionContract(value: unknown): ValidatedExecutionContract {
   if (!validator(value)) {
     throw new DomainError("INVALID_CONTRACT", JSON.stringify(validator.errors));
   }
-  return value;
+  const detached = structuredClone(value);
+  deepFreeze(detached);
+  return detached as ValidatedExecutionContract;
 }
