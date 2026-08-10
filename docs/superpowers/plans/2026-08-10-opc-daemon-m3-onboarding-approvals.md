@@ -26,16 +26,16 @@
 
 **Files:** Create `src/features/onboarding/permission-manifest.ts`, `src/features/onboarding/index.ts`; test `test/unit/permission-manifest.test.ts`.
 
-- [ ] Write a failing test that calls `previewOnboarding(input)` twice, expects identical canonical digest, exact current-user paths, `enabled: false`, and no filesystem calls.
-- [ ] Run `rtk bun test test/unit/permission-manifest.test.ts`; expect missing module failure.
-- [ ] Implement the closed result:
+- [x] Write a failing test that calls `previewOnboarding(input)` twice, expects identical canonical digest, exact current-user paths, `enabled: false`, and no filesystem calls.
+- [x] Run `rtk bun test test/unit/permission-manifest.test.ts`; expect missing module failure.
+- [x] Implement the closed result:
 
 ```ts
 export interface PermissionManifest {
   readonly version: 1;
   readonly githubLogin: string;
   readonly repositories: readonly string[];
-  readonly paths: { readonly applicationSupport: string; readonly logs: string; readonly launchAgent: string; readonly codexHome: string };
+  readonly paths: { readonly binary: string; readonly applicationSupport: string; readonly logs: string; readonly launchAgent: string; readonly codexHome: string };
   readonly networkDefault: "deny";
   readonly enabled: false;
 }
@@ -47,8 +47,10 @@ export function previewOnboarding(input: OnboardingInput): { manifest: Permissio
 ```
 
 Reject `/etc`, `/Library/LaunchDaemons`, `/Users/opc-runner`, `~/.codex`, public/fork/cross-owner repositories, duplicate repositories, and any path outside the current home.
-- [ ] Run the focused test and `rtk bun run typecheck`; expect exit 0.
-- [ ] Commit with `rtk git commit -m "feat: preview staged daemon onboarding"` after adding the feature and test files.
+- [x] Run the focused test and `rtk bun run typecheck`; expect exit 0.
+- [x] Commit with `rtk git commit -m "feat: preview staged daemon onboarding"` after adding the feature and test files.
+
+Task 1 evidence: the initial focused run failed with the required missing `src/features/onboarding/index.js` module (0 pass, 1 fail). The pure public seam now descriptor-validates and snapshots a closed plain-data input without invoking accessors, accepts repository identity facts only as supplied data, emits frozen canonical current-user binary/application/log/LaunchAgent/Codex paths with `enabled: false`, and binds the frozen own-data manifest through the shared `digestCanonical` helper while failing closed on inherited `toJSON` hooks. Focused verification passes 6 tests / 32 expectations; lint and typecheck exit 0. No filesystem, network, host, Keychain, LaunchAgent, `gh`, or Codex adapter is imported or called.
 
 ### Task 2: Apply GitHub, Codex, and signing identity grants
 
