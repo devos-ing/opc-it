@@ -1,6 +1,11 @@
+export type EnabledTickResult = {
+  readonly status: "idle" | "worked";
+  readonly repositoriesChecked: number;
+};
+
 export type TickResult =
   | { readonly status: "disabled"; readonly repositoriesChecked: 0 }
-  | { readonly status: "idle" | "worked"; readonly repositoriesChecked: number };
+  | EnabledTickResult;
 
 export interface DeliveryLoop {
   tick(now: Date): Promise<TickResult>;
@@ -8,7 +13,7 @@ export interface DeliveryLoop {
 
 export interface DeliveryLoopDependencies {
   readonly isEnabled: () => Promise<boolean>;
-  readonly runEnabledTick: (now: Date) => Promise<TickResult>;
+  readonly runEnabledTick: (now: Date) => Promise<EnabledTickResult>;
 }
 
 export function createDeliveryLoop(dependencies: DeliveryLoopDependencies): DeliveryLoop {
