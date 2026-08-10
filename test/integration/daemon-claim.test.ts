@@ -363,6 +363,188 @@ test("a losing cross-Issue proposal can win only after the repository epoch ends
   });
 });
 
+test("a recovering root blocks unrelated Ready Work while its child is missing", async () => {
+  const github = createInMemoryGitHub({
+    now: () => "2026-08-10T00:00:00.000Z",
+  });
+  const rootNumber = await createReadyWork(github, {
+    workId: "work-missing-recovery-root",
+    occurredAt: "2026-08-10T00:00:10.000Z",
+  });
+  const unrelatedNumber = await createReadyWork(github, {
+    workId: "work-missing-recovery-unrelated",
+    occurredAt: "2026-08-10T00:00:20.000Z",
+  });
+  const root = await github.findWork(repository, "work-missing-recovery-root");
+  if (root === undefined) throw new Error("missing pending Recovery root");
+  expect(
+    await pollAndClaim({
+      repository,
+      github,
+      installation: { id: "installation-a", keyId: "key-a" },
+      signingKey,
+      verificationKeys: { "key-a": signingKey },
+      leaseId: "lease-missing-recovery-root",
+      occurredAt: "2026-08-10T00:01:00.000Z",
+      leaseExpiresAt: "2026-08-10T00:31:00.000Z",
+    }),
+  ).toMatchObject({ status: "claimed", issueNumber: rootNumber });
+  for (const transition of [
+    {
+      from: "claimed" as const,
+      event: "start" as const,
+      to: "running" as const,
+      occurred_at: "2026-08-10T00:01:01.000Z",
+    },
+    {
+      from: "running" as const,
+      event: "work-failure" as const,
+      to: "recovering" as const,
+      occurred_at: "2026-08-10T00:01:02.000Z",
+    },
+  ]) {
+    await github.appendTransition(
+      repository,
+      rootNumber,
+      JSON.stringify(
+        signTransition(
+          {
+            version: 1,
+            installation_id: "installation-a",
+            key_id: "key-a",
+            issue_number: rootNumber,
+            work_id: "work-missing-recovery-root",
+            ...transition,
+            metadata: { lease_id: "lease-missing-recovery-root" },
+          },
+          signingKey,
+        ),
+      ),
+    );
+  }
+  await github.setStateLabel(repository, rootNumber, "opc:recovering");
+
+  expect(
+    await pollAndClaim({
+      repository,
+      github,
+      installation: { id: "installation-b", keyId: "key-b" },
+      signingKey: "installation-b-secret",
+      verificationKeys: {
+        "key-a": signingKey,
+        "key-b": "installation-b-secret",
+      },
+      leaseId: "lease-unrelated-must-wait",
+      occurredAt: "2026-08-10T00:02:00.000Z",
+      leaseExpiresAt: "2026-08-10T00:32:00.000Z",
+    }),
+  ).toMatchObject({ status: "idle" });
+  expect(await github.findWork(repository, "work-missing-recovery-unrelated"))
+    .toMatchObject({ number: unrelatedNumber, stateLabel: "opc:ready" });
+
+  const malformedRecoveryId = deriveRecoveryWorkId(root.workId, 1);
+  const malformedRecovery = await github.createWork({
+    repository,
+    workId: malformedRecoveryId,
+    digest: root.digest,
+    body: "malformed Recovery body",
+  });
+  await github.appendTransition(
+    repository,
+    malformedRecovery.number,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-a",
+          key_id: "key-a",
+          issue_number: malformedRecovery.number,
+          work_id: malformedRecoveryId,
+          from: "recovering",
+          event: "retry",
+          to: "ready",
+          occurred_at: "2026-08-10T00:02:01.000Z",
+          metadata: {
+            next_attempt: "1",
+            plan_digest: root.digest,
+            root_work_id: root.workId,
+          },
+        },
+        signingKey,
+      ),
+    ),
+  );
+  await github.setStateLabel(
+    repository,
+    malformedRecovery.number,
+    "opc:ready",
+  );
+  expect(
+    await pollAndClaim({
+      repository,
+      github,
+      installation: { id: "installation-b", keyId: "key-b" },
+      signingKey: "installation-b-secret",
+      verificationKeys: {
+        "key-a": signingKey,
+        "key-b": "installation-b-secret",
+      },
+      leaseId: "lease-malformed-child",
+      occurredAt: "2026-08-10T00:02:02.000Z",
+      leaseExpiresAt: "2026-08-10T00:32:02.000Z",
+    }),
+  ).toMatchObject({
+    status: "idle",
+    diagnostics: [
+      { code: "MALFORMED_WORK_ISSUE", issueNumber: malformedRecovery.number },
+    ],
+  });
+  expect(await github.findWork(repository, "work-missing-recovery-unrelated"))
+    .toMatchObject({ stateLabel: "opc:ready" });
+
+  await github.appendTransition(
+    repository,
+    rootNumber,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-a",
+          key_id: "key-a",
+          issue_number: rootNumber,
+          work_id: root.workId,
+          from: "recovering",
+          event: "request-approval",
+          to: "awaiting-approval",
+          occurred_at: "2026-08-10T00:02:03.000Z",
+          metadata: { lease_id: "lease-missing-recovery-root" },
+        },
+        signingKey,
+      ),
+    ),
+  );
+  await github.setStateLabel(repository, rootNumber, "opc:awaiting-approval");
+  expect(
+    await pollAndClaim({
+      repository,
+      github,
+      installation: { id: "installation-b", keyId: "key-b" },
+      signingKey: "installation-b-secret",
+      verificationKeys: {
+        "key-a": signingKey,
+        "key-b": "installation-b-secret",
+      },
+      leaseId: "lease-after-reapproval-request",
+      occurredAt: "2026-08-10T00:02:04.000Z",
+      leaseExpiresAt: "2026-08-10T00:32:04.000Z",
+    }),
+  ).toMatchObject({
+    status: "claimed",
+    issueNumber: unrelatedNumber,
+    workId: "work-missing-recovery-unrelated",
+  });
+});
+
 test("a recovering root releases its repository epoch for the child Recovery", async () => {
   const github = createInMemoryGitHub({
     now: () => "2026-08-10T00:00:00.000Z",

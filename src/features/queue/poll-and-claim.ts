@@ -337,7 +337,16 @@ export async function pollAndClaim(
         repositoryJournal.authority.currentByIssue.get(issue.number) ??
           (evaluated === undefined ? view.current : undefined),
       );
-      if (work !== undefined) eligible.push(work);
+      const pendingRecovery = repositoryJournal.authority.pendingRecovery;
+      if (
+        work !== undefined &&
+        (pendingRecovery === undefined ||
+          (work.recovery &&
+            work.contract.work_id === pendingRecovery.rootWorkId &&
+            work.digest === pendingRecovery.planDigest))
+      ) {
+        eligible.push(work);
+      }
     } catch {
       diagnostics = mergeQueueDiagnostics(diagnostics, [diagnostic(issue.number)]);
     }

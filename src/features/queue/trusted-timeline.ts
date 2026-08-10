@@ -1,6 +1,10 @@
 import { DomainError } from "../../domain/errors.js";
 import type { QueueTransition } from "./ports.js";
 import {
+  deriveRecoveryWorkId,
+  parseRecoveryWorkId,
+} from "./recovery-work-id.js";
+import {
   verifyTransition,
   type TransitionPayload,
 } from "./transition-record.js";
@@ -45,6 +49,13 @@ export interface RepositoryJournalAuthority {
     number,
     readonly TrustedTransition[]
   >;
+  readonly pendingRecovery?: PendingRecoveryAuthority | undefined;
+}
+
+export interface PendingRecoveryAuthority {
+  readonly rootWorkId: string;
+  readonly planDigest: string;
+  readonly transition: TrustedTransition;
 }
 
 const repositoryActiveStates = new Set([
@@ -73,6 +84,26 @@ function logicalEventFingerprint(payload: TransitionPayload): string {
   });
 }
 
+function isPendingRecoveryClaim(
+  payload: TransitionPayload,
+  recoveryReady: TrustedTransition | undefined,
+  pending: PendingRecoveryAuthority,
+): boolean {
+  const parsedRecoveryId = parseRecoveryWorkId(payload.work_id);
+  return (
+    recoveryReady?.payload.event === "retry" &&
+    recoveryReady.payload.to === "ready" &&
+    parsedRecoveryId !== undefined &&
+    recoveryReady.payload.metadata.root_work_id === pending.rootWorkId &&
+    recoveryReady.payload.metadata.next_attempt ===
+      String(parsedRecoveryId.nextAttempt) &&
+    recoveryReady.payload.metadata.plan_digest === pending.planDigest &&
+    payload.metadata.plan_digest === pending.planDigest &&
+    deriveRecoveryWorkId(pending.rootWorkId, parsedRecoveryId.nextAttempt) ===
+      payload.work_id
+  );
+}
+
 export function arbitrateRepositoryJournal(
   entries: readonly RepositoryJournalEntry[],
 ): RepositoryJournalAuthority {
@@ -92,8 +123,11 @@ export function arbitrateRepositoryJournal(
   const currentByIssue = new Map<number, TrustedTransition>();
   const acceptedByIssue = new Map<number, TrustedTransition[]>();
   const logicalEvents = new Map<string, string>();
+  const rootWorkIdByIssue = new Map<number, string>();
   let active: TrustedTransition | undefined;
   let leaseAuthority: TrustedTransition | undefined;
+  let pendingRecovery: PendingRecoveryAuthority | undefined;
+  let pendingRecoveryLeaseAuthority: TrustedTransition | undefined;
 
   for (const { issueNumber, transition } of ordered) {
     if (seenCommentIds.has(transition.commentId)) {
@@ -129,6 +163,16 @@ export function arbitrateRepositoryJournal(
         );
       }
       if (active !== undefined || currentState !== "ready") continue;
+      if (
+        pendingRecovery !== undefined &&
+        !isPendingRecoveryClaim(
+          payload,
+          currentByIssue.get(issueNumber),
+          pendingRecovery,
+        )
+      ) {
+        continue;
+      }
       issueStates.set(issueNumber, payload.to);
       currentByIssue.set(issueNumber, transition);
       const accepted = acceptedByIssue.get(issueNumber) ?? [];
@@ -136,6 +180,8 @@ export function arbitrateRepositoryJournal(
       acceptedByIssue.set(issueNumber, accepted);
       active = transition;
       leaseAuthority = transition;
+      pendingRecovery = undefined;
+      pendingRecoveryLeaseAuthority = undefined;
       continue;
     }
 
@@ -145,13 +191,17 @@ export function arbitrateRepositoryJournal(
         `broken repository journal at comment ${String(transition.commentId)}`,
       );
     }
+    const governingLease =
+      active?.payload.issue_number === issueNumber
+        ? leaseAuthority
+        : pendingRecovery?.transition.payload.issue_number === issueNumber
+          ? pendingRecoveryLeaseAuthority
+          : undefined;
     if (
-      active !== undefined &&
-      active.payload.issue_number === issueNumber &&
-      leaseAuthority !== undefined &&
-      (payload.installation_id !== leaseAuthority.payload.installation_id ||
-        payload.key_id !== leaseAuthority.payload.key_id ||
-        payload.metadata.lease_id !== leaseAuthority.payload.metadata.lease_id)
+      governingLease !== undefined &&
+      (payload.installation_id !== governingLease.payload.installation_id ||
+        payload.key_id !== governingLease.payload.key_id ||
+        payload.metadata.lease_id !== governingLease.payload.metadata.lease_id)
     ) {
       throw new DomainError(
         "INVALID_TRANSITION",
@@ -163,10 +213,40 @@ export function arbitrateRepositoryJournal(
     const accepted = acceptedByIssue.get(issueNumber) ?? [];
     accepted.push(transition);
     acceptedByIssue.set(issueNumber, accepted);
+    if (
+      payload.event === "retry" &&
+      typeof payload.metadata.root_work_id === "string"
+    ) {
+      rootWorkIdByIssue.set(issueNumber, payload.metadata.root_work_id);
+    }
+    if (
+      pendingRecovery?.transition.payload.issue_number === issueNumber &&
+      payload.from === "recovering" &&
+      payload.to !== "recovering"
+    ) {
+      pendingRecovery = undefined;
+      pendingRecoveryLeaseAuthority = undefined;
+    }
     if (active?.payload.issue_number !== issueNumber) continue;
     if (repositoryActiveStates.has(payload.to)) {
       active = transition;
       continue;
+    }
+    if (payload.to === "recovering" && leaseAuthority !== undefined) {
+      const planDigest = leaseAuthority.payload.metadata.plan_digest;
+      if (planDigest === undefined) {
+        throw new DomainError(
+          "INCOMPLETE_CLAIM_METADATA",
+          `recovering authority at comment ${String(transition.commentId)}`,
+        );
+      }
+      pendingRecovery = {
+        rootWorkId:
+          rootWorkIdByIssue.get(issueNumber) ?? leaseAuthority.payload.work_id,
+        planDigest,
+        transition,
+      };
+      pendingRecoveryLeaseAuthority = leaseAuthority;
     }
     active = undefined;
     leaseAuthority = undefined;
@@ -177,6 +257,7 @@ export function arbitrateRepositoryJournal(
     ...(leaseAuthority === undefined ? {} : { leaseAuthority }),
     currentByIssue,
     acceptedByIssue,
+    ...(pendingRecovery === undefined ? {} : { pendingRecovery }),
   };
 }
 
