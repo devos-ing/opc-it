@@ -154,6 +154,11 @@ test("rejects correctly signed payloads outside the complete closed v1 shape", (
     Object.create({ inherited: "authority" }) as Record<string, string>,
     { lease_id: "lease-a" },
   );
+  const hiddenMetadata: Record<string, string> = {};
+  Object.defineProperty(hiddenMetadata, "lease_id", {
+    enumerable: false,
+    value: "lease-a",
+  });
   const malformedPayloads: readonly unknown[] = [
     incompletePayload,
     ...missingFields,
@@ -168,6 +173,7 @@ test("rejects correctly signed payloads outside the complete closed v1 shape", (
     { ...payload, metadata: [] },
     { ...payload, metadata: { lease_id: 42 } },
     { ...payload, metadata: surprisingMetadata },
+    { ...payload, metadata: hiddenMetadata },
     { ...payload, unexpected: "authority" },
   ];
 
@@ -181,6 +187,69 @@ test("rejects correctly signed payloads outside the complete closed v1 shape", (
       }),
     ).toThrow(/^INVALID_TRANSITION:/);
   }
+});
+
+test("rejects authority hidden from canonical JSON before it can be mutated", () => {
+  const hiddenRelation = { ...payload } as Record<string, unknown>;
+  for (const field of ["from", "event", "to"] as const) {
+    Object.defineProperty(hiddenRelation, field, {
+      configurable: true,
+      enumerable: false,
+      value: hiddenRelation[field],
+      writable: true,
+    });
+  }
+  const externallySigned = externallySign(hiddenRelation);
+  hiddenRelation.from = "claimed";
+  hiddenRelation.event = "start";
+  hiddenRelation.to = "running";
+
+  expect(() =>
+    signTransition(hiddenRelation as unknown as TransitionPayload, "secret-a"),
+  ).toThrow(/^INVALID_TRANSITION:/);
+  expect(() =>
+    verifyTransition(externallySigned, { "key-1": "secret-a" }),
+  ).toThrow(/^INVALID_TRANSITION:/);
+});
+
+test("rejects accessor authority without executing getters", () => {
+  let getterCalls = 0;
+  const accessorPayload = { ...payload } as Record<string, unknown>;
+  Object.defineProperty(accessorPayload, "work_id", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "work-42";
+    },
+  });
+  const accessorMetadata: Record<string, unknown> = {};
+  Object.defineProperty(accessorMetadata, "lease_id", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "lease-a";
+    },
+  });
+  const metadataPayload = { ...payload, metadata: accessorMetadata };
+
+  expect(() =>
+    signTransition(accessorPayload as unknown as TransitionPayload, "secret-a"),
+  ).toThrow(/^INVALID_TRANSITION:/);
+  expect(() =>
+    verifyTransition(
+      {
+        payload: accessorPayload as unknown as TransitionPayload,
+        hmac_sha256: "0".repeat(64),
+      },
+      { "key-1": "secret-a" },
+    ),
+  ).toThrow(/^INVALID_TRANSITION:/);
+  expect(() =>
+    signTransition(metadataPayload as unknown as TransitionPayload, "secret-a"),
+  ).toThrow(/^INVALID_TRANSITION:/);
+  expect(getterCalls).toBe(0);
 });
 
 test("rejects payload and signature tampering", () => {

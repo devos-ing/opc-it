@@ -63,26 +63,39 @@ function isCanonicalInstant(value: unknown): value is string {
   return !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value;
 }
 
-function isPlainStringRecord(
+function isPlainDataObject(
   value: unknown,
-): value is Readonly<Record<string, string>> {
+): value is Readonly<Record<string, unknown>> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const prototype = Object.getPrototypeOf(value) as unknown;
   if (prototype !== Object.prototype && prototype !== null) return false;
-  return Reflect.ownKeys(value).every(
-    (key) => typeof key === "string" && typeof Reflect.get(value, key) === "string",
+  return Reflect.ownKeys(value).every((key) => {
+    if (typeof key !== "string") return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return (
+      descriptor !== undefined && descriptor.enumerable && "value" in descriptor
+    );
+  });
+}
+
+function isPlainStringRecord(
+  value: unknown,
+): value is Readonly<Record<string, string>> {
+  return (
+    isPlainDataObject(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
   );
 }
 
 function hasExactPayloadFields(
-  value: object,
+  value: Readonly<Record<string, unknown>>,
 ): value is Record<(typeof payloadFieldNames)[number], unknown> {
-  const keys = Reflect.ownKeys(value);
+  const keys = Object.keys(value);
   return (
     keys.length === payloadFieldNames.length &&
-    keys.every((key) => typeof key === "string" && payloadFieldSet.has(key))
+    keys.every((key) => payloadFieldSet.has(key))
   );
 }
 
@@ -90,8 +103,7 @@ function assertTransitionSemantics(
   payload: unknown,
 ): asserts payload is TransitionPayload {
   if (
-    typeof payload !== "object" ||
-    payload === null ||
+    !isPlainDataObject(payload) ||
     !hasExactPayloadFields(payload)
   ) {
     throw new DomainError("INVALID_TRANSITION", "malformed transition payload");
