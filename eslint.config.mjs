@@ -1,17 +1,24 @@
 import js from "@eslint/js";
 import { defineConfig } from "eslint/config";
 import { posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import tseslint from "typescript-eslint";
 
 const featureRoot = "src/features/";
+const repositoryRoot = posix.dirname(fileURLToPath(import.meta.url).replaceAll("\\", "/"));
 
 function projectPath(filename) {
   const normalized = filename.replaceAll("\\", "/");
-  for (const root of ["src/", "test/", "scripts/"]) {
-    const index = normalized.lastIndexOf(`/${root}`);
-    if (index !== -1) return normalized.slice(index + 1);
-  }
+  if (normalized.startsWith(`${repositoryRoot}/`)) return normalized.slice(repositoryRoot.length + 1);
   return normalized;
+}
+
+function projectSpecifier(specifier) {
+  const normalized = posix.normalize(specifier.replaceAll("\\", "/"));
+  if (normalized.startsWith(`${repositoryRoot}/`)) {
+    return normalized.slice(repositoryRoot.length + 1);
+  }
+  return undefined;
 }
 
 function featureImportViolation(importer, specifier) {
@@ -20,7 +27,7 @@ function featureImportViolation(importer, specifier) {
     ? posix.normalize(posix.join(posix.dirname(projectImporter), specifier))
     : specifier.startsWith("src/")
       ? posix.normalize(specifier)
-      : undefined;
+      : projectSpecifier(specifier);
   if (resolved === undefined) return undefined;
   const sourceFeature = projectImporter.startsWith(featureRoot)
     ? projectImporter.slice(featureRoot.length).split("/")[0]

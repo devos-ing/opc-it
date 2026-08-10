@@ -4,6 +4,7 @@ import { posix } from "node:path";
 import ts from "typescript";
 
 const featureRoot = "src/features/";
+const repositoryRoot = posix.resolve(".");
 const eslint = new ESLint();
 
 type ModuleReference =
@@ -73,6 +74,10 @@ function resolveProjectImport(importer: string, specifier: string): string | und
     return posix.normalize(posix.join(posix.dirname(importer), specifier));
   }
   if (specifier.startsWith("src/")) return posix.normalize(specifier);
+  const normalized = posix.normalize(specifier);
+  if (normalized.startsWith(`${repositoryRoot}/`)) {
+    return normalized.slice(repositoryRoot.length + 1);
+  }
   return undefined;
 }
 
@@ -236,5 +241,51 @@ describe("every module form preserves feature seams", () => {
       .filter((message) => message.ruleId === "opc-feature-seams/imports");
 
     expect(seamMessages).toEqual([]);
+  });
+
+  test("rejects absolute workspace feature and platform bypasses", async () => {
+    const callerSource = `import "${repositoryRoot}/src/features/queue/private.js";`;
+    const featureSource = `import "${repositoryRoot}/src/platform/private.js";`;
+
+    expect(importViolations("test/contract/mutation.ts", callerSource)).not.toEqual([]);
+    expect(importViolations("src/features/planning/mutation.ts", featureSource)).not.toEqual([]);
+
+    const [callerResult] = await eslint.lintText(callerSource, {
+      filePath: "test/contract/feature-imports.test.ts",
+    });
+    const [featureResult] = await eslint.lintText(featureSource, {
+      filePath: "src/features/planning/index.ts",
+    });
+    expect(
+      [callerResult, featureResult].map((result) =>
+        result?.messages.some((message) => message.ruleId === "opc-feature-seams/imports"),
+      ),
+    ).toEqual([true, true]);
+  });
+
+  test("allows absolute public indexes and unrelated vendor or system paths", async () => {
+    const callerSource = `
+      import "${repositoryRoot}/src/features/queue/index.js";
+      import "/opt/vendor/src/features/queue/private.js";
+      import "/System/Library/platform/private.js";
+    `;
+    const featureSource = `
+      import "/opt/vendor/src/features/queue/private.js";
+      import "/System/Library/platform/private.js";
+    `;
+
+    expect(importViolations("test/contract/allowed.ts", callerSource)).toEqual([]);
+    expect(importViolations("src/features/planning/allowed.ts", featureSource)).toEqual([]);
+
+    const results = await Promise.all([
+      eslint.lintText(callerSource, { filePath: "test/contract/feature-imports.test.ts" }),
+      eslint.lintText(featureSource, { filePath: "src/features/planning/index.ts" }),
+    ]);
+    expect(
+      results
+        .flat()
+        .flatMap((result) => result.messages)
+        .filter((message) => message.ruleId === "opc-feature-seams/imports"),
+    ).toEqual([]);
   });
 });
