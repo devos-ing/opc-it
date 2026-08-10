@@ -5,8 +5,8 @@
 ## 固定版本与停止条件
 
 - Control Repository：`0xroylee/OPC`（private）
-- Action SHA：`3983e6f27f76331b1d29be51d8d45d0ff5d79b57`
-- Reusable Workflow SHA：`4c453fcd43d0fa4169e1c49136ec03bab446b824`
+- Action SHA：`bffcd0df2bd642f2b20079594d518b5ab195f106`
+- Reusable Workflow SHA：`3bed70bfaacae34919fee03d6787043deb69d2c5`
 - Sandbox：`0xroylee/opc-m3-sandbox`（private、非 fork、无外部 collaborator）
 - Bun：`1.3.8`
 - Codex CLI：`0.144.4`
@@ -52,7 +52,7 @@ rtk gh variable set OPC_ENABLED --body false --repo 0xroylee/opc-m3-sandbox
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m3-sandbox \
   --control-owner 0xroylee \
-  --control-ref 4c453fcd43d0fa4169e1c49136ec03bab446b824 \
+  --control-ref 3bed70bfaacae34919fee03d6787043deb69d2c5 \
   --approver 0xroylee \
   --output .opc/m3-sandbox-preview
 ```
