@@ -12,7 +12,10 @@ import {
   type ApprovalRequest,
   type ApprovalStore,
   type ApprovalTransitionOutboxItem,
+  type TelegramPairingAttempt,
+  type TelegramPairingChannel,
   type TelegramPairingChallengeRecord,
+  type TelegramPairingPollPage,
 } from "../../features/approvals/index.js";
 
 interface PairingRow {
@@ -73,6 +76,11 @@ export interface TelegramApprovalChannelOptions {
   readonly chatId: string;
   readonly request: (request: TelegramHttpRequest) => Promise<TelegramHttpResponse>;
   readonly now?: () => string;
+}
+
+export interface TelegramPairingChannelOptions {
+  readonly token: string;
+  readonly request: (request: TelegramHttpRequest) => Promise<TelegramHttpResponse>;
 }
 
 const cursorPattern = /^(0|[1-9][0-9]{0,18})$/;
@@ -538,12 +546,15 @@ function parseSentExternalId(value: unknown): string {
   return String(result.message_id);
 }
 
-function parseReplies(value: unknown, now: () => string): ApprovalPollPage {
+function parseTelegramUpdatePage(value: unknown): {
+  readonly updates: readonly Readonly<Record<string, unknown>>[];
+  readonly cursor: string | null;
+} {
   const result = responseResult(value);
   if (!Array.isArray(result) || result.length > maxPollReplies) {
     throw new Error("MALFORMED_TELEGRAM_RESPONSE");
   }
-  const replies: ApprovalReply[] = [];
+  const updates: Readonly<Record<string, unknown>>[] = [];
   let priorUpdateId = -1;
   let cursor: string | null = null;
   for (const update of result) {
@@ -557,6 +568,15 @@ function parseReplies(value: unknown, now: () => string): ApprovalPollPage {
     }
     priorUpdateId = Number(update.update_id);
     cursor = String(update.update_id);
+    updates.push(update);
+  }
+  return Object.freeze({ updates: Object.freeze(updates), cursor });
+}
+
+function parseReplies(value: unknown, now: () => string): ApprovalPollPage {
+  const page = parseTelegramUpdatePage(value);
+  const replies: ApprovalReply[] = [];
+  for (const update of page.updates) {
     const callback = update.callback_query;
     if (callback === undefined) continue;
     if (
@@ -587,21 +607,49 @@ function parseReplies(value: unknown, now: () => string): ApprovalPollPage {
       receivedAt: now(),
     });
   }
-  return { replies, cursor };
+  return { replies, cursor: page.cursor };
 }
 
-export function createTelegramApprovalChannel(
-  options: TelegramApprovalChannelOptions,
-): ApprovalChannel {
-  const token = validateTelegramToken(options.token);
-  const chatId = validateTelegramChatId(options.chatId);
-  const baseUrl = `https://api.telegram.org/bot${token}`;
-  const now = options.now ?? (() => new Date().toISOString());
+function parsePairingAttempts(value: unknown): TelegramPairingPollPage {
+  const page = parseTelegramUpdatePage(value);
+  const attempts: TelegramPairingAttempt[] = [];
+  for (const update of page.updates) {
+    const message = update.message;
+    if (message === undefined) continue;
+    if (!isRecord(message)) throw new Error("MALFORMED_TELEGRAM_RESPONSE");
+    if (
+      typeof message.text !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(message.text)
+    ) {
+      continue;
+    }
+    if (
+      !isRecord(message.from) ||
+      !Number.isSafeInteger(message.from.id) ||
+      !isRecord(message.chat) ||
+      !Number.isSafeInteger(message.chat.id)
+    ) {
+      throw new Error("MALFORMED_TELEGRAM_RESPONSE");
+    }
+    attempts.push({
+      cursor: String(update.update_id),
+      userId: validateTelegramUserId(String(message.from.id)),
+      chatId: validateTelegramChatId(String(message.chat.id)),
+      code: message.text,
+    });
+  }
+  return { attempts, cursor: page.cursor };
+}
 
-  async function invoke(method: "sendMessage" | "getUpdates", body: unknown): Promise<unknown> {
+function createTelegramInvoker(
+  token: string,
+  request: (request: TelegramHttpRequest) => Promise<TelegramHttpResponse>,
+): (method: "sendMessage" | "getUpdates", body: unknown) => Promise<unknown> {
+  const baseUrl = `https://api.telegram.org/bot${token}`;
+  return async (method, body) => {
     let response: TelegramHttpResponse;
     try {
-      response = await options.request({
+      response = await request({
         method: "POST",
         url: `${baseUrl}/${method}`,
         body: JSON.stringify(body),
@@ -613,7 +661,16 @@ export function createTelegramApprovalChannel(
       throw new Error("TELEGRAM_REQUEST_FAILED");
     }
     return parseResponse(response);
-  }
+  };
+}
+
+export function createTelegramApprovalChannel(
+  options: TelegramApprovalChannelOptions,
+): ApprovalChannel {
+  const token = validateTelegramToken(options.token);
+  const chatId = validateTelegramChatId(options.chatId);
+  const now = options.now ?? (() => new Date().toISOString());
+  const invoke = createTelegramInvoker(token, options.request);
 
   return {
     async send(request: ApprovalRequest) {
@@ -648,6 +705,30 @@ export function createTelegramApprovalChannel(
         allowed_updates: ["callback_query"],
       });
       return parseReplies(result, now);
+    },
+  };
+}
+
+export function createTelegramPairingChannel(
+  options: TelegramPairingChannelOptions,
+): TelegramPairingChannel {
+  const token = validateTelegramToken(options.token);
+  const invoke = createTelegramInvoker(token, options.request);
+  return {
+    async poll(after?: string) {
+      if (
+        after !== undefined &&
+        (!cursorPattern.test(after) || !Number.isSafeInteger(Number(after) + 1))
+      ) {
+        throw new Error("INVALID_APPROVAL_CURSOR");
+      }
+      const result = await invoke("getUpdates", {
+        ...(after === undefined ? {} : { offset: Number(after) + 1 }),
+        limit: maxPollReplies,
+        timeout: 0,
+        allowed_updates: ["message"],
+      });
+      return parsePairingAttempts(result);
     },
   };
 }

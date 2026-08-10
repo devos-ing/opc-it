@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { canonicalize } from "json-canonicalize";
 import {
   consumeApprovalReplies,
+  completeTelegramPairing,
   createTelegramPairingChallenge,
   approvalTick,
   flushApprovalOutbox,
@@ -20,6 +21,7 @@ import { createInMemoryApprovalChannel } from "../../src/platform/approvals/in-m
 import {
   createSqliteApprovalStore,
   createTelegramApprovalChannel,
+  createTelegramPairingChannel,
   type TelegramHttpRequest,
 } from "../../src/platform/approvals/telegram-approval-adapter.js";
 import { createHmacApprovalTransitionSigner } from "../../src/platform/approvals/hmac-approval-transition-signer.js";
@@ -1056,6 +1058,172 @@ describe("Telegram approvals", () => {
     } finally {
       database.close();
     }
+  });
+
+  test("pairs from one bounded Telegram message and advances ignored update watermark", async () => {
+    const database = new Database(":memory:");
+    try {
+      const store = createSqliteApprovalStore(database);
+      const challenge = await createTelegramPairingChallenge(
+        {
+          now: "2026-08-11T00:00:00.000Z",
+          expiresAt: "2026-08-11T00:10:00.000Z",
+        },
+        { store, randomBytes: () => new Uint8Array(32).fill(13) },
+      );
+      const requests: TelegramHttpRequest[] = [];
+      const token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+      const result = await completeTelegramPairing({
+        store,
+        credentials: { read: () => Promise.resolve(token) },
+        createChannel: (identity) => {
+          expect(identity).toEqual({ token });
+          return createTelegramPairingChannel({
+            token: identity.token,
+            request: (request) => {
+              requests.push(request);
+              return Promise.resolve({
+                status: 200,
+                body: JSON.stringify({
+                  ok: true,
+                  result: [
+                    { update_id: 1, edited_message: { text: "ignored" } },
+                    {
+                      update_id: 2,
+                      message: {
+                        from: { id: 42 },
+                        chat: { id: 99 },
+                        text: challenge.code,
+                      },
+                    },
+                  ],
+                }),
+              });
+            },
+          });
+        },
+        now: () => "2026-08-11T00:01:00.000Z",
+      });
+
+      expect(result).toEqual({
+        status: "paired",
+        pairing: { userId: "42", chatId: "99" },
+        cursor: "2",
+      });
+      expect(await store.loadPairing()).toEqual({ userId: "42", chatId: "99" });
+      expect(await store.loadCursor()).toBe("2");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        method: "POST",
+        url: `https://api.telegram.org/bot${token}/getUpdates`,
+        timeoutMs: 30_000,
+        maxResponseBytes: 1_048_576,
+      });
+      expect(JSON.parse(requests[0]?.body ?? "") as unknown).toEqual({
+        limit: 100,
+        timeout: 0,
+        allowed_updates: ["message"],
+      });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(JSON.stringify(await store.loadPairingChallenge())).not.toContain(
+        challenge.code,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  test("ignores a wrong pairing code and returns an existing pair without replaying", async () => {
+    const store = createInMemoryApprovalChannel().store;
+    const challenge = await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      { store, randomBytes: () => new Uint8Array(32).fill(14) },
+    );
+    const token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+    const response = (updateId: number, code: string) =>
+      createTelegramPairingChannel({
+        token,
+        request: () =>
+          Promise.resolve({
+            status: 200,
+            body: JSON.stringify({
+              ok: true,
+              result: [
+                {
+                  update_id: updateId,
+                  message: { from: { id: 42 }, chat: { id: 99 }, text: code },
+                },
+              ],
+            }),
+          }),
+      });
+    const dependencies = (code: string, updateId: number) => ({
+      store,
+      credentials: { read: () => Promise.resolve(token) },
+      createChannel: () => response(updateId, code),
+      now: () => "2026-08-11T00:01:00.000Z",
+    });
+
+    expect(
+      await completeTelegramPairing(
+        dependencies(`${challenge.code.slice(0, -1)}A`, 7),
+      ),
+    ).toEqual({ status: "pending", cursor: "7" });
+    expect(await store.loadPairing()).toBeUndefined();
+    expect(await store.loadPairingChallenge()).toMatchObject({ status: "active" });
+
+    expect(await completeTelegramPairing(dependencies(challenge.code, 8))).toEqual({
+      status: "paired",
+      pairing: { userId: "42", chatId: "99" },
+      cursor: "8",
+    });
+    expect(
+      await completeTelegramPairing({
+        store,
+        credentials: { read: () => Promise.reject(new Error("UNEXPECTED_CREDENTIAL")) },
+        createChannel: () => {
+          throw new Error("UNEXPECTED_CHANNEL");
+        },
+        now: () => {
+          throw new Error("UNEXPECTED_CLOCK");
+        },
+      }),
+    ).toEqual({
+      status: "paired",
+      pairing: { userId: "42", chatId: "99" },
+      cursor: "8",
+    });
+  });
+
+  test("keeps a pairing challenge retryable after a secret-safe Telegram outage", async () => {
+    const store = createInMemoryApprovalChannel().store;
+    await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      { store, randomBytes: () => new Uint8Array(32).fill(15) },
+    );
+    const token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+    const failure = await completeTelegramPairing({
+      store,
+      credentials: { read: () => Promise.resolve(token) },
+      createChannel: () =>
+        createTelegramPairingChannel({
+          token,
+          request: () => Promise.reject(new Error(`transport leaked ${token}`)),
+        }),
+      now: () => "2026-08-11T00:01:00.000Z",
+    }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ message: "APPROVAL_CHANNEL_UNAVAILABLE" });
+    expect(String(failure)).not.toContain(token);
+    expect(await store.loadPairing()).toBeUndefined();
+    expect(await store.loadCursor()).toBeUndefined();
+    expect(await store.loadPairingChallenge()).toMatchObject({ status: "active" });
   });
 
   test("runs one production approval tick through credentials, queue, Telegram, and Ready", async () => {

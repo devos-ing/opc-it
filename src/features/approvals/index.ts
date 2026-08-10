@@ -1,6 +1,9 @@
 export {
+  completeTelegramPairing,
   createTelegramPairingChallenge,
   pairTelegram,
+  type CompleteTelegramPairingDependencies,
+  type CompleteTelegramPairingResult,
   type TelegramPairingChallenge,
 } from "./pair-telegram.js";
 export {
@@ -27,6 +30,7 @@ export {
   validateApprovalReply,
   validateApprovalTarget,
   validateTelegramChatId,
+  validateTelegramPairingPollPage,
   validateTelegramToken,
   validateTelegramUserId,
 } from "./ports.js";
@@ -46,5 +50,9 @@ export type {
   ApprovalTransitionSigningInput,
   AwaitingApprovalItem,
   TelegramPairing,
+  TelegramPairingAttempt,
+  TelegramPairingChannel,
   TelegramPairingChallengeRecord,
+  TelegramPairingCredentialStore,
+  TelegramPairingPollPage,
 } from "./ports.js";

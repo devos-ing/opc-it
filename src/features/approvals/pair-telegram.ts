@@ -3,15 +3,126 @@ import { types } from "node:util";
 import {
   exactOwnData,
   isCanonicalInstant,
+  validateTelegramPairingPollPage,
   validateTelegramChatId,
+  validateTelegramToken,
   validateTelegramUserId,
   type ApprovalStore,
   type TelegramPairing,
+  type TelegramPairingChannel,
+  type TelegramPairingCredentialStore,
 } from "./ports.js";
 
 export interface TelegramPairingChallenge {
   readonly code: string;
   readonly expiresAt: string;
+}
+
+export type CompleteTelegramPairingResult =
+  | {
+      readonly status: "paired";
+      readonly pairing: TelegramPairing;
+      readonly cursor?: string;
+    }
+  | { readonly status: "pending"; readonly cursor?: string };
+
+export interface CompleteTelegramPairingDependencies {
+  readonly store: ApprovalStore;
+  readonly credentials: TelegramPairingCredentialStore;
+  readonly createChannel: (identity: {
+    readonly token: string;
+  }) => TelegramPairingChannel;
+  readonly now: () => string;
+}
+
+function validateStoredPairing(value: unknown): TelegramPairing {
+  const fields = exactOwnData(value, ["userId", "chatId"], "INVALID_TELEGRAM_PAIRING");
+  return Object.freeze({
+    userId: validateTelegramUserId(fields.userId),
+    chatId: validateTelegramChatId(fields.chatId),
+  });
+}
+
+async function pairingResult(
+  store: ApprovalStore,
+  pairing: TelegramPairing,
+): Promise<CompleteTelegramPairingResult> {
+  const cursor = await store.loadCursor();
+  const page = validateTelegramPairingPollPage(
+    { attempts: [], cursor: cursor ?? null },
+  );
+  return Object.freeze({
+    status: "paired",
+    pairing: validateStoredPairing(pairing),
+    ...(page.cursor === null ? {} : { cursor: page.cursor }),
+  });
+}
+
+export async function completeTelegramPairing(
+  dependencies: CompleteTelegramPairingDependencies,
+): Promise<CompleteTelegramPairingResult> {
+  const existing = await dependencies.store.loadPairing();
+  if (existing !== undefined) return pairingResult(dependencies.store, existing);
+
+  let credential: string | undefined;
+  try {
+    credential = await dependencies.credentials.read("telegram-token");
+  } catch {
+    throw new Error("APPROVAL_CREDENTIAL_UNAVAILABLE");
+  }
+  const token = validateTelegramToken(credential);
+  let channel: TelegramPairingChannel;
+  try {
+    channel = dependencies.createChannel({ token });
+  } catch {
+    throw new Error("APPROVAL_CHANNEL_UNAVAILABLE");
+  }
+  const after = await dependencies.store.loadCursor();
+  let polled: unknown;
+  try {
+    polled = await channel.poll(after);
+  } catch {
+    throw new Error("APPROVAL_CHANNEL_UNAVAILABLE");
+  }
+  const page = validateTelegramPairingPollPage(polled, after);
+  const now = dependencies.now();
+  if (!isCanonicalInstant(now)) throw new Error("INVALID_APPROVAL_CLOCK");
+  let paired: TelegramPairing | undefined;
+  let expired = false;
+  for (const attempt of page.attempts) {
+    try {
+      paired = await pairTelegram(
+        {
+          userId: attempt.userId,
+          chatId: attempt.chatId,
+          code: attempt.code,
+          now,
+        },
+        { store: dependencies.store },
+      );
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "TELEGRAM_PAIRING_CODE_EXPIRED") expired = true;
+      else if (
+        message !== "INVALID_TELEGRAM_PAIRING_CODE" &&
+        message !== "TELEGRAM_PAIRING_CODE_REPLAYED"
+      ) {
+        throw error;
+      }
+    }
+  }
+  if (page.cursor !== null) await dependencies.store.saveCursor(page.cursor);
+  if (paired !== undefined) return pairingResult(dependencies.store, paired);
+  const racedPairing = await dependencies.store.loadPairing();
+  if (racedPairing !== undefined) {
+    return pairingResult(dependencies.store, racedPairing);
+  }
+  if (expired) throw new Error("TELEGRAM_PAIRING_CODE_EXPIRED");
+  return Object.freeze({
+    status: "pending",
+    ...(page.cursor === null ? {} : { cursor: page.cursor }),
+  });
 }
 
 export async function createTelegramPairingChallenge(

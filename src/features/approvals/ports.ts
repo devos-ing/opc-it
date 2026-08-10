@@ -40,6 +40,24 @@ export interface TelegramPairing {
   readonly chatId: string;
 }
 
+export interface TelegramPairingAttempt extends TelegramPairing {
+  readonly cursor: string;
+  readonly code: string;
+}
+
+export interface TelegramPairingPollPage {
+  readonly attempts: readonly TelegramPairingAttempt[];
+  readonly cursor: string | null;
+}
+
+export interface TelegramPairingChannel {
+  poll(after?: string): Promise<TelegramPairingPollPage>;
+}
+
+export interface TelegramPairingCredentialStore {
+  read(name: "telegram-token"): Promise<string | undefined>;
+}
+
 export interface TelegramPairingChallengeRecord {
   readonly digest: `sha256:${string}`;
   readonly expiresAt: string;
@@ -149,6 +167,7 @@ const replyFields = [
   "decision",
   "receivedAt",
 ] as const;
+const pairingAttemptFields = ["cursor", "userId", "chatId", "code"] as const;
 const targetFields = [
   "repository",
   "issueNumber",
@@ -309,6 +328,77 @@ export function validateApprovalPollPage(value: unknown, after?: string): Approv
     throw new Error("INVALID_APPROVAL_POLL_PAGE");
   }
   return Object.freeze({ replies, cursor: page.cursor });
+}
+
+export function validateTelegramPairingPollPage(
+  value: unknown,
+  after?: string,
+): TelegramPairingPollPage {
+  const page = exactOwnData(
+    value,
+    ["attempts", "cursor"],
+    "INVALID_TELEGRAM_PAIRING_POLL_PAGE",
+  );
+  if (
+    !Array.isArray(page.attempts) ||
+    types.isProxy(page.attempts) ||
+    page.attempts.length > 100 ||
+    Reflect.ownKeys(page.attempts).length !== page.attempts.length + 1 ||
+    Reflect.ownKeys(page.attempts).some(
+      (key) =>
+        typeof key !== "string" ||
+        (key !== "length" && !/^(0|[1-9][0-9]*)$/.test(key)),
+    ) ||
+    (after !== undefined &&
+      (!cursorPattern.test(after) || !Number.isSafeInteger(Number(after))))
+  ) {
+    throw new Error("INVALID_TELEGRAM_PAIRING_POLL_PAGE");
+  }
+  let prior = after === undefined ? -1 : Number(after);
+  const attempts: TelegramPairingAttempt[] = [];
+  for (let index = 0; index < page.attempts.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(page.attempts, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("INVALID_TELEGRAM_PAIRING_POLL_PAGE");
+    }
+    const fields = exactOwnData(
+      descriptor.value,
+      pairingAttemptFields,
+      "INVALID_TELEGRAM_PAIRING_ATTEMPT",
+    );
+    if (
+      typeof fields.cursor !== "string" ||
+      !cursorPattern.test(fields.cursor) ||
+      !Number.isSafeInteger(Number(fields.cursor)) ||
+      Number(fields.cursor) <= prior ||
+      typeof fields.code !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(fields.code)
+    ) {
+      throw new Error("INVALID_TELEGRAM_PAIRING_ATTEMPT");
+    }
+    prior = Number(fields.cursor);
+    attempts.push(
+      Object.freeze({
+        cursor: fields.cursor,
+        userId: validateTelegramUserId(fields.userId),
+        chatId: validateTelegramChatId(fields.chatId),
+        code: fields.code,
+      }),
+    );
+  }
+  if (
+    (page.cursor === null && attempts.length > 0) ||
+    (page.cursor !== null &&
+      (typeof page.cursor !== "string" ||
+        !cursorPattern.test(page.cursor) ||
+        !Number.isSafeInteger(Number(page.cursor)) ||
+        (after !== undefined && Number(page.cursor) <= Number(after)) ||
+        (attempts.length > 0 &&
+          Number(page.cursor) < Number(attempts[attempts.length - 1]?.cursor))))
+  ) {
+    throw new Error("INVALID_TELEGRAM_PAIRING_POLL_PAGE");
+  }
+  return Object.freeze({ attempts: Object.freeze(attempts), cursor: page.cursor });
 }
 
 export function validateApprovalTarget(value: unknown): ApprovalTarget {
