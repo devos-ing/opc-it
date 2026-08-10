@@ -328,6 +328,114 @@ test("finds Work and lists closed active journal candidates through the umbrella
   expect(requests[1]?.args).toContain("state=all");
 });
 
+test("discovers immutable queue markers after the umbrella label is removed", async () => {
+  const ordinary = {
+    number: 90,
+    body: "ordinary issue body",
+    labels: ["triage"],
+    created_at: "2026-08-10T00:02:00Z",
+  };
+  const ordinaryWithoutBody = {
+    number: 91,
+    body: null,
+    labels: [],
+    created_at: "2026-08-10T00:02:00Z",
+  };
+  const ordinaryNearMarker = {
+    number: 96,
+    body: "<!-- opc-queue-notes -->\nordinary queue notes",
+    labels: ["triage"],
+    created_at: "2026-08-10T00:02:00Z",
+  };
+  const rootWithoutUmbrella = {
+    ...readyIssue,
+    number: 92,
+    state: "open",
+    labels: ["opc:awaiting-approval"],
+    body: '<!-- opc-queue:v1 {"digest":"sha256:root","work_id":"root-without-label"} -->\nroot payload',
+  };
+  const claimedWithoutUmbrella = {
+    ...readyIssue,
+    number: 93,
+    state: "closed",
+    labels: ["opc:claimed"],
+    body: '<!-- opc-queue:v1 {"digest":"sha256:claimed","work_id":"claimed-without-label"} -->\nclaimed payload',
+  };
+  const openClaimedWithoutUmbrella = {
+    ...readyIssue,
+    number: 95,
+    state: "open",
+    labels: ["opc:claimed"],
+    body: '<!-- opc-queue:v1 {"digest":"sha256:open-claimed","work_id":"open-claimed-without-label"} -->\nopen claimed payload',
+  };
+  const malformedMarker = {
+    ...readyIssue,
+    number: 94,
+    labels: ["opc:claimed"],
+    body: "<!-- opc-queue:v1 not-json -->\nforged",
+  };
+  const responses = [
+    result(
+      `HTTP/2.0 200 OK\nlink: <https://api.github.test/issues?page=2>; rel="next"\n\n${JSON.stringify([
+        ordinary,
+        ordinaryWithoutBody,
+        ordinaryNearMarker,
+      ])}`,
+    ),
+    result(
+      JSON.stringify([rootWithoutUmbrella]),
+    ),
+    result(
+      JSON.stringify([
+        ordinary,
+        ordinaryWithoutBody,
+        ordinaryNearMarker,
+        rootWithoutUmbrella,
+        claimedWithoutUmbrella,
+        openClaimedWithoutUmbrella,
+        malformedMarker,
+      ]),
+    ),
+  ];
+  const requests: CommandRequest[] = [];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: (request) => {
+      requests.push(request);
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected call");
+      return Promise.resolve(response);
+    },
+  });
+
+  expect(await github.findWork("roy/app", "root-without-label")).toMatchObject({
+    number: 92,
+    workId: "root-without-label",
+    stateLabel: "opc:awaiting-approval",
+  });
+  expect(await github.listJournalCandidates("roy/app")).toMatchObject({
+    issues: [
+      { number: 92, workId: "root-without-label" },
+      { number: 93, workId: "claimed-without-label", stateLabel: "opc:claimed" },
+      {
+        number: 95,
+        workId: "open-claimed-without-label",
+        stateLabel: "opc:claimed",
+      },
+    ],
+    diagnostics: [
+      { code: "MALFORMED_WORK_ISSUE", issueNumber: 94 },
+    ],
+  });
+  for (const request of requests) {
+    expect(request.args).toContain("state=all");
+    expect(request.args).not.toContain("labels=opc:work");
+  }
+  expect(requests[0]?.args).toContain("page=1");
+  expect(requests[1]?.args).toContain("page=2");
+});
+
 test("appends and lists only OPC transition comments", async () => {
   const requests: CommandRequest[] = [];
   const responses = [

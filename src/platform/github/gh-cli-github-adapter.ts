@@ -28,6 +28,7 @@ export interface GhCliGitHubAdapterOptions {
 }
 
 const queueMarkerPattern = /^<!-- opc-queue:v1 (\{[^\r\n]*\}) -->\r?\n/;
+const queueMarkerPrefix = "<!-- opc-queue:";
 const transitionMarker = "<!-- opc-transition:v1 -->\n";
 const maximumPageCount = 100;
 const stateLabelSet: ReadonlySet<string> = new Set(
@@ -122,7 +123,11 @@ function parseQueueBody(body: string): {
   };
 }
 
-function parseIssue(value: unknown, repository: string): QueueWorkIssue {
+function parseIssue(
+  value: unknown,
+  repository: string,
+  requireWorkLabel = true,
+): QueueWorkIssue {
   if (!isRecord(value)) {
     throw new Error("MALFORMED_GITHUB_RESPONSE: issue");
   }
@@ -141,7 +146,7 @@ function parseIssue(value: unknown, repository: string): QueueWorkIssue {
     throw new Error("MALFORMED_GITHUB_RESPONSE: issue fields");
   }
   const labels = parseLabels(value.labels);
-  if (!labels.includes("opc:work")) {
+  if (requireWorkLabel && !labels.includes("opc:work")) {
     throw new Error("MALFORMED_GITHUB_RESPONSE: work label");
   }
   const stateLabels = labels.filter((label) => stateLabelSet.has(label));
@@ -173,20 +178,40 @@ function issueDiagnostic(value: unknown): QueueIssueDiagnostic {
   return { code: "MALFORMED_WORK_ISSUE" };
 }
 
-function parseIssueList(value: unknown, repository: string): ParsedIssueBatch {
+function isMarkerCandidate(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.body === "string" &&
+    value.body.startsWith(queueMarkerPrefix)
+  );
+}
+
+function parseIssueList(
+  value: unknown,
+  repository: string,
+  selection: "labelled" | "marker" = "labelled",
+): ParsedIssueBatch {
   if (!Array.isArray(value)) {
     throw new Error("MALFORMED_GITHUB_RESPONSE: issue list");
   }
   const issues: QueueWorkIssue[] = [];
   const diagnostics: QueueIssueDiagnostic[] = [];
   for (const candidate of value) {
+    if (selection === "marker" && !isMarkerCandidate(candidate)) continue;
     try {
-      issues.push(parseIssue(candidate, repository));
+      issues.push(parseIssue(candidate, repository, selection === "labelled"));
     } catch {
       diagnostics.push(issueDiagnostic(candidate));
     }
   }
-  return { issues, diagnostics, candidateCount: value.length };
+  return {
+    issues,
+    diagnostics,
+    candidateCount:
+      selection === "labelled"
+        ? value.length
+        : issues.length + diagnostics.length,
+  };
 }
 
 function parseComment(value: unknown): { readonly id: number; readonly body: string } {
@@ -372,6 +397,7 @@ export function createGhCliGitHubAdapter(
   async function listIssuePages(
     baseArgs: readonly string[],
     repository: string,
+    selection: "labelled" | "marker" = "labelled",
   ): Promise<ParsedIssueBatch> {
     const batches: ParsedIssueBatch[] = [];
     for (let page = 1; page <= maximumPageCount; page += 1) {
@@ -381,7 +407,9 @@ export function createGhCliGitHubAdapter(
         `page=${String(page)}`,
       ]);
       requireSuccessfulIncluded(command, included);
-      batches.push(parseIssueList(parseJson(included.body), repository));
+      batches.push(
+        parseIssueList(parseJson(included.body), repository, selection),
+      );
       if (!included.hasNextPage) return mergeIssueBatches(batches);
     }
     throw new QueueTransportError({ code: "fatal" });
@@ -417,11 +445,9 @@ export function createGhCliGitHubAdapter(
       "-f",
       `state=${state}`,
       "-f",
-      "labels=opc:work",
-      "-f",
       "per_page=100",
     ];
-    return listIssuePages(baseArgs, repository.canonical);
+    return listIssuePages(baseArgs, repository.canonical, "marker");
   }
 
   return {
