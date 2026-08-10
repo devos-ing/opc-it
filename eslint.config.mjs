@@ -1,38 +1,78 @@
 import js from "@eslint/js";
 import { defineConfig } from "eslint/config";
-import { readdirSync } from "node:fs";
-import { URL } from "node:url";
+import { posix } from "node:path";
 import tseslint from "typescript-eslint";
 
-const featureNames = readdirSync(new URL("./src/features/", import.meta.url), {
-  withFileTypes: true,
-})
-  .filter((entry) => entry.isDirectory())
-  .map((entry) => entry.name)
-  .sort();
+const featureRoot = "src/features/";
 
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function projectPath(filename) {
+  const normalized = filename.replaceAll("\\", "/");
+  const root = normalized.lastIndexOf(`/${featureRoot}`);
+  return root === -1 ? normalized : normalized.slice(root + 1);
+}
 
-const featureImportRestrictions = featureNames.map((featureName) => ({
-  files: [`src/features/${featureName}/**/*.ts`],
+function featureImportViolation(importer, specifier) {
+  const projectImporter = projectPath(importer);
+  const resolved = specifier.startsWith(".")
+    ? posix.normalize(posix.join(posix.dirname(projectImporter), specifier))
+    : specifier.startsWith("src/")
+      ? posix.normalize(specifier)
+      : undefined;
+  if (resolved === undefined) return undefined;
+  if (resolved === "src/platform" || resolved.startsWith("src/platform/")) {
+    return "Features own ports; platform supplies adapters.";
+  }
+  if (!resolved.startsWith(featureRoot)) return undefined;
+
+  const sourceFeature = projectImporter.slice(featureRoot.length).split("/")[0];
+  const [targetFeature, ...targetPath] = resolved.slice(featureRoot.length).split("/");
+  const target = targetPath.join("/");
+  if (
+    targetFeature !== sourceFeature &&
+    target !== "index.js" &&
+    target !== "index.ts"
+  ) {
+    return "Import another feature through its index.ts interface.";
+  }
+  return undefined;
+}
+
+const featureSeamsPlugin = {
   rules: {
-    "no-restricted-imports": [
-      "error",
-      {
-        patterns: [
-          {
-            regex: "(?:^|/)platform(?:/|$)",
-            message: "Features own ports; platform supplies adapters.",
-          },
-          ...featureNames.filter((candidate) => candidate !== featureName).map((candidate) => ({
-            regex: `^(?:(?:\\.\\./)+(?:features/)?|src/features/)${escapeRegex(candidate)}/(?!index\\.(?:js|ts)$)`,
-            message: "Import another feature through its index.ts interface.",
-          })),
-        ],
+    imports: {
+      meta: {
+        type: "problem",
+        schema: [],
+        messages: { violation: "{{message}}" },
       },
-    ],
+      create(context) {
+        function check(node) {
+          if (typeof node.source.value !== "string") {
+            context.report({
+              node,
+              messageId: "violation",
+              data: { message: "Dynamic feature imports must use a string literal." },
+            });
+            return;
+          }
+          const message = featureImportViolation(context.filename, node.source.value);
+          if (message !== undefined) {
+            context.report({ node, messageId: "violation", data: { message } });
+          }
+        }
+
+        return {
+          ImportDeclaration: check,
+          ExportAllDeclaration: check,
+          ExportNamedDeclaration(node) {
+            if (node.source !== null) check(node);
+          },
+          ImportExpression: check,
+        };
+      },
+    },
   },
-}));
+};
 
 export default defineConfig(
   { ignores: [".getsuperpower/**", "coverage/**", "dist/**", "schemas/**"] },
@@ -47,5 +87,9 @@ export default defineConfig(
     files: ["**/*.mjs"],
     extends: [js.configs.recommended],
   },
-  ...featureImportRestrictions,
+  {
+    files: ["src/features/**/*.ts"],
+    plugins: { "opc-feature-seams": featureSeamsPlugin },
+    rules: { "opc-feature-seams/imports": "error" },
+  },
 );
