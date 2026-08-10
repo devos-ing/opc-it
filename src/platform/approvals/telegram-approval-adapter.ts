@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import {
   exactOwnData,
+  isCanonicalInstant,
   validateApprovalRequest,
   validateTelegramChatId,
   validateTelegramToken,
@@ -11,11 +12,18 @@ import {
   type ApprovalRequest,
   type ApprovalStore,
   type ApprovalTransitionOutboxItem,
+  type TelegramPairingChallengeRecord,
 } from "../../features/approvals/index.js";
 
 interface PairingRow {
   readonly user_id: string;
   readonly chat_id: string;
+}
+
+interface PairingChallengeRow {
+  readonly digest: `sha256:${string}`;
+  readonly expires_at: string;
+  readonly status: string;
 }
 
 interface RequestRow {
@@ -40,6 +48,10 @@ interface TransitionRow {
 
 interface CursorRow {
   readonly cursor: string;
+}
+
+interface TableColumnRow {
+  readonly name: string;
 }
 
 export interface TelegramHttpRequest {
@@ -82,6 +94,14 @@ function inImmediateTransaction<T>(database: Database, operation: () => T): T {
 function migrate(database: Database): void {
   inImmediateTransaction(database, () => {
     database.run(`
+      CREATE TABLE IF NOT EXISTS approval_pairing_challenge (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        digest TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'consumed', 'expired'))
+      )
+    `);
+    database.run(`
       CREATE TABLE IF NOT EXISTS approval_pairing (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         user_id TEXT NOT NULL,
@@ -96,9 +116,20 @@ function migrate(database: Database): void {
         expires_at TEXT NOT NULL,
         summary TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'consumed')),
-        external_id TEXT
+        external_id TEXT,
+        claim_id TEXT,
+        claim_expires_at TEXT
       )
     `);
+    const requestColumns = database
+      .query<TableColumnRow, []>("PRAGMA table_info(approval_request)")
+      .all();
+    if (!requestColumns.some((column) => column.name === "claim_id")) {
+      database.run("ALTER TABLE approval_request ADD COLUMN claim_id TEXT");
+    }
+    if (!requestColumns.some((column) => column.name === "claim_expires_at")) {
+      database.run("ALTER TABLE approval_request ADD COLUMN claim_expires_at TEXT");
+    }
     database.run(`
       CREATE TABLE IF NOT EXISTS approval_consumption (
         nonce TEXT PRIMARY KEY,
@@ -137,6 +168,23 @@ function requestFromRow(row: RequestRow): ApprovalRequest {
   };
 }
 
+function pairingChallengeFromRow(
+  row: PairingChallengeRow,
+): TelegramPairingChallengeRecord {
+  if (
+    !/^sha256:[a-f0-9]{64}$/.test(row.digest) ||
+    !isCanonicalInstant(row.expires_at) ||
+    (row.status !== "active" && row.status !== "consumed" && row.status !== "expired")
+  ) {
+    throw new Error("INVALID_TELEGRAM_PAIRING_CHALLENGE_RECORD");
+  }
+  return {
+    digest: row.digest,
+    expiresAt: row.expires_at,
+    status: row.status,
+  };
+}
+
 function transitionFromRow(row: TransitionRow): ApprovalTransitionOutboxItem {
   return {
     nonce: row.nonce,
@@ -158,6 +206,20 @@ export function createSqliteApprovalStore(database: Database): ApprovalStore {
   const readPairing = database.query<PairingRow, []>(
     "SELECT user_id, chat_id FROM approval_pairing WHERE singleton = 1",
   );
+  const readPairingChallenge = database.query<PairingChallengeRow, []>(
+    "SELECT digest, expires_at, status FROM approval_pairing_challenge WHERE singleton = 1",
+  );
+  const writePairingChallenge = database.query(
+    `INSERT INTO approval_pairing_challenge (singleton, digest, expires_at, status)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(singleton) DO UPDATE SET
+       digest = excluded.digest,
+       expires_at = excluded.expires_at,
+       status = excluded.status`,
+  );
+  const updatePairingChallengeStatus = database.query(
+    "UPDATE approval_pairing_challenge SET status = ? WHERE singleton = 1 AND status = 'active'",
+  );
   const writePairing = database.query(
     `INSERT INTO approval_pairing (singleton, user_id, chat_id) VALUES (1, ?, ?)
      ON CONFLICT(singleton) DO NOTHING`,
@@ -170,6 +232,12 @@ export function createSqliteApprovalStore(database: Database): ApprovalStore {
     `SELECT issue_url, digest, nonce, expires_at, summary, status
      FROM approval_request WHERE nonce = ?`,
   );
+  const findActiveRequests = database.query<RequestRow, [string, string]>(
+    `SELECT issue_url, digest, nonce, expires_at, summary
+     FROM approval_request
+     WHERE issue_url = ? AND digest = ? AND status != 'consumed'
+     ORDER BY rowid LIMIT 2`,
+  );
   const insertRequest = database.query(
     `INSERT INTO approval_request
        (nonce, issue_url, digest, expires_at, summary, status)
@@ -179,9 +247,26 @@ export function createSqliteApprovalStore(database: Database): ApprovalStore {
     `SELECT issue_url, digest, nonce, expires_at, summary
      FROM approval_request WHERE status = 'pending' ORDER BY rowid LIMIT ?`,
   );
+  const claimableRequestOutbox = database.query<RequestRow, [string, number]>(
+    `SELECT issue_url, digest, nonce, expires_at, summary
+     FROM approval_request
+     WHERE status = 'pending'
+       AND (claim_id IS NULL OR claim_expires_at <= ?)
+     ORDER BY rowid LIMIT ?`,
+  );
+  const claimRequest = database.query(
+    `UPDATE approval_request SET claim_id = ?, claim_expires_at = ?
+     WHERE nonce = ? AND status = 'pending'
+       AND (claim_id IS NULL OR claim_expires_at <= ?)`,
+  );
   const markSent = database.query(
-    `UPDATE approval_request SET status = 'sent', external_id = ?
-     WHERE nonce = ? AND status = 'pending'`,
+    `UPDATE approval_request
+     SET status = 'sent', external_id = ?, claim_id = NULL, claim_expires_at = NULL
+     WHERE nonce = ? AND status = 'pending' AND claim_id = ?`,
+  );
+  const releaseRequestClaim = database.query(
+    `UPDATE approval_request SET claim_id = NULL, claim_expires_at = NULL
+     WHERE nonce = ? AND status = 'pending' AND claim_id = ?`,
   );
   const findConsumption = database.query<{ readonly nonce: string }, [string, string]>(
     "SELECT nonce FROM approval_consumption WHERE nonce = ? OR external_id = ? LIMIT 1",
@@ -239,19 +324,43 @@ export function createSqliteApprovalStore(database: Database): ApprovalStore {
   }
 
   return {
-    savePairing(pairing) {
-      inImmediateTransaction(database, () => {
-        writePairing.run(pairing.userId, pairing.chatId);
-        const stored = readPairing.get();
-        if (
-          stored === null ||
-          stored.user_id !== pairing.userId ||
-          stored.chat_id !== pairing.chatId
-        ) {
-          throw new Error("TELEGRAM_ALREADY_PAIRED");
-        }
-      });
+    savePairingChallenge(challenge) {
+      writePairingChallenge.run(
+        challenge.digest,
+        challenge.expiresAt,
+        challenge.status,
+      );
       return Promise.resolve();
+    },
+    loadPairingChallenge() {
+      const row = readPairingChallenge.get();
+      return Promise.resolve(row === null ? undefined : pairingChallengeFromRow(row));
+    },
+    consumePairingChallenge(input) {
+      return Promise.resolve(
+        inImmediateTransaction(database, () => {
+          const row = readPairingChallenge.get();
+          if (row === null) return "invalid" as const;
+          const challenge = pairingChallengeFromRow(row);
+          if (challenge.digest !== input.digest) return "invalid" as const;
+          if (challenge.status !== "active") return "replay" as const;
+          if (new Date(input.now).getTime() >= new Date(challenge.expiresAt).getTime()) {
+            updatePairingChallengeStatus.run("expired");
+            return "expired" as const;
+          }
+          writePairing.run(input.pairing.userId, input.pairing.chatId);
+          const stored = readPairing.get();
+          if (
+            stored === null ||
+            stored.user_id !== input.pairing.userId ||
+            stored.chat_id !== input.pairing.chatId
+          ) {
+            throw new Error("TELEGRAM_ALREADY_PAIRED");
+          }
+          updatePairingChallengeStatus.run("consumed");
+          return "paired" as const;
+        }),
+      );
     },
     loadPairing() {
       const row = readPairing.get();
@@ -287,13 +396,75 @@ export function createSqliteApprovalStore(database: Database): ApprovalStore {
     listRequestOutbox(limit) {
       return Promise.resolve(requestOutbox.all(Math.min(Math.max(limit, 0), 100)).map(requestFromRow));
     },
-    markRequestSent(nonce, externalId) {
-      markSent.run(externalId, nonce);
+    claimRequestOutbox(input) {
+      return Promise.resolve(
+        inImmediateTransaction(database, () => {
+          const limit = Math.min(Math.max(input.limit, 0), 100);
+          const candidates = claimableRequestOutbox.all(input.now, limit);
+          const claimed: ApprovalRequest[] = [];
+          for (const candidate of candidates) {
+            const result = claimRequest.run(
+              input.claimId,
+              input.expiresAt,
+              candidate.nonce,
+              input.now,
+            );
+            if (result.changes === 1) claimed.push(requestFromRow(candidate));
+          }
+          return claimed;
+        }),
+      );
+    },
+    markRequestSent(nonce, externalId, claimId) {
+      const result = markSent.run(externalId, nonce, claimId);
+      if (result.changes !== 1) throw new Error("APPROVAL_REQUEST_CLAIM_LOST");
+      return Promise.resolve();
+    },
+    releaseRequestClaim(nonce, claimId) {
+      releaseRequestClaim.run(nonce, claimId);
       return Promise.resolve();
     },
     loadRequest(nonce) {
       const row = findRequest.get(nonce);
       return Promise.resolve(row === null ? undefined : requestFromRow(row));
+    },
+    findActiveRequest(issueUrl, requestDigest) {
+      const rows = findActiveRequests.all(issueUrl, requestDigest);
+      if (rows.length > 1) throw new Error("DUPLICATE_ACTIVE_APPROVAL_REQUEST");
+      const row = rows[0];
+      return Promise.resolve(row === undefined ? undefined : requestFromRow(row));
+    },
+    ensureActiveRequest(input) {
+      return Promise.resolve(
+        inImmediateTransaction(database, () => {
+          const rows = findActiveRequests.all(
+            input.request.issueUrl,
+            input.request.digest,
+          );
+          if (rows.length > 1) throw new Error("DUPLICATE_ACTIVE_APPROVAL_REQUEST");
+          const activeRow = rows[0];
+          if (
+            activeRow !== undefined &&
+            new Date(input.now).getTime() < new Date(activeRow.expires_at).getTime()
+          ) {
+            return "existing" as const;
+          }
+          if (activeRow !== undefined) {
+            insertConsumption.run(activeRow.nonce, `expired:${activeRow.nonce}`);
+            markConsumed.run(activeRow.nonce);
+          }
+          const nonceConflict = findAnyRequest.get(input.request.nonce);
+          if (nonceConflict !== null) throw new Error("APPROVAL_NONCE_CONFLICT");
+          insertRequest.run(
+            input.request.nonce,
+            input.request.issueUrl,
+            input.request.digest,
+            input.request.expiresAt,
+            input.request.summary,
+          );
+          return "created" as const;
+        }),
+      );
     },
     consumeReply(input) {
       return Promise.resolve(consume(input.reply, input.transition));

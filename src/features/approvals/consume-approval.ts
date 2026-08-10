@@ -131,7 +131,13 @@ export async function consumeApprovalReplies(
   const pairing = await dependencies.store.loadPairing();
   if (pairing === undefined) throw new Error("TELEGRAM_NOT_PAIRED");
   const after = await dependencies.store.loadCursor();
-  const page = validateApprovalPollPage(await dependencies.channel.poll(after), after);
+  let polled: unknown;
+  try {
+    polled = await dependencies.channel.poll(after);
+  } catch {
+    throw new Error("APPROVAL_CHANNEL_UNAVAILABLE");
+  }
+  const page = validateApprovalPollPage(polled, after);
   const evaluationTime = dependencies.now();
   if (!isCanonicalInstant(evaluationTime)) throw new Error("INVALID_APPROVAL_CLOCK");
   const decisions: ApprovalDecision[] = [];
@@ -171,13 +177,16 @@ export async function consumeApprovalReplies(
       digest: request.digest,
       actor: reply.userId,
     };
-    const signed =
-      reply.decision === "approved"
-        ? validateSignedApprovalRecord(
-            dependencies.signer.sign(signingInput),
-            signingInput,
-          )
-        : undefined;
+    let signed: string | undefined;
+    if (reply.decision === "approved") {
+      let candidate: unknown;
+      try {
+        candidate = dependencies.signer.sign(signingInput);
+      } catch {
+        throw new Error("APPROVAL_TRANSITION_SIGNING_FAILED");
+      }
+      signed = validateSignedApprovalRecord(candidate, signingInput);
+    }
     const consumed = await dependencies.store.consumeReply({
       reply,
       decision,

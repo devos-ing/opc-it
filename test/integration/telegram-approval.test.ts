@@ -6,11 +6,15 @@ import { join } from "node:path";
 import { canonicalize } from "json-canonicalize";
 import {
   consumeApprovalReplies,
+  createTelegramPairingChallenge,
+  approvalTick,
   flushApprovalOutbox,
   pairTelegram,
   requestApproval,
   type ApprovalChannel,
   type ApprovalQueue,
+  type ApprovalStore,
+  type ApprovalTickQueue,
 } from "../../src/features/approvals/index.js";
 import { createInMemoryApprovalChannel } from "../../src/platform/approvals/in-memory-approval-adapter.js";
 import {
@@ -24,6 +28,29 @@ import { verifyTransition } from "../../src/features/queue/index.js";
 const digest = `sha256:${"a".repeat(64)}`;
 const nonce = "nonce_0123456789abcdef";
 const issueUrl = "https://github.com/roy/opc/issues/17";
+
+async function completePairing(
+  store: ApprovalStore,
+  userId = "42",
+  chatId = "99",
+): Promise<void> {
+  const challenge = await createTelegramPairingChallenge(
+    {
+      now: "2026-08-11T00:00:00.000Z",
+      expiresAt: "2026-08-11T00:10:00.000Z",
+    },
+    { store, randomBytes: () => new Uint8Array(32).fill(9) },
+  );
+  await pairTelegram(
+    {
+      userId,
+      chatId,
+      code: challenge.code,
+      now: "2026-08-11T00:01:00.000Z",
+    },
+    { store },
+  );
+}
 
 function queue(events: string[]): ApprovalQueue {
   return {
@@ -61,7 +88,7 @@ async function arrangedApproval(options: {
       digest: options.queueDigest ?? digest,
     }),
   };
-  await pairTelegram({ userId: "42", chatId: "99" }, { store });
+  await completePairing(store);
   await requestApproval(
     {
       issueUrl,
@@ -89,7 +116,7 @@ describe("Telegram approvals", () => {
     const store = channel.store;
     const events: string[] = [];
 
-    await pairTelegram({ userId: "42", chatId: "99" }, { store });
+    await completePairing(store);
     await requestApproval(
       {
         issueUrl,
@@ -526,7 +553,7 @@ describe("Telegram approvals", () => {
       const firstDatabase = new Database(filename, { create: true });
       const firstStore = createSqliteApprovalStore(firstDatabase);
       const firstChannel = createInMemoryApprovalChannel(firstStore);
-      await pairTelegram({ userId: "42", chatId: "99" }, { store: firstStore });
+      await completePairing(firstStore);
       await requestApproval(
         {
           issueUrl,
@@ -762,7 +789,7 @@ describe("Telegram approvals", () => {
         }),
     });
     const store = createInMemoryApprovalChannel().store;
-    await pairTelegram({ userId: "42", chatId: "99" }, { store });
+    await completePairing(store);
 
     expect(
       await consumeApprovalReplies(consumeInput, {
@@ -778,9 +805,21 @@ describe("Telegram approvals", () => {
 
   test("rejects Telegram IDs outside JavaScript's exact integer range", async () => {
     const store = createInMemoryApprovalChannel().store;
+    const challenge = await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      { store, randomBytes: () => new Uint8Array(32).fill(3) },
+    );
     expect(
       await pairTelegram(
-        { userId: "9007199254740992", chatId: "99" },
+        {
+          userId: "9007199254740992",
+          chatId: "99",
+          code: challenge.code,
+          now: "2026-08-11T00:01:00.000Z",
+        },
         { store },
       ).catch((error: unknown) => error),
     ).toMatchObject({ message: "INVALID_TELEGRAM_ID" });
@@ -857,5 +896,461 @@ describe("Telegram approvals", () => {
       expect(await store.loadRequest(nonce)).toBeDefined();
       expect(events).toEqual([]);
     }
+  });
+
+  test("creates a cryptographic pairing code while persisting only its digest", async () => {
+    const channel = createInMemoryApprovalChannel();
+    const challenge = await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      {
+        store: channel.store,
+        randomBytes: () => new Uint8Array(32).fill(7),
+      },
+    );
+
+    expect(challenge).toEqual({
+      code: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      expiresAt: "2026-08-11T00:10:00.000Z",
+    });
+    expect(JSON.stringify(await channel.store.loadPairingChallenge())).not.toContain(
+      challenge.code,
+    );
+    expect("savePairing" in channel.store).toBeFalse();
+  });
+
+  test("consumes the exact pairing code once and expires at the boundary", async () => {
+    const store = createInMemoryApprovalChannel().store;
+    const challenge = await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      { store, randomBytes: () => new Uint8Array(32).fill(4) },
+    );
+    const attempt = {
+      userId: "42",
+      chatId: "99",
+      code: challenge.code,
+      now: "2026-08-11T00:09:59.999Z",
+    } as const;
+
+    expect(
+      await pairTelegram(
+        { ...attempt, code: `${challenge.code.slice(0, -1)}A` },
+        { store },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "INVALID_TELEGRAM_PAIRING_CODE" });
+    expect(await store.loadPairing()).toBeUndefined();
+    expect(await pairTelegram(attempt, { store })).toEqual({ userId: "42", chatId: "99" });
+    expect(
+      await pairTelegram(attempt, { store }).catch((error: unknown) => error),
+    ).toMatchObject({ message: "TELEGRAM_PAIRING_CODE_REPLAYED" });
+
+    const expiredStore = createInMemoryApprovalChannel().store;
+    const expired = await createTelegramPairingChallenge(
+      {
+        now: "2026-08-11T00:00:00.000Z",
+        expiresAt: "2026-08-11T00:10:00.000Z",
+      },
+      { store: expiredStore, randomBytes: () => new Uint8Array(32).fill(5) },
+    );
+    expect(
+      await pairTelegram(
+        {
+          userId: "42",
+          chatId: "99",
+          code: expired.code,
+          now: "2026-08-11T00:10:00.000Z",
+        },
+        { store: expiredStore },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "TELEGRAM_PAIRING_CODE_EXPIRED" });
+    expect(await expiredStore.loadPairing()).toBeUndefined();
+  });
+
+  test("persists pairing challenge consumption across SQLite restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opc-pairing-"));
+    const filename = join(directory, "pairing.sqlite");
+    try {
+      const firstDatabase = new Database(filename, { create: true });
+      const firstStore = createSqliteApprovalStore(firstDatabase);
+      const challenge = await createTelegramPairingChallenge(
+        {
+          now: "2026-08-11T00:00:00.000Z",
+          expiresAt: "2026-08-11T00:10:00.000Z",
+        },
+        { store: firstStore, randomBytes: () => new Uint8Array(32).fill(6) },
+      );
+      firstDatabase.close();
+
+      const secondDatabase = new Database(filename);
+      const secondStore = createSqliteApprovalStore(secondDatabase);
+      await pairTelegram(
+        {
+          userId: "42",
+          chatId: "99",
+          code: challenge.code,
+          now: "2026-08-11T00:01:00.000Z",
+        },
+        { store: secondStore },
+      );
+      secondDatabase.close();
+
+      const thirdDatabase = new Database(filename);
+      try {
+        const thirdStore = createSqliteApprovalStore(thirdDatabase);
+        expect(await thirdStore.loadPairing()).toEqual({ userId: "42", chatId: "99" });
+        expect(await thirdStore.loadPairingChallenge()).toMatchObject({ status: "consumed" });
+        expect(
+          await pairTelegram(
+            {
+              userId: "42",
+              chatId: "99",
+              code: challenge.code,
+              now: "2026-08-11T00:02:00.000Z",
+            },
+            { store: thirdStore },
+          ).catch((error: unknown) => error),
+        ).toMatchObject({ message: "TELEGRAM_PAIRING_CODE_REPLAYED" });
+      } finally {
+        thirdDatabase.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when a durable pairing challenge expiry is corrupted", async () => {
+    const database = new Database(":memory:");
+    try {
+      const store = createSqliteApprovalStore(database);
+      const challenge = await createTelegramPairingChallenge(
+        {
+          now: "2026-08-11T00:00:00.000Z",
+          expiresAt: "2026-08-11T00:10:00.000Z",
+        },
+        { store, randomBytes: () => new Uint8Array(32).fill(6) },
+      );
+      database.run(
+        "UPDATE approval_pairing_challenge SET expires_at = 'not-an-instant' WHERE singleton = 1",
+      );
+
+      expect(
+        await pairTelegram(
+          {
+            userId: "42",
+            chatId: "99",
+            code: challenge.code,
+            now: "2026-08-11T00:01:00.000Z",
+          },
+          { store },
+        ).catch((error: unknown) => error),
+      ).toMatchObject({ message: "INVALID_TELEGRAM_PAIRING_CHALLENGE_RECORD" });
+      expect(await store.loadPairing()).toBeUndefined();
+    } finally {
+      database.close();
+    }
+  });
+
+  test("runs one production approval tick through credentials, queue, Telegram, and Ready", async () => {
+    const channel = createInMemoryApprovalChannel();
+    await completePairing(channel.store);
+    const tickNonce = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+    channel.pushReply({
+      externalId: "tick-approval",
+      cursor: "1",
+      userId: "42",
+      chatId: "99",
+      nonce: tickNonce,
+      decision: "approved",
+      receivedAt: "2026-08-11T00:01:00.000Z",
+    });
+    const events: string[] = [];
+    let ready = false;
+    const tickQueue: ApprovalTickQueue = {
+      listAwaitingApprovals: () =>
+        Promise.resolve(
+          ready ? [] : [{ issueUrl, digest, summary: "Ship the reviewed change" }],
+        ),
+      resolveApprovalTarget: () =>
+        Promise.resolve({
+          repository: "roy/opc",
+          issueNumber: 17,
+          workId: "work-17",
+          digest,
+          state: "awaiting-approval",
+        }),
+      appendApprovalTransition: ({ mode }) => {
+        events.push(`transition:${mode}`);
+        return Promise.resolve("created");
+      },
+      markReady: () => {
+        events.push("ready");
+        ready = true;
+        return Promise.resolve();
+      },
+    };
+    const credentialReads: string[] = [];
+    const token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+    const result = await approvalTick(
+      {
+        installationId: "install-1",
+        keyId: "key-1",
+      },
+      {
+        store: channel.store,
+        credentials: {
+          read: (name) => {
+            credentialReads.push(name);
+            return Promise.resolve(name === "telegram-token" ? token : "11".repeat(32));
+          },
+        },
+        queue: tickQueue,
+        signer: transitionSigner,
+        createChannel: (identity) => {
+          expect(identity).toEqual({ token, chatId: "99" });
+          return channel;
+        },
+        randomBytes: () => new Uint8Array(32).fill(8),
+        now: () => "2026-08-11T00:01:00.000Z",
+      },
+    );
+
+    expect(result).toEqual({
+      requested: 1,
+      delivery: "sent",
+      decisions: [{ status: "approved", digest, nonce: tickNonce, actor: "42" }],
+    });
+    expect(events).toEqual(["transition:create-or-existing", "ready"]);
+    expect(credentialReads).toEqual(["telegram-token", "transition-key"]);
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain("11".repeat(32));
+  });
+
+  test("keeps one SQLite-backed request through a send outage and retries without duplicating it", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opc-approval-tick-"));
+    const filename = join(directory, "approvals.sqlite");
+    const tickNonce = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
+    let randomCalls = 0;
+    const tickQueue: ApprovalTickQueue = {
+      listAwaitingApprovals: () =>
+        Promise.resolve([{ issueUrl, digest, summary: "Ship the reviewed change" }]),
+      resolveApprovalTarget: () => Promise.reject(new Error("UNEXPECTED_TARGET_LOOKUP")),
+      appendApprovalTransition: () => Promise.reject(new Error("UNEXPECTED_TRANSITION")),
+      markReady: () => Promise.reject(new Error("UNEXPECTED_READY")),
+    };
+    const dependencies = (store: ApprovalStore, channel: ApprovalChannel) => ({
+      store,
+      credentials: {
+        read: (name: "telegram-token" | "transition-key") =>
+          Promise.resolve(
+            name === "telegram-token"
+              ? "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+              : "11".repeat(32),
+          ),
+      },
+      queue: tickQueue,
+      signer: transitionSigner,
+      createChannel: () => channel,
+      randomBytes: () => {
+        randomCalls += 1;
+        return new Uint8Array(32).fill(9);
+      },
+      now: () => "2026-08-11T00:01:00.000Z",
+    });
+
+    try {
+      const firstDatabase = new Database(filename);
+      const firstStore = createSqliteApprovalStore(firstDatabase);
+      await completePairing(firstStore);
+      const failedChannel = createInMemoryApprovalChannel(firstStore);
+      failedChannel.failNextSend();
+      expect(
+        await approvalTick(
+          { installationId: "install-1", keyId: "key-1" },
+          dependencies(firstStore, failedChannel),
+        ),
+      ).toMatchObject({ requested: 1, delivery: "queued", decisions: [] });
+      expect(await firstStore.listRequestOutbox(100)).toHaveLength(1);
+      firstDatabase.close();
+
+      const secondDatabase = new Database(filename);
+      try {
+        const secondStore = createSqliteApprovalStore(secondDatabase);
+        const retryChannel = createInMemoryApprovalChannel(secondStore);
+        expect(
+          await approvalTick(
+            { installationId: "install-1", keyId: "key-1" },
+            dependencies(secondStore, retryChannel),
+          ),
+        ).toMatchObject({ requested: 0, delivery: "sent", decisions: [] });
+        expect(retryChannel.sent).toEqual([
+          expect.objectContaining({ nonce: tickNonce, issueUrl, digest }),
+        ]);
+        expect(await secondStore.listRequestOutbox(100)).toEqual([]);
+        expect(randomCalls).toBe(1);
+      } finally {
+        secondDatabase.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("atomically creates one active request across overlapping approval ticks", async () => {
+    const baseStore = createInMemoryApprovalChannel().store;
+    await completePairing(baseStore);
+    let arrivals = 0;
+    let releaseBarrier: (() => void) | undefined;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const store: ApprovalStore = {
+      ...baseStore,
+      async findActiveRequest(issue, requestDigest) {
+        arrivals += 1;
+        if (arrivals === 2) releaseBarrier?.();
+        await barrier;
+        return baseStore.findActiveRequest(issue, requestDigest);
+      },
+    };
+    const channel = createInMemoryApprovalChannel(store);
+    const tickQueue: ApprovalTickQueue = {
+      listAwaitingApprovals: () =>
+        Promise.resolve([{ issueUrl, digest, summary: "Ship the reviewed change" }]),
+      resolveApprovalTarget: () => Promise.reject(new Error("UNEXPECTED_TARGET_LOOKUP")),
+      appendApprovalTransition: () => Promise.reject(new Error("UNEXPECTED_TRANSITION")),
+      markReady: () => Promise.reject(new Error("UNEXPECTED_READY")),
+    };
+    const dependencies = (fill: number) => ({
+      store,
+      credentials: {
+        read: (name: "telegram-token" | "transition-key") =>
+          Promise.resolve(
+            name === "telegram-token"
+              ? "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+              : "11".repeat(32),
+          ),
+      },
+      queue: tickQueue,
+      signer: transitionSigner,
+      createChannel: () => channel,
+      randomBytes: () => new Uint8Array(32).fill(fill),
+      now: () => "2026-08-11T00:01:00.000Z",
+    });
+
+    const results = await Promise.all([
+      approvalTick(
+        { installationId: "install-1", keyId: "key-1" },
+        dependencies(10),
+      ),
+      approvalTick(
+        { installationId: "install-1", keyId: "key-1" },
+        dependencies(11),
+      ),
+    ]);
+
+    expect(results.reduce((total, result) => total + result.requested, 0)).toBe(1);
+    const requests = channel.sent.map((request) => request.nonce);
+    expect(channel.sent).toHaveLength(1);
+    expect(new Set(requests).size).toBe(1);
+  });
+
+  test("replaces signer failures before the transition key can escape", async () => {
+    const { channel, store, events, approvalQueue } = await arrangedApproval();
+    channel.pushReply({
+      externalId: "signer-failure",
+      cursor: "1",
+      userId: "42",
+      chatId: "99",
+      nonce,
+      decision: "approved",
+      receivedAt: "2026-08-11T00:10:00.000Z",
+    });
+    const transitionKey = "11".repeat(32);
+    const failure = await consumeApprovalReplies(
+      { installationId: "install-1", keyId: "key-1", transitionKey },
+      {
+        channel,
+        store,
+        queue: approvalQueue,
+        signer: {
+          sign: () => {
+            throw new Error(`signer leaked ${transitionKey}`);
+          },
+        },
+        now: approvalClock,
+      },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ message: "APPROVAL_TRANSITION_SIGNING_FAILED" });
+    expect(String(failure)).not.toContain(transitionKey);
+    expect(await store.loadRequest(nonce)).toBeDefined();
+    expect(events).toEqual([]);
+  });
+
+  test("sanitizes credential and channel construction failures before a token can escape", async () => {
+    const store = createInMemoryApprovalChannel().store;
+    await completePairing(store);
+    const token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+    const base = {
+      store,
+      queue: {
+        listAwaitingApprovals: () => Promise.resolve([]),
+        resolveApprovalTarget: () => Promise.reject(new Error("UNEXPECTED_TARGET_LOOKUP")),
+        appendApprovalTransition: () => Promise.reject(new Error("UNEXPECTED_TRANSITION")),
+        markReady: () => Promise.reject(new Error("UNEXPECTED_READY")),
+      } satisfies ApprovalTickQueue,
+      signer: transitionSigner,
+      now: () => "2026-08-11T00:01:00.000Z",
+    };
+    const credentialError = await approvalTick(
+      { installationId: "install-1", keyId: "key-1" },
+      {
+        ...base,
+        credentials: {
+          read: () => Promise.reject(new Error(`credential failed with ${token}`)),
+        },
+        createChannel: () => createInMemoryApprovalChannel(store),
+      },
+    ).catch((error: unknown) => error);
+    expect(credentialError).toMatchObject({ message: "APPROVAL_CREDENTIAL_UNAVAILABLE" });
+    expect(String(credentialError)).not.toContain(token);
+
+    const channelError = await approvalTick(
+      { installationId: "install-1", keyId: "key-1" },
+      {
+        ...base,
+        credentials: {
+          read: (name) =>
+            Promise.resolve(name === "telegram-token" ? token : "11".repeat(32)),
+        },
+        createChannel: () => {
+          throw new Error(`channel failed with ${token}`);
+        },
+      },
+    ).catch((error: unknown) => error);
+    expect(channelError).toMatchObject({ message: "APPROVAL_CHANNEL_UNAVAILABLE" });
+    expect(String(channelError)).not.toContain(token);
+
+    const pollError = await approvalTick(
+      { installationId: "install-1", keyId: "key-1" },
+      {
+        ...base,
+        credentials: {
+          read: (name) =>
+            Promise.resolve(name === "telegram-token" ? token : "11".repeat(32)),
+        },
+        createChannel: () => ({
+          send: () => Promise.reject(new Error("UNEXPECTED_SEND")),
+          poll: () => Promise.reject(new Error(`poll failed with ${token}`)),
+        }),
+      },
+    ).catch((error: unknown) => error);
+    expect(pollError).toMatchObject({ message: "APPROVAL_CHANNEL_UNAVAILABLE" });
+    expect(String(pollError)).not.toContain(token);
   });
 });

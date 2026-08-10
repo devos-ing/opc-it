@@ -40,6 +40,12 @@ export interface TelegramPairing {
   readonly chatId: string;
 }
 
+export interface TelegramPairingChallengeRecord {
+  readonly digest: `sha256:${string}`;
+  readonly expiresAt: string;
+  readonly status: "active" | "consumed" | "expired";
+}
+
 export interface ApprovalTransitionOutboxItem {
   readonly nonce: string;
   readonly issueUrl: string;
@@ -49,12 +55,30 @@ export interface ApprovalTransitionOutboxItem {
 }
 
 export interface ApprovalStore {
-  savePairing(pairing: TelegramPairing): Promise<void>;
+  savePairingChallenge(challenge: TelegramPairingChallengeRecord): Promise<void>;
+  loadPairingChallenge(): Promise<TelegramPairingChallengeRecord | undefined>;
+  consumePairingChallenge(input: {
+    readonly digest: `sha256:${string}`;
+    readonly now: string;
+    readonly pairing: TelegramPairing;
+  }): Promise<"paired" | "invalid" | "expired" | "replay">;
   loadPairing(): Promise<TelegramPairing | undefined>;
   enqueueRequest(request: ApprovalRequest): Promise<void>;
   listRequestOutbox(limit: number): Promise<readonly ApprovalRequest[]>;
-  markRequestSent(nonce: string, externalId: string): Promise<void>;
+  claimRequestOutbox(input: {
+    readonly limit: number;
+    readonly claimId: string;
+    readonly now: string;
+    readonly expiresAt: string;
+  }): Promise<readonly ApprovalRequest[]>;
+  markRequestSent(nonce: string, externalId: string, claimId: string): Promise<void>;
+  releaseRequestClaim(nonce: string, claimId: string): Promise<void>;
   loadRequest(nonce: string): Promise<ApprovalRequest | undefined>;
+  findActiveRequest(issueUrl: string, digest: string): Promise<ApprovalRequest | undefined>;
+  ensureActiveRequest(input: {
+    readonly request: ApprovalRequest;
+    readonly now: string;
+  }): Promise<"created" | "existing">;
   consumeReply(input: {
     readonly reply: ApprovalReply;
     readonly decision: ApprovalDecision;
@@ -84,6 +108,20 @@ export interface ApprovalQueue {
     readonly mode: "create-or-existing" | "existing-only";
   }): Promise<"created" | "existing">;
   markReady(target: ApprovalTarget): Promise<void>;
+}
+
+export interface AwaitingApprovalItem {
+  readonly issueUrl: string;
+  readonly digest: string;
+  readonly summary: string;
+}
+
+export interface ApprovalTickQueue extends ApprovalQueue {
+  listAwaitingApprovals(): Promise<readonly AwaitingApprovalItem[]>;
+}
+
+export interface ApprovalCredentialStore {
+  read(name: "telegram-token" | "transition-key"): Promise<string | undefined>;
 }
 
 export interface ApprovalTransitionSigningInput {

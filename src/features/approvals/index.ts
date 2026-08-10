@@ -1,5 +1,19 @@
-export { pairTelegram } from "./pair-telegram.js";
-export { requestApproval, validateApprovalRequest } from "./request-approval.js";
+export {
+  createTelegramPairingChallenge,
+  pairTelegram,
+  type TelegramPairingChallenge,
+} from "./pair-telegram.js";
+export {
+  enqueueApprovalRequest,
+  requestApproval,
+  validateApprovalRequest,
+} from "./request-approval.js";
+export {
+  approvalTick,
+  type ApprovalTickDependencies,
+  type ApprovalTickInput,
+  type ApprovalTickResult,
+} from "./approval-tick.js";
 export {
   consumeApprovalReplies,
   type ConsumeApprovalInput,
@@ -18,15 +32,19 @@ export {
 } from "./ports.js";
 export type {
   ApprovalChannel,
+  ApprovalCredentialStore,
   ApprovalDecision,
   ApprovalQueue,
   ApprovalPollPage,
   ApprovalReply,
   ApprovalRequest,
   ApprovalStore,
+  ApprovalTickQueue,
   ApprovalTarget,
   ApprovalTransitionOutboxItem,
   ApprovalTransitionSigner,
   ApprovalTransitionSigningInput,
+  AwaitingApprovalItem,
   TelegramPairing,
+  TelegramPairingChallengeRecord,
 } from "./ports.js";

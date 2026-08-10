@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   exactOwnData,
   validateApprovalTarget,
@@ -7,12 +8,20 @@ import {
 } from "./ports.js";
 
 const batchLimit = 100;
+const requestClaimTtlMs = 5 * 60 * 1000;
 
 export async function flushApprovalOutbox(dependencies: {
   readonly channel: ApprovalChannel;
   readonly store: ApprovalStore;
 }): Promise<{ readonly status: "sent" | "queued" }> {
-  const requests = await dependencies.store.listRequestOutbox(batchLimit);
+  const claimedAt = new Date();
+  const claimId = randomUUID();
+  const requests = await dependencies.store.claimRequestOutbox({
+    limit: batchLimit,
+    claimId,
+    now: claimedAt.toISOString(),
+    expiresAt: new Date(claimedAt.getTime() + requestClaimTtlMs).toISOString(),
+  });
   let queued = false;
   for (const request of requests) {
     try {
@@ -25,9 +34,18 @@ export async function flushApprovalOutbox(dependencies: {
       ) {
         throw new Error("INVALID_APPROVAL_SEND_RESULT");
       }
-      await dependencies.store.markRequestSent(request.nonce, response.externalId);
+      await dependencies.store.markRequestSent(
+        request.nonce,
+        response.externalId,
+        claimId,
+      );
     } catch {
       queued = true;
+      try {
+        await dependencies.store.releaseRequestClaim(request.nonce, claimId);
+      } catch {
+        // A durable lease makes the request retryable even if immediate release fails.
+      }
     }
   }
   return { status: queued ? "queued" : "sent" };

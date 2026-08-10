@@ -66,7 +66,14 @@ export async function requestApproval(
   input: ApprovalRequest,
   dependencies: { readonly channel: ApprovalChannel; readonly store: ApprovalStore },
 ): Promise<{ readonly status: "sent" | "queued" }> {
+  await enqueueApprovalRequest(input, { store: dependencies.store });
+  return flushApprovalOutbox(dependencies);
+}
+
+export async function enqueueApprovalRequest(
+  input: ApprovalRequest,
+  dependencies: { readonly store: ApprovalStore },
+): Promise<void> {
   const request = validateApprovalRequest(input);
   await dependencies.store.enqueueRequest(request);
-  return flushApprovalOutbox(dependencies);
 }
