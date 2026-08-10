@@ -158,7 +158,7 @@ export async function runPinnedCodex(
       "--config",
       `model_reasoning_effort="${route.effort}"`,
       "--config",
-      `permission_profile="${input.permissionProfile}"`,
+      `default_permissions="${input.permissionProfile}"`,
       "--ask-for-approval",
       "never",
       "--ignore-rules",

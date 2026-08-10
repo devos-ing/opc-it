@@ -95,6 +95,9 @@ export async function finalizeExecution(
     const runner = await loadTrustedRunnerConfiguration("opc-executor", {
       manifestPath: runtime.runnerManifestPath,
       expectedRunnerUser: runtime.expectedRunnerUser,
+      ...(runtime.managedRequirements === undefined
+        ? {}
+        : { managedRequirements: runtime.managedRequirements }),
       currentUser: () => currentUser(runtime),
     });
     const environmentSource: NodeJS.ProcessEnv = {

@@ -58,7 +58,7 @@ rtk stat -f '%Su %Sp %N' /Users/opc-runner/.codex/auth.json
     "sha256": "sha256:<64 hex>"
   },
   "requirements": {
-    "path": "/Users/opc-runner/.codex/requirements.toml",
+    "path": "/etc/codex/requirements.toml",
     "sha256": "sha256:<64 hex>"
   },
   "profiles": {
@@ -80,7 +80,8 @@ rtk stat -f '%Su %Sp %N' /Users/opc-runner/.codex/auth.json
 
 验收条件：
 
-- Codex home 在 runner/worktree roots 之外，目录 mode `0700`；`auth.json`、manifest、requirements 与两个 profile 都是 mode `0600`。
+- Codex home 在 runner/worktree roots 之外，目录 mode `0700`；`auth.json`、manifest、base config 与两个 profile 都由 `opc-runner` 所有且 mode `0600`。
+- managed requirements 必须是 Codex 实际加载的 `/etc/codex/requirements.toml`；`/etc/codex` 由 root 所有、mode `0755`，文件由 root 所有、mode `0644`，digest 固定在 runner manifest。不得用 `$CODEX_HOME/requirements.toml` 冒充系统强制策略。
 - `cli_auth_credentials_store = "file"`；managed requirements 只允许 `opc-executor` 与 `opc-reviewer`。
 - executor 只可写当前 worktree 与 job temp；reviewer 为只读。两个 profile 都禁止模型生成的本地工具读取 persistent Codex home，并禁止 workload 网络。
 - `network_deny.command` 必须是 OS 强制执行的 wrapper，owner/mode/digest 与 manifest 相同；不能用提示词或普通环境变量代替网络隔离。

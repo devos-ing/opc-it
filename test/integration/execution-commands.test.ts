@@ -33,12 +33,14 @@ async function executionFixture(): Promise<{
 
   const hostRoot = join(root, "host");
   const codexHome = join(hostRoot, "codex-home");
+  const managedRequirementsRoot = join(hostRoot, "etc", "codex");
   await mkdir(hostRoot, { mode: 0o700 });
   await mkdir(codexHome, { mode: 0o700 });
+  await mkdir(managedRequirementsRoot, { recursive: true, mode: 0o755 });
   const wrapper = join(hostRoot, "network-deny");
   const binary = join(hostRoot, "codex");
   const config = join(codexHome, "config.toml");
-  const requirements = join(codexHome, "requirements.toml");
+  const requirements = join(managedRequirementsRoot, "requirements.toml");
   const executorProfile = join(codexHome, "opc-executor.config.toml");
   const reviewerProfile = join(codexHome, "opc-reviewer.config.toml");
   const authPath = join(codexHome, "auth.json");
@@ -65,15 +67,19 @@ async function executionFixture(): Promise<{
   );
   await writeFile(binary, "codex");
   await writeFile(config, "cli_auth_credentials_store = 'file'");
-  await writeFile(requirements, "requirements");
+  await writeFile(
+    requirements,
+    "default_permissions = 'opc-executor'\n[allowed_permission_profiles]\nopc-executor = true\nopc-reviewer = true\n",
+  );
   await writeFile(executorProfile, "executor");
   await writeFile(reviewerProfile, "reviewer");
   await writeFile(authPath, "secret");
   await chmod(wrapper, 0o755);
   await chmod(binary, 0o755);
-  for (const path of [config, requirements, executorProfile, reviewerProfile, authPath]) {
+  for (const path of [config, executorProfile, reviewerProfile, authPath]) {
     await chmod(path, 0o600);
   }
+  await chmod(requirements, 0o644);
   const digest = async (path: string): Promise<string> => sha256Bytes(await Bun.file(path).bytes());
   const manifestPath = join(hostRoot, "runner.json");
   await writeFile(
@@ -143,6 +149,7 @@ async function executionFixture(): Promise<{
       runId: "10",
       runnerManifestPath: manifestPath,
       expectedRunnerUser: userInfo().username,
+      managedRequirements: { path: requirements, ownerUid: userInfo().uid },
       sourceEnvironment: process.env,
       now: () => 1_000_000,
     },

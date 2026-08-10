@@ -7,6 +7,7 @@ import { sha256Bytes } from "../security/content.js";
 export const productionRunnerManifestPath =
   "/Users/opc-runner/.config/opc/runner.json";
 export const productionRunnerUser = "opc-runner";
+export const productionManagedRequirementsPath = "/etc/codex/requirements.toml";
 
 interface PinnedFile {
   path: string;
@@ -53,6 +54,7 @@ export function repositorySandboxPrefix(
 export interface RunnerFileDependencies {
   readonly manifestPath: string;
   readonly expectedRunnerUser: string;
+  readonly managedRequirements?: { readonly path: string; readonly ownerUid: number };
   readonly currentUser: () => { username: string; uid: number };
 }
 
@@ -91,7 +93,7 @@ function pinnedFile(value: unknown, name: string): PinnedFile {
   return { path: record.path, sha256: record.sha256 as Sha256 };
 }
 
-function parseManifest(value: unknown): RunnerManifest {
+function parseManifest(value: unknown, expectedRequirementsPath: string): RunnerManifest {
   const record = objectRecord(value, "manifest");
   exactKeys(
     record,
@@ -131,7 +133,7 @@ function parseManifest(value: unknown): RunnerManifest {
   const reviewerProfile = pinnedFile(profiles["opc-reviewer"], "reviewer profile");
   if (
     config.path !== join(codex.home, "config.toml") ||
-    requirements.path !== join(codex.home, "requirements.toml") ||
+    requirements.path !== expectedRequirementsPath ||
     executorProfile.path !== join(codex.home, "opc-executor.config.toml") ||
     reviewerProfile.path !== join(codex.home, "opc-reviewer.config.toml")
   ) {
@@ -164,11 +166,20 @@ async function assertPinnedFile(
   file: PinnedFile,
   uid: number,
   executable: boolean,
+  exactMode?: number,
 ): Promise<void> {
   const stats = await lstat(file.path);
-  const allowedOwner = executable ? stats.uid === 0 || stats.uid === uid : stats.uid === uid;
+  const allowedOwner = exactMode === undefined
+    ? executable
+      ? stats.uid === 0 || stats.uid === uid
+      : stats.uid === uid
+    : stats.uid === uid;
   const mode = stats.mode & 0o777;
-  const safeMode = executable ? (mode & 0o022) === 0 && (mode & 0o111) !== 0 : mode === 0o600;
+  const safeMode = exactMode === undefined
+    ? executable
+      ? (mode & 0o022) === 0 && (mode & 0o111) !== 0
+      : mode === 0o600
+    : mode === exactMode;
   if (stats.isSymbolicLink() || !stats.isFile() || !allowedOwner || !safeMode) {
     invalid(`file:${file.path}`);
   }
@@ -181,8 +192,14 @@ export async function loadTrustedRunnerConfiguration(
   dependencies: RunnerFileDependencies,
 ): Promise<TrustedRunnerConfiguration> {
   const user = dependencies.currentUser();
+  const managedRequirements = dependencies.managedRequirements ?? {
+    path: productionManagedRequirementsPath,
+    ownerUid: 0,
+  };
   if (user.username !== dependencies.expectedRunnerUser) invalid("dedicated runner user");
-  if (!isAbsolute(dependencies.manifestPath)) invalid("manifest path");
+  if (!isAbsolute(dependencies.manifestPath) || !isAbsolute(managedRequirements.path)) {
+    invalid("manifest path");
+  }
   await assertOwnedDirectory(dirname(dependencies.manifestPath), user.uid);
   const manifestStats = await lstat(dependencies.manifestPath);
   if (
@@ -199,7 +216,7 @@ export async function loadTrustedRunnerConfiguration(
   } catch {
     invalid("manifest JSON");
   }
-  const manifest = parseManifest(manifestValue);
+  const manifest = parseManifest(manifestValue, managedRequirements.path);
   if (manifest.runner_user !== user.username) invalid("runner user");
   await assertOwnedDirectory(manifest.codex.home, user.uid);
   const authPath = join(manifest.codex.home, "auth.json");
@@ -214,7 +231,16 @@ export async function loadTrustedRunnerConfiguration(
   }
   await assertPinnedFile(manifest.codex, user.uid, true);
   await assertPinnedFile(manifest.config, user.uid, false);
-  await assertPinnedFile(manifest.requirements, user.uid, false);
+  const requirementsDirectory = await lstat(dirname(manifest.requirements.path));
+  if (
+    requirementsDirectory.isSymbolicLink() ||
+    !requirementsDirectory.isDirectory() ||
+    requirementsDirectory.uid !== managedRequirements.ownerUid ||
+    (requirementsDirectory.mode & 0o777) !== 0o755
+  ) {
+    invalid("managed requirements directory");
+  }
+  await assertPinnedFile(manifest.requirements, managedRequirements.ownerUid, false, 0o644);
   await assertPinnedFile(manifest.profiles[permissionProfile], user.uid, false);
   await assertPinnedFile(
     { path: manifest.network_deny.command, sha256: manifest.network_deny.sha256 },

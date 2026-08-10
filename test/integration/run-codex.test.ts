@@ -120,7 +120,8 @@ it.each([
   expect(request.args).toContain("--model");
   expect(request.args).toContain(model);
   expect(request.args).toContain(`model_reasoning_effort="${effort}"`);
-  expect(request.args).toContain(`permission_profile="${profile}"`);
+  expect(request.args).toContain(`default_permissions="${profile}"`);
+  expect(request.args.some((argument) => argument.startsWith("permission_profile="))).toBe(false);
   expect(request.args).toContain("never");
 });
 

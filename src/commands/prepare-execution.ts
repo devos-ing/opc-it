@@ -33,6 +33,7 @@ export interface LocalExecutionRuntime {
   readonly runId: string;
   readonly runnerManifestPath: string;
   readonly expectedRunnerUser: string;
+  readonly managedRequirements?: { readonly path: string; readonly ownerUid: number };
   readonly sourceEnvironment: NodeJS.ProcessEnv;
   readonly currentUser?: () => { username: string; uid: number };
   readonly now?: () => number;
@@ -229,6 +230,9 @@ export async function prepareExecution(
   const runner = await loadTrustedRunnerConfiguration("opc-executor", {
     manifestPath: runtime.runnerManifestPath,
     expectedRunnerUser: runtime.expectedRunnerUser,
+    ...(runtime.managedRequirements === undefined
+      ? {}
+      : { managedRequirements: runtime.managedRequirements }),
     currentUser: () => currentUser(runtime),
   });
   await mkdir(paths.executionRoot, { recursive: true, mode: 0o700 });

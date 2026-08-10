@@ -11,32 +11,40 @@ import { sha256Bytes } from "../../src/security/content.js";
 async function runnerFixture(): Promise<{
   manifestPath: string;
   binaryPath: string;
+  codexHome: string;
+  requirementsPath: string;
   dependencies: CodexRunnerDependencies;
 }> {
   const root = await mkdtemp(join(tmpdir(), "opc-runner-fixture-"));
   const configRoot = join(root, "config");
   const codexHome = join(root, "codex-home");
+  const managedRequirementsRoot = join(root, "etc", "codex");
   await mkdir(configRoot, { mode: 0o700 });
   await mkdir(codexHome, { mode: 0o700 });
+  await mkdir(managedRequirementsRoot, { recursive: true, mode: 0o755 });
   const binaryPath = join(root, "codex");
   const wrapperPath = join(root, "network-deny");
   const baseConfigPath = join(codexHome, "config.toml");
-  const requirementsPath = join(codexHome, "requirements.toml");
+  const requirementsPath = join(managedRequirementsRoot, "requirements.toml");
   const executorPath = join(codexHome, "opc-executor.config.toml");
   const reviewerPath = join(codexHome, "opc-reviewer.config.toml");
   const authPath = join(codexHome, "auth.json");
   await writeFile(binaryPath, "codex-binary");
   await writeFile(wrapperPath, "network-wrapper");
   await writeFile(baseConfigPath, "cli_auth_credentials_store = 'file'\n");
-  await writeFile(requirementsPath, "allowed_profiles = ['opc-executor', 'opc-reviewer']\n");
+  await writeFile(
+    requirementsPath,
+    "default_permissions = 'opc-executor'\n[allowed_permission_profiles]\nopc-executor = true\nopc-reviewer = true\n",
+  );
   await writeFile(executorPath, "model = 'executor'\n");
   await writeFile(reviewerPath, "model = 'reviewer'\n");
   await writeFile(authPath, "credential-material-must-not-be-read");
   await chmod(binaryPath, 0o755);
   await chmod(wrapperPath, 0o755);
-  for (const path of [baseConfigPath, requirementsPath, executorPath, reviewerPath, authPath]) {
+  for (const path of [baseConfigPath, executorPath, reviewerPath, authPath]) {
     await chmod(path, 0o600);
   }
+  await chmod(requirementsPath, 0o644);
   const digest = async (path: string): Promise<string> => sha256Bytes(await Bun.file(path).bytes());
   const manifestPath = join(configRoot, "runner.json");
   await writeFile(
@@ -65,6 +73,7 @@ async function runnerFixture(): Promise<{
   const dependencies: CodexRunnerDependencies = {
     manifestPath,
     expectedRunnerUser: "opc-runner",
+    managedRequirements: { path: requirementsPath, ownerUid: uid },
     currentUser: () => ({ username: "opc-runner", uid }),
     execute: (command, args, environment) => {
       expect(command).toBe(binaryPath);
@@ -76,7 +85,7 @@ async function runnerFixture(): Promise<{
       return Promise.resolve({ exitCode: 0, stdout: "Logged in using ChatGPT", stderr: "" });
     },
   };
-  return { manifestPath, binaryPath, dependencies };
+  return { manifestPath, binaryPath, codexHome, requirementsPath, dependencies };
 }
 
 it("verifies pinned binary, host files, file-backed ChatGPT auth, and profile", async () => {
@@ -88,6 +97,7 @@ it("verifies pinned binary, host files, file-backed ChatGPT auth, and profile", 
 
   expect(result.codexBin).toBe(fixture.binaryPath);
   expect(result.codexHome).toContain("codex-home");
+  expect(fixture.requirementsPath).not.toContain(fixture.codexHome);
 });
 
 it("rejects a profile file that Codex would not load from the pinned CODEX_HOME", async () => {

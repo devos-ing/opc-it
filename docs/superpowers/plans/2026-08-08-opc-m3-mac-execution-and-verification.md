@@ -644,7 +644,7 @@ Parse `.github/workflows/reusable-opc.yml` and assert the `execute` job:
 
 The Mac runner service is configured once, outside all repositories, with a dedicated Codex home. The dedicated OS user runs `codex login`, selects ChatGPT subscription authentication, and stores the refreshable login in file-backed credentials using `cli_auth_credentials_store = "file"`. The directory is mode `0700`; `auth.json` and host config files are mode `0600`. Only one runner service and one serialized job stream may use that auth-file copy.
 
-The host also owns `opc-executor.config.toml`, `opc-reviewer.config.toml`, their permission-profile definitions, and managed `requirements.toml` that allows only those named profiles. Repository code cannot replace or widen them. Onboarding records the Codex binary and configuration digests, but never reads, hashes, uploads, logs, or artifacts `auth.json` contents. The Codex client may use its authenticated transport to OpenAI; the profile's network deny applies to model-generated local tools.
+The host also owns `opc-executor.config.toml`, `opc-reviewer.config.toml`, and their permission-profile definitions. Root owns the Codex-enforced `/etc/codex/requirements.toml`, which allows only those named profiles; a `$CODEX_HOME/requirements.toml` file is not accepted as managed policy. Repository code cannot replace or widen them. Onboarding records the Codex binary and configuration digests, but never reads, hashes, uploads, logs, or artifacts `auth.json` contents. The Codex client may use its authenticated transport to OpenAI; the profile's network deny applies to model-generated local tools.
 
 - [ ] **Step 2: Add the exact executor workflow skeleton**
 
