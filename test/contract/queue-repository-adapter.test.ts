@@ -163,7 +163,7 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
       "--method",
       "GET",
       "-f",
-      "state=all",
+      "state=open",
       "-f",
       "labels=opc:work",
       "-f",
@@ -176,7 +176,7 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
       "--method",
       "GET",
       "-f",
-      "state=all",
+      "state=open",
       "-f",
       "labels=opc:work",
       "-f",
@@ -188,21 +188,35 @@ test("polls ready Work with ETag and maps GitHub 304 to not-modified", async () 
   ]);
 });
 
-test("finds and lists active Work through closed issue records", async () => {
+test("finds Work and lists every journal candidate through closed issue records", async () => {
   const claimedIssue = {
     ...readyIssue,
     number: 9,
     body: '<!-- opc-queue:v1 {"digest":"sha256:c","work_id":"w-3"} -->\nactive payload',
     labels: [{ name: "opc:work" }, { name: "opc:claimed" }],
   };
+  const recoveryIssue = {
+    ...readyIssue,
+    number: 10,
+    body: '<!-- opc-queue:v1 {"digest":"sha256:d","work_id":"opc-recovery:83015b3d383502d2883b9fab41f921fddf49518c5e0090036826bf4d8fa2054e:2"} -->\nrecovery payload',
+    labels: [
+      { name: "opc:work" },
+      { name: "opc:recovery" },
+      { name: "opc:ready" },
+    ],
+  };
   const responses = [
-    result(JSON.stringify([[readyIssue, claimedIssue]])),
-    result(JSON.stringify([[readyIssue, claimedIssue]])),
+    result(JSON.stringify([[readyIssue, claimedIssue, recoveryIssue]])),
+    result(JSON.stringify([[readyIssue, claimedIssue, recoveryIssue]])),
   ];
+  const requests: CommandRequest[] = [];
   const github = createGhCliGitHubAdapter({
     cwd: "/opt/opc",
     trustedPath: "/usr/bin:/bin",
-    run: () => Promise.resolve(responses.shift() ?? result("[]")),
+    run: (request) => {
+      requests.push(request);
+      return Promise.resolve(responses.shift() ?? result("[]"));
+    },
   });
 
   expect(await github.findWork("roy/app", "w-2")).toMatchObject({
@@ -210,8 +224,17 @@ test("finds and lists active Work through closed issue records", async () => {
     workId: "w-2",
     stateLabel: "opc:ready",
   });
-  expect(await github.listActive("roy/app")).toEqual({
+  expect(await github.listJournalCandidates("roy/app")).toEqual({
     issues: [
+      {
+        number: 8,
+        repository: "roy/app",
+        workId: "w-2",
+        digest: "sha256:b",
+        body: "ready payload",
+        stateLabel: "opc:ready",
+        createdAt: "2026-08-10T00:01:00Z",
+      },
       {
         number: 9,
         repository: "roy/app",
@@ -221,9 +244,20 @@ test("finds and lists active Work through closed issue records", async () => {
         stateLabel: "opc:claimed",
         createdAt: "2026-08-10T00:01:00Z",
       },
+      {
+        number: 10,
+        repository: "roy/app",
+        workId:
+          "opc-recovery:83015b3d383502d2883b9fab41f921fddf49518c5e0090036826bf4d8fa2054e:2",
+        digest: "sha256:d",
+        body: "recovery payload",
+        stateLabel: "opc:ready",
+        createdAt: "2026-08-10T00:01:00Z",
+      },
     ],
     diagnostics: [],
   });
+  expect(requests[1]?.args).toContain("state=open");
 });
 
 test("appends and lists only OPC transition comments", async () => {
@@ -303,7 +337,7 @@ test("relabels one Work while preserving non-state labels", async () => {
   );
 });
 
-test("in-memory ready polling has conditional ETag and active parity", async () => {
+test("in-memory ready polling has conditional ETag and journal-candidate parity", async () => {
   const github = createInMemoryGitHub({ now: () => "2026-08-10T00:00:00Z" });
   const ready = await github.createWork({
     repository: "roy/app",
@@ -331,8 +365,34 @@ test("in-memory ready polling has conditional ETag and active parity", async () 
     status: "not-modified",
     etag: first.etag,
   });
-  expect(await github.listActive("roy/app")).toMatchObject({
-    issues: [{ workId: "active", stateLabel: "opc:claimed" }],
+  expect(await github.listJournalCandidates("roy/app")).toMatchObject({
+    issues: [
+      { workId: "ready", stateLabel: "opc:ready" },
+      { workId: "active", stateLabel: "opc:claimed" },
+    ],
+    diagnostics: [],
+  });
+});
+
+test("journal candidates remain visible after an active Work is hostilely relabelled", async () => {
+  const github = createInMemoryGitHub();
+  const issue = await github.createWork({
+    repository: "roy/app",
+    workId: "hidden-active",
+    digest: "sha256:hidden",
+    body: "payload",
+  });
+  await github.setStateLabel("roy/app", issue.number, "opc:claimed");
+  await github.setStateLabel("roy/app", issue.number, "opc:awaiting-approval");
+
+  expect(await github.listJournalCandidates("roy/app")).toMatchObject({
+    issues: [
+      {
+        number: issue.number,
+        workId: "hidden-active",
+        stateLabel: "opc:awaiting-approval",
+      },
+    ],
     diagnostics: [],
   });
 });
@@ -472,7 +532,7 @@ test("isolates malformed Work while returning valid ready and active batches", a
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 70 },
     ],
   });
-  expect(await github.listActive("roy/app")).toMatchObject({
+  expect(await github.listJournalCandidates("roy/app")).toMatchObject({
     issues: [{ number: 71, workId: "claimed" }],
     diagnostics: [
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 72 },

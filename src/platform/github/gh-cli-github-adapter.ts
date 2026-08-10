@@ -4,7 +4,6 @@ import {
   type CommandResult,
 } from "../../adapters/local/process-runner.js";
 import {
-  isActiveQueueStateLabel,
   queueWorkStates,
   validateQueueIdentifier,
   validateQueueIssueNumber,
@@ -290,7 +289,10 @@ export function createGhCliGitHubAdapter(
     return command;
   }
 
-  async function listIssues(repositoryName: string): Promise<ParsedIssueBatch> {
+  async function listIssues(
+    repositoryName: string,
+    state: "all" | "open" = "all",
+  ): Promise<ParsedIssueBatch> {
     const repository = validateQueueRepository(repositoryName);
     const response = await execute([
       "api",
@@ -298,7 +300,7 @@ export function createGhCliGitHubAdapter(
       "--method",
       "GET",
       "-f",
-      "state=all",
+      `state=${state}`,
       "-f",
       "labels=opc:work",
       "-f",
@@ -358,7 +360,7 @@ export function createGhCliGitHubAdapter(
         "--method",
         "GET",
         "-f",
-        "state=all",
+        "state=open",
         "-f",
         "labels=opc:work",
         "-f",
@@ -411,12 +413,10 @@ export function createGhCliGitHubAdapter(
       };
     },
 
-    async listActive(repository: string): Promise<QueueIssueBatch> {
-      const batch = await listIssues(repository);
+    async listJournalCandidates(repository: string): Promise<QueueIssueBatch> {
+      const batch = await listIssues(repository, "open");
       return {
-        issues: batch.issues.filter((issue) =>
-          isActiveQueueStateLabel(issue.stateLabel),
-        ),
+        issues: batch.issues,
         diagnostics: batch.diagnostics,
       };
     },

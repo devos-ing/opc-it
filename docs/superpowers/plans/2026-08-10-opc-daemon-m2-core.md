@@ -149,7 +149,15 @@ Expected: FAIL with missing in-memory GitHub adapter.
 
 - [x] **Step 3: Add the port and adapters**
 
-Add a `QueueRepository` port with exactly `createWork`, `findWork`, `listReady`, `listActive`, `listTransitions`, `appendTransition`, and `setStateLabel`. The in-memory adapter implements it with Maps.
+Add a `QueueRepository` port with exactly `createWork`, `findWork`, `listReady`, `listJournalCandidates`, `listTransitions`, `appendTransition`, and `setStateLabel`. The in-memory adapter implements it with Maps. `listJournalCandidates` returns every open OPC Work/Recovery candidate so feature code derives active authority from the signed journal rather than mutable labels. `opc:work` is the queue umbrella label on both root Work and child Recovery Issues; Recovery may additionally carry `opc:recovery`, but its priority comes only from a trusted `recovering -> retry -> ready` journal.
+
+Child Recovery queue IDs are canonical
+`opc-recovery:<sha256(root_work_id)>:<next_attempt>` values (64 lower-case hex;
+attempt 1..3). Ordinary Execution Contracts reserve the `opc-recovery:` prefix.
+The signed retry transition binds `root_work_id`, `next_attempt`, and root plan
+digest to that child ID, while the child body preserves the root immutable
+Execution Contract. This keeps `findWork(root_work_id)` and repeated root submit
+unambiguous without trusting mutable labels.
 
 The production adapter must execute fixed argv arrays through `runBounded`, for example:
 
@@ -263,37 +271,52 @@ cleanup, and post-create duplicate detection. The fresh full suite passes
 - Modify: `src/features/queue/index.ts`
 - Test: `test/integration/daemon-claim.test.ts`
 
-- [ ] **Step 1: Write failing serialization and race tests**
+- [x] **Step 1: Write failing serialization and race tests**
 
 Create two Ready Issues in the in-memory adapter. Assert `pollAndClaim` claims the oldest only. Create a second installation against the same adapter, invoke both with `Promise.all`, and assert exactly one result is `claimed` while the other is `lost-race` or `active-claim`.
 
 ```ts
 expect(results.filter((result) => result.status === "claimed")).toHaveLength(1);
-expect((await github.listActive("roy/app"))).toHaveLength(1);
+expect((await github.listJournalCandidates("roy/app")).issues.filter(
+  (issue) => issue.stateLabel === "opc:claimed",
+)).toHaveLength(1);
 ```
 
-- [ ] **Step 2: Run and verify the claim use case is missing**
+- [x] **Step 2: Run and verify the claim use case is missing**
 
 Run: `rtk bun test test/integration/daemon-claim.test.ts`
 
 Expected: FAIL with missing `pollAndClaim`.
 
-- [ ] **Step 3: Implement signed claim and deterministic winner selection**
+- [x] **Step 3: Implement signed claim and deterministic winner selection**
 
-`pollAndClaim` must check trusted active transitions before mutable labels, sort eligible Recovery before Work then by creation time/Issue number, append a signed claim, re-read all claim transitions, select the smallest `(occurred_at, comment_id)`, and relabel only if the current installation won. Malformed Issues are isolated and returned as diagnostics; transport errors abort the tick.
+`pollAndClaim` must check trusted active transitions before mutable labels, sort eligible Recovery before Work then by creation time/Issue number, append a signed claim, re-read all claim transitions, select the smallest GitHub server-assigned `comment_id` (`occurred_at` remains audit evidence only), and relabel only if the current installation won. Malformed Issues are isolated and returned as diagnostics; transport errors abort the tick.
 
-- [ ] **Step 4: Verify claim, terminal, and malformed isolation cases**
+- [x] **Step 4: Verify claim, terminal, and malformed isolation cases**
 
 Run: `rtk bun test test/integration/daemon-claim.test.ts test/integration/github-state-store.test.ts`
 
 Expected: PASS with 0 failures.
 
-- [ ] **Step 5: Commit claiming**
+- [x] **Step 5: Commit claiming**
 
 ```bash
 rtk git add src/features/queue test/integration/daemon-claim.test.ts
 rtk git commit -m "feat: claim daemon work safely"
 ```
+
+**Task 4 evidence (2026-08-10):** The first tracer failed during module loading
+because the queue public interface did not export `pollAndClaim`. The completed
+integration suite passes 17/17 claim cases and the shared queue adapter contract
+passes 19/19 cases. Coverage includes Recovery-first FIFO selection, two-installation
+race resolution by monotonic GitHub `comment_id`, hidden active claims after hostile
+relabeling, terminal non-revival, complete signed claim authority, immutable v2
+contract/digest validation, reserved Recovery IDs and root submit idempotency,
+the Work/Recovery umbrella-label invariant,
+malformed-Issue isolation, replay and signature
+rejection, transport aborts, and candidate-page deduplication. The fresh full
+suite passes 546/546 tests with 1,138 assertions; lint, typecheck, build, and
+diff-check exit 0.
 
 ### Task 5: Heartbeat and reconcile stale leases
 

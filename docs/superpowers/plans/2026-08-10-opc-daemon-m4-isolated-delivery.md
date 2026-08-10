@@ -93,6 +93,19 @@ export type RecoveryOutcome = { status: "requeued"; issueNumber: number } | { st
 ```
 
 Update `runEnabledTick` to reconcile, claim, start, run delivery, publish only ResultReady, write terminal/result transitions, or call `recoverWork`. Every boundary rechecks enabled, policy, digest, and lease ownership.
+
+Every v2 daemon queue Issue keeps the `opc:work` umbrella label. A child Recovery
+Issue additionally carries `opc:recovery`, preserves the verifiable root Execution
+Contract and digest authority used by M2 claiming, and adds its Recovery addendum
+through a closed envelope defined in this task. The addendum must not replace or
+weaken root contract/digest validation.
+
+Recovery creation must use the M2 canonical queue ID
+`opc-recovery:<sha256(root_work_id)>:<next_attempt>` and write signed
+`root_work_id`/`next_attempt` authority matching that ID. It must not reuse the
+root `work_id`; repeated root submit must continue to resolve the original root
+Issue after any number of child Recovery Issues exist.
+
 - [ ] Run `rtk bun run lint`, `rtk bun run typecheck`, `rtk bun test`, and `rtk bun run build`; each exits 0. Run the acceptance test twice and assert no duplicate Issue, attempt, commit, or push.
 - [ ] Commit `feat: complete daemon delivery recovery loop`.
 

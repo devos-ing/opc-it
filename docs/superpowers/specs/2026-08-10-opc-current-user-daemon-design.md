@@ -365,6 +365,20 @@ Work Failure 或结果偏离计划时创建子 Recovery Issue。它必须包含�
 
 同一个 `(root_work_id, next_attempt)` 是唯一 Recovery slot。fingerprint 改变不能创建第二条相同 attempt 的 Recovery；内容冲突必须 fail closed。
 
+所有 v2 daemon queue Issue 都使用 `opc:work` 作为队列 umbrella label。子
+Recovery Issue 必须同时带有 `opc:work` 与 `opc:recovery`，并保留可验证的
+root Execution Contract 与 digest authority；`opc:recovery` 只是 projection，
+Recovery 优先级由签名的 `recovering -> retry -> ready` journal 决定。M4 可以
+增加 closed Recovery addendum envelope，但不得替换或削弱 root contract/digest
+authority。
+
+Recovery 的 queue work ID 使用保留命名空间
+`opc-recovery:<sha256(root_work_id)>:<next_attempt>`，其中 hash 是 64 位小写
+hex，`next_attempt` 只能是 1 到 3。普通 Execution Contract 的 `work_id`
+不得使用 `opc-recovery:` 前缀。签名 retry transition 必须把
+`root_work_id`、`next_attempt`、root plan digest 与该 Recovery queue ID 绑定；
+因此 child 使用独立 queue identity，不会破坏 root Work 的重复 submit 幂等性。
+
 ### 9.3 有界自动恢复
 
 - 修复仍在原 milestone、paths、permissions 和 attempts 内时，可以自动 requeue。

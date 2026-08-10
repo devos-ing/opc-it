@@ -334,6 +334,12 @@ describe("semantic identifier uniqueness", () => {
 });
 
 describe("non-empty execution authority strings", () => {
+  test("reserves the daemon Recovery work-id namespace", () => {
+    const candidate = createContract();
+    candidate.work_id = `opc-recovery:${"0".repeat(64)}:2`;
+    expect(() => validateExecutionContract(candidate)).toThrow("INVALID_CONTRACT");
+  });
+
   const emptyStringCases: ReadonlyArray<{
     readonly name: string;
     readonly mutate: (value: ReturnType<typeof createContract>) => void;

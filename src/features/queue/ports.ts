@@ -142,7 +142,14 @@ export interface QueueRepository {
   createWork(input: CreateWorkInput): Promise<QueueWorkIssue>;
   findWork(repository: string, workId: string): Promise<QueueWorkIssue | undefined>;
   listReady(repository: string, etag?: string): Promise<ReadyWorkResult>;
-  listActive(repository: string): Promise<QueueIssueBatch>;
+  /**
+   * Lists every OPC queue candidate whose signed journal may occupy the
+   * repository execution slot. The mutable state label is projection only and
+   * must not be used by adapters to hide candidates from journal evaluation.
+   * Both root Work and child Recovery Issues carry the `opc:work` umbrella
+   * label; Recovery priority is derived from its signed retry-to-ready journal.
+   */
+  listJournalCandidates(repository: string): Promise<QueueIssueBatch>;
   listTransitions(
     repository: string,
     issueNumber: number,

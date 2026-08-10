@@ -4,6 +4,7 @@ import { posix } from "node:path";
 import { DomainError } from "../../domain/errors.js";
 
 const NonEmpty = Type.String({ minLength: 1 });
+const recoveryWorkIdPrefix = "opc-recovery:";
 const Sha = Type.String({ pattern: "^[0-9a-f]{40}$" });
 const HostDirectory = Type.String({ format: "canonical-host-directory" });
 const CodexRoute = Type.Object(
@@ -136,6 +137,12 @@ export function validateExecutionContract(value: unknown): ValidatedExecutionCon
   }
   if (!validator(detached)) {
     throw new DomainError("INVALID_CONTRACT", JSON.stringify(validator.errors));
+  }
+  if (detached.work_id.startsWith(recoveryWorkIdPrefix)) {
+    throw new DomainError(
+      "INVALID_CONTRACT",
+      `work_id uses reserved prefix ${JSON.stringify(recoveryWorkIdPrefix)}`,
+    );
   }
   assertUniqueIds(detached.acceptance, "acceptance");
   assertUniqueIds(detached.commands.evidence, "commands.evidence");

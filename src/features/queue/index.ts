@@ -35,3 +35,9 @@ export {
   type QueueWorkEvent,
   type QueueWorkState,
 } from "./work-state.js";
+export {
+  pollAndClaim,
+  type PollAndClaimInput,
+  type PollAndClaimResult,
+} from "./poll-and-claim.js";
+export { deriveRecoveryWorkId } from "./recovery-work-id.js";

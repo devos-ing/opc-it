@@ -1,5 +1,4 @@
 import {
-  isActiveQueueStateLabel,
   validateQueueIdentifier,
   validateQueueIssueNumber,
   validateQueueRepository,
@@ -113,11 +112,10 @@ export function createInMemoryGitHub(
       });
     },
 
-    listActive(repository: string): Promise<QueueIssueBatch> {
+    listJournalCandidates(repository: string): Promise<QueueIssueBatch> {
       const canonical = validateQueueRepository(repository).canonical;
       return Promise.resolve({
         issues: [...repositoryIssues(canonical).values()]
-          .filter((issue) => isActiveQueueStateLabel(issue.stateLabel))
           .map(snapshot),
         diagnostics: [],
       });
