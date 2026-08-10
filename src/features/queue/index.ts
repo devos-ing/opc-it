@@ -5,9 +5,26 @@ export {
   type TransitionPayload,
 } from "./transition-record.js";
 export type {
+  CreateWorkInput,
   InstallationRecord,
   LocalJournal,
   PollCursor,
+  QueueIssueBatch,
+  QueueIssueDiagnostic,
+  QueueRepository,
+  QueueRepositoryPath,
+  QueueStateLabel,
+  QueueTransition,
+  QueueWorkIssue,
+  ReadyWorkResult,
+} from "./ports.js";
+export {
+  isActiveQueueStateLabel,
+  validateQueueIdentifier,
+  validateQueueIssueNumber,
+  validateQueueRepository,
+  validateQueueStateLabel,
+  validateQueueTransitionRecord,
 } from "./ports.js";
 export {
   isQueueWorkEvent,

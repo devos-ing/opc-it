@@ -125,7 +125,7 @@ close proving no transaction wrapper remains pending. Typecheck, lint, the
 - Create: `src/platform/github/in-memory-github-adapter.ts`
 - Test: `test/contract/queue-repository-adapter.test.ts`
 
-- [ ] **Step 1: Write the failing queue repository contract**
+- [x] **Step 1: Write the failing queue repository contract**
 
 ```ts
 import { expect, test } from "bun:test";
@@ -141,13 +141,13 @@ test("creates, finds, comments on, and relabels one Work Issue", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify the adapter is missing**
+- [x] **Step 2: Run the test and verify the adapter is missing**
 
 Run: `rtk bun test test/contract/queue-repository-adapter.test.ts`
 
 Expected: FAIL with missing in-memory GitHub adapter.
 
-- [ ] **Step 3: Add the port and adapters**
+- [x] **Step 3: Add the port and adapters**
 
 Add a `QueueRepository` port with exactly `createWork`, `findWork`, `listReady`, `listActive`, `listTransitions`, `appendTransition`, and `setStateLabel`. The in-memory adapter implements it with Maps.
 
@@ -167,7 +167,7 @@ await runBounded({
 
 Never call `gh auth token`, export `GH_TOKEN`, invoke a shell, or accept arbitrary API paths from an Issue. Parse every response into a closed local record before returning it.
 
-- [ ] **Step 4: Run contract, credential, and type gates**
+- [x] **Step 4: Run contract, credential, and type gates**
 
 Run: `rtk bun test test/contract/queue-repository-adapter.test.ts test/integration/process-runner.test.ts`
 
@@ -177,12 +177,23 @@ Run: `rtk rg -n 'gh auth token|GH_TOKEN|GITHUB_TOKEN' src/platform/github`
 
 Expected: exit 1 and no matches.
 
-- [ ] **Step 5: Commit the GitHub adapter**
+- [x] **Step 5: Commit the GitHub adapter**
 
 ```bash
 rtk git add src/features/queue/ports.ts src/platform/github test/contract/queue-repository-adapter.test.ts
 rtk git commit -m "feat: add gh issue queue adapter"
 ```
+
+**Task 2 evidence (2026-08-10):** The first tracer failed because the in-memory
+GitHub adapter module did not exist. The completed contract passes 18/18 queue
+cases plus 4/4 bounded-process cases. It covers all seven port operations,
+fixed `gh api` argv, controlled cwd/environment, stdin JSON, closed response
+records, comment IDs, complete Issue/comment pagination, duplicate Work IDs,
+malformed-Issue isolation, and ETag behavior at 100/101-item and diagnostic
+boundaries. Credential scanning finds no token command or token environment
+variable. The fresh full suite passes 508/508 tests with 1,045 assertions;
+lint, typecheck, build, and diff-check exit 0. Final independent Spec and
+Standards reviews report 0 findings.
 
 ### Task 3: Submit an immutable Work Issue
 
