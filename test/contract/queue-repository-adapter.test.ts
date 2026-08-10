@@ -387,6 +387,12 @@ test("discovers immutable queue markers after the umbrella label is removed", as
     labels: ["opc:work", "triage"],
     body: "queue marker was deleted before state labelling",
   };
+  const recoveryWithoutMarkerOrState = {
+    ...readyIssue,
+    number: 99,
+    labels: ["opc:recovery"],
+    body: "queue marker and state labels were deleted",
+  };
   const responses = [
     result(
       `HTTP/2.0 200 OK\nlink: <https://api.github.test/issues?page=2>; rel="next"\n\n${JSON.stringify([
@@ -409,6 +415,7 @@ test("discovers immutable queue markers after the umbrella label is removed", as
         malformedMarker,
         activeWithoutMarker,
         workWithoutMarker,
+        recoveryWithoutMarkerOrState,
       ]),
     ),
   ];
@@ -443,6 +450,7 @@ test("discovers immutable queue markers after the umbrella label is removed", as
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 94 },
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 97 },
       { code: "MALFORMED_WORK_ISSUE", issueNumber: 98 },
+      { code: "MALFORMED_WORK_ISSUE", issueNumber: 99 },
     ],
   });
   for (const request of requests) {

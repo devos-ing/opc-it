@@ -36,6 +36,7 @@ const stateLabelSet: ReadonlySet<string> = new Set(
 );
 const queueDiscoveryLabelSet: ReadonlySet<string> = new Set([
   "opc:work",
+  "opc:recovery",
   ...stateLabelSet,
 ]);
 
