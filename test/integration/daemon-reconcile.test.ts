@@ -612,6 +612,77 @@ test("reconciles a stale winning lease with one signed transition before relabel
   });
 });
 
+test("concurrent reconcilers collapse one stale lease into one logical mutation", async () => {
+  const base = createInMemoryGitHub({
+    now: () => "2026-08-10T09:00:00.000Z",
+  });
+  const issueNumber = await createClaimedWork({
+    github: base,
+    workId: "work-concurrent-reconcile",
+    approvedAt: "2026-08-10T09:29:00.000Z",
+    claimedAt: "2026-08-10T09:30:00.000Z",
+    leaseId: "lease-concurrent-reconcile",
+  });
+  const before = await base.listTransitions(repository, issueNumber);
+  let appended = 0;
+  let releaseAppends = (): void => undefined;
+  const bothAppended = new Promise<void>((resolve) => {
+    releaseAppends = resolve;
+  });
+  let labelMutations = 0;
+  const github: QueueRepository = {
+    ...base,
+    async appendTransition(repositoryName, number, record) {
+      await base.appendTransition(repositoryName, number, record);
+      appended += 1;
+      if (appended === 2) releaseAppends();
+      await bothAppended;
+    },
+    async setStateLabel(...args) {
+      labelMutations += 1;
+      await base.setStateLabel(...args);
+    },
+  };
+  const input = {
+    repository,
+    github,
+    installation: { id: "installation-a", keyId: "key-a" },
+    signingKey,
+    verificationKeys: { "key-a": signingKey },
+    occurredAt: now.toISOString(),
+  } as const;
+
+  const results = await Promise.all([
+    reconcileRepository(input),
+    reconcileRepository({
+      ...input,
+      occurredAt: "2026-08-10T10:00:01.000Z",
+    }),
+  ]);
+
+  expect(results.reduce((count, result) => count + result.requeued, 0)).toBe(1);
+  expect(labelMutations).toBe(1);
+  const after = await base.listTransitions(repository, issueNumber);
+  expect(after).toHaveLength(before.length + 2);
+  const reconciliations = after
+    .slice(before.length)
+    .map((transition) =>
+      verifyTransition(JSON.parse(transition.record) as unknown, {
+        "key-a": signingKey,
+      }),
+    );
+  expect(reconciliations[0]?.metadata.event_id).toBeString();
+  expect(new Set(reconciliations.map((entry) => entry.metadata.event_id))).toEqual(
+    new Set([reconciliations[0]?.metadata.event_id]),
+  );
+  expect(
+    await reconcileRepository({
+      ...input,
+      github: base,
+    }),
+  ).toMatchObject({ active: 0, requeued: 0, blocked: 0 });
+});
+
 test("only a signed winner-bound heartbeat renews the lease and repairs its label", async () => {
   const github = createInMemoryGitHub({
     now: () => "2026-08-10T09:00:00.000Z",
@@ -862,6 +933,66 @@ test("recovers an append-before-label crash without duplicating the signed trans
     afterAppend.length,
   );
   expect(await base.findWork(repository, "work-label-crash")).toMatchObject({
+    stateLabel: "opc:ready",
+  });
+});
+
+test("recovers an append-before-reread crash without duplicating the logical event", async () => {
+  const base = createInMemoryGitHub({
+    now: () => "2026-08-10T09:00:00.000Z",
+  });
+  const issueNumber = await createClaimedWork({
+    github: base,
+    workId: "work-reread-crash",
+    approvedAt: "2026-08-10T09:29:00.000Z",
+    claimedAt: "2026-08-10T09:30:00.000Z",
+    leaseId: "lease-reread-crash",
+  });
+  let appended = false;
+  let failRereadOnce = true;
+  const github: QueueRepository = {
+    ...base,
+    async appendTransition(...args) {
+      await base.appendTransition(...args);
+      appended = true;
+    },
+    async listTransitions(...args) {
+      if (appended && failRereadOnce) {
+        failRereadOnce = false;
+        throw new Error("REREAD_TRANSPORT_FAILED");
+      }
+      return base.listTransitions(...args);
+    },
+  };
+  const input = {
+    repository,
+    github,
+    installation: { id: "installation-a", keyId: "key-a" },
+    signingKey,
+    verificationKeys: { "key-a": signingKey },
+    occurredAt: now.toISOString(),
+  } as const;
+  const before = await base.listTransitions(repository, issueNumber);
+
+  await expectRejection(
+    () => reconcileRepository(input),
+    "REREAD_TRANSPORT_FAILED",
+  );
+  const afterAppend = await base.listTransitions(repository, issueNumber);
+  expect(afterAppend).toHaveLength(before.length + 1);
+  expect(await base.findWork(repository, "work-reread-crash")).toMatchObject({
+    stateLabel: "opc:claimed",
+  });
+
+  expect(await reconcileRepository(input)).toMatchObject({
+    active: 0,
+    requeued: 0,
+    blocked: 0,
+  });
+  expect(await base.listTransitions(repository, issueNumber)).toHaveLength(
+    afterAppend.length,
+  );
+  expect(await base.findWork(repository, "work-reread-crash")).toMatchObject({
     stateLabel: "opc:ready",
   });
 });

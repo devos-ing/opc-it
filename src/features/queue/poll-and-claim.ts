@@ -4,7 +4,6 @@ import {
   type ValidatedExecutionContract,
 } from "../planning/index.js";
 import {
-  isActiveQueueStateLabel,
   validateQueueRepository,
   type InstallationRecord,
   type QueueIssueDiagnostic,
@@ -20,8 +19,10 @@ import {
   parseRecoveryWorkId,
 } from "./recovery-work-id.js";
 import {
+  arbitrateRepositoryJournal,
   readTrustedTimeline,
-  winningClaimTransition,
+  type RepositoryJournalAuthority,
+  type RepositoryJournalEntry,
   type TrustedTimeline,
   type TrustedTransition,
 } from "./trusted-timeline.js";
@@ -84,6 +85,12 @@ interface EvaluatedCandidate {
   readonly view: TrustedTimeline;
 }
 
+interface RepositoryJournalSnapshot {
+  readonly authority: RepositoryJournalAuthority;
+  readonly diagnostics: readonly QueueIssueDiagnostic[];
+  readonly evaluatedCandidates: ReadonlyMap<number, EvaluatedCandidate>;
+}
+
 function requireNonEmpty(name: string, value: string): string {
   if (value.length === 0 || value.includes("\u0000")) {
     throw new TypeError(`INVALID_CLAIM_INPUT: ${name}`);
@@ -97,22 +104,10 @@ function diagnostic(issueNumber?: number): QueueIssueDiagnostic {
     : { code: "MALFORMED_WORK_ISSUE", issueNumber };
 }
 
-function activeAuthority(view: TrustedTimeline): TrustedTransition | undefined {
-  const current = view.current;
-  if (
-    current !== undefined &&
-    isActiveQueueStateLabel(`opc:${current.payload.to}`)
-  ) {
-    return current;
-  }
-  return undefined;
-}
-
 function decodeEligible(
   issue: QueueWorkIssue,
-  view: TrustedTimeline,
+  current: TrustedTransition | undefined,
 ): EligibleWork | undefined {
-  const current = view.current;
   if (current === undefined) {
     throw new DomainError(
       "INCOMPLETE_ISSUE",
@@ -214,6 +209,65 @@ function activeClaimResult(
   );
 }
 
+async function readRepositoryJournal(
+  github: QueueRepository,
+  repository: string,
+  verificationKeys: Readonly<Record<string, string>>,
+): Promise<RepositoryJournalSnapshot> {
+  const candidates = await github.listJournalCandidates(repository);
+  const evaluatedCandidates = new Map<number, EvaluatedCandidate>();
+  const entries: RepositoryJournalEntry[] = [];
+
+  for (const candidate of candidates.issues) {
+    const previous = evaluatedCandidates.get(candidate.number);
+    if (previous !== undefined) {
+      if (
+        previous.workId !== candidate.workId ||
+        previous.digest !== candidate.digest
+      ) {
+        throw new DomainError(
+          "INVALID_TRANSITION",
+          `conflicting candidate identity for #${String(candidate.number)}`,
+        );
+      }
+      continue;
+    }
+    const view = readTrustedTimeline(
+      await github.listTransitions(repository, candidate.number),
+      verificationKeys,
+      { issueNumber: candidate.number, workId: candidate.workId },
+      candidate.digest,
+    );
+    evaluatedCandidates.set(candidate.number, {
+      workId: candidate.workId,
+      digest: candidate.digest,
+      view,
+    });
+    entries.push({ issueNumber: candidate.number, timeline: view });
+  }
+
+  for (const malformed of candidates.diagnostics) {
+    if (
+      malformed.issueNumber === undefined ||
+      evaluatedCandidates.has(malformed.issueNumber)
+    ) {
+      continue;
+    }
+    const view = readTrustedTimeline(
+      await github.listTransitions(repository, malformed.issueNumber),
+      verificationKeys,
+      { issueNumber: malformed.issueNumber },
+    );
+    entries.push({ issueNumber: malformed.issueNumber, timeline: view });
+  }
+
+  return {
+    authority: arbitrateRepositoryJournal(entries),
+    diagnostics: mergeQueueDiagnostics(candidates.diagnostics),
+    evaluatedCandidates,
+  };
+}
+
 export async function pollAndClaim(
   input: PollAndClaimInput,
 ): Promise<PollAndClaimResult> {
@@ -236,67 +290,18 @@ export async function pollAndClaim(
     throw new DomainError("UNKNOWN_TRANSITION_KEY", keyId);
   }
 
-  const candidates = await input.github.listJournalCandidates(repository);
-  let diagnostics = mergeQueueDiagnostics(candidates.diagnostics);
-  const evaluatedCandidates = new Map<number, EvaluatedCandidate>();
-
-  for (const candidate of candidates.issues) {
-    const previous = evaluatedCandidates.get(candidate.number);
-    if (previous !== undefined) {
-      if (
-        previous.workId !== candidate.workId ||
-        previous.digest !== candidate.digest
-      ) {
-        throw new DomainError(
-          "INVALID_TRANSITION",
-          `conflicting candidate identity for #${String(candidate.number)}`,
-        );
-      }
-      continue;
-    }
-    const records = await input.github.listTransitions(repository, candidate.number);
-    const view = readTrustedTimeline(
-      records,
-      input.verificationKeys,
-      {
-        issueNumber: candidate.number,
-        workId: candidate.workId,
-      },
-      candidate.digest,
+  const repositoryJournal = await readRepositoryJournal(
+    input.github,
+    repository,
+    input.verificationKeys,
+  );
+  let diagnostics = repositoryJournal.diagnostics;
+  const evaluatedCandidates = repositoryJournal.evaluatedCandidates;
+  if (repositoryJournal.authority.leaseAuthority !== undefined) {
+    return activeClaimResult(
+      repositoryJournal.authority.leaseAuthority,
+      diagnostics,
     );
-    evaluatedCandidates.set(candidate.number, {
-      workId: candidate.workId,
-      digest: candidate.digest,
-      view,
-    });
-    const active = activeAuthority(view);
-    if (active !== undefined) {
-      return activeClaimResult(active, diagnostics);
-    }
-  }
-
-  for (const malformed of candidates.diagnostics) {
-    if (malformed.issueNumber === undefined) continue;
-    if (evaluatedCandidates.has(malformed.issueNumber)) continue;
-    const records = await input.github.listTransitions(
-      repository,
-      malformed.issueNumber,
-    );
-    const active = activeAuthority(
-      readTrustedTimeline(
-        records,
-        input.verificationKeys,
-        {
-          issueNumber: malformed.issueNumber,
-        },
-      ),
-    );
-    if (
-      active !== undefined &&
-      active.payload.issue_number === malformed.issueNumber
-    ) {
-      return activeClaimResult(active, diagnostics);
-    }
   }
 
   const ready = await input.github.listReady(repository, input.etag);
@@ -326,12 +331,12 @@ export async function pollAndClaim(
       { issueNumber: issue.number, workId: issue.workId },
       issue.digest,
     );
-    const active = activeAuthority(view);
-    if (active !== undefined) {
-      return activeClaimResult(active, diagnostics, ready.etag);
-    }
     try {
-      const work = decodeEligible(issue, view);
+      const work = decodeEligible(
+        issue,
+        repositoryJournal.authority.currentByIssue.get(issue.number) ??
+          (evaluated === undefined ? view.current : undefined),
+      );
       if (work !== undefined) eligible.push(work);
     } catch {
       diagnostics = mergeQueueDiagnostics(diagnostics, [diagnostic(issue.number)]);
@@ -369,13 +374,13 @@ export async function pollAndClaim(
     JSON.stringify(claim),
   );
 
-  const reread = readTrustedTimeline(
-    await input.github.listTransitions(repository, selected.issue.number),
+  const reread = await readRepositoryJournal(
+    input.github,
+    repository,
     input.verificationKeys,
-    { issueNumber: selected.issue.number, workId: selected.issue.workId },
-    selected.digest,
   );
-  const winningClaim = winningClaimTransition(reread, selected.digest);
+  diagnostics = mergeQueueDiagnostics(diagnostics, reread.diagnostics);
+  const winningClaim = reread.authority.leaseAuthority;
   if (winningClaim === undefined) {
     throw new DomainError(
       "INCOMPLETE_CLAIM_METADATA",
@@ -385,7 +390,10 @@ export async function pollAndClaim(
   const ownClaim =
     winningClaim.payload.installation_id === installationId &&
     winningClaim.payload.key_id === keyId &&
+    winningClaim.payload.issue_number === selected.issue.number &&
+    winningClaim.payload.work_id === selected.issue.workId &&
     winningClaim.payload.metadata.lease_id === leaseId &&
+    winningClaim.payload.metadata.plan_digest === selected.digest &&
     winningClaim.payload.occurred_at === input.occurredAt &&
     winningClaim.payload.metadata.lease_expires_at === input.leaseExpiresAt;
   if (!ownClaim) {

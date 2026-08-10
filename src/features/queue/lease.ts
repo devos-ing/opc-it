@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../../domain/errors.js";
 import { decodeWorkBody } from "../planning/index.js";
 import {
@@ -23,9 +24,11 @@ const heartbeatMetadataKeys = [
   "plan_digest",
 ] as const;
 const reconciliationMetadataKeys = [
+  "event_id",
   "lease_id",
   "outage_started_at",
   "plan_digest",
+  "proposal_id",
   "reconcile_decision",
   "reconciled_at",
 ] as const;
@@ -146,6 +149,29 @@ function hasExactKeys(
   );
 }
 
+export function reconciliationEventId(input: {
+  readonly issueNumber: number;
+  readonly workId: string;
+  readonly leaseId: string;
+  readonly from: TransitionPayload["from"];
+  readonly event: TransitionPayload["event"];
+  readonly to: TransitionPayload["to"];
+}): string {
+  return `reconcile:${createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.issueNumber,
+        input.workId,
+        input.leaseId,
+        input.from,
+        input.event,
+        input.to,
+      ]),
+      "utf8",
+    )
+    .digest("hex")}`;
+}
+
 function reconciliationOutage(
   transition: TrustedTransition,
   digest: string,
@@ -154,16 +180,30 @@ function reconciliationOutage(
   if (!Object.hasOwn(metadata, "reconcile_decision")) return undefined;
   const outageStartedAt = metadata.outage_started_at;
   const reconciledAt = metadata.reconciled_at;
+  const eventId = metadata.event_id;
+  const proposalId = metadata.proposal_id;
   if (
     !hasExactKeys(metadata, reconciliationMetadataKeys) ||
     outageStartedAt === undefined ||
     reconciledAt === undefined ||
+    eventId === undefined ||
+    proposalId === undefined ||
+    proposalId.length === 0 ||
     metadata.plan_digest !== digest ||
     reconciledAt !== transition.payload.occurred_at ||
     !isCanonicalQueueInstant(outageStartedAt) ||
     !isCanonicalQueueInstant(reconciledAt) ||
     (metadata.reconcile_decision !== "requeue" &&
-      metadata.reconcile_decision !== "block")
+      metadata.reconcile_decision !== "block") ||
+    eventId !==
+      reconciliationEventId({
+        issueNumber: transition.payload.issue_number,
+        workId: transition.payload.work_id,
+        leaseId: metadata.lease_id ?? "",
+        from: transition.payload.from,
+        event: transition.payload.event,
+        to: transition.payload.to,
+      })
   ) {
     throw new DomainError(
       "INVALID_TRANSITION",

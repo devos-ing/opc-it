@@ -32,6 +32,155 @@ export interface TimelineIdentity {
   readonly workId?: string;
 }
 
+export interface RepositoryJournalEntry {
+  readonly issueNumber: number;
+  readonly timeline: TrustedTimeline;
+}
+
+export interface RepositoryJournalAuthority {
+  readonly active?: TrustedTransition | undefined;
+  readonly leaseAuthority?: TrustedTransition | undefined;
+  readonly currentByIssue: ReadonlyMap<number, TrustedTransition>;
+  readonly acceptedByIssue: ReadonlyMap<
+    number,
+    readonly TrustedTransition[]
+  >;
+}
+
+const repositoryActiveStates = new Set([
+  "claimed",
+  "running",
+  "reviewing",
+  "result-ready",
+  "recovering",
+]);
+
+function logicalEventFingerprint(payload: TransitionPayload): string {
+  const metadata = { ...payload.metadata };
+  delete metadata.proposal_id;
+  delete metadata.outage_started_at;
+  delete metadata.reconciled_at;
+  return JSON.stringify({
+    installation_id: payload.installation_id,
+    key_id: payload.key_id,
+    issue_number: payload.issue_number,
+    work_id: payload.work_id,
+    from: payload.from,
+    event: payload.event,
+    to: payload.to,
+    metadata: Object.entries(metadata).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  });
+}
+
+export function arbitrateRepositoryJournal(
+  entries: readonly RepositoryJournalEntry[],
+): RepositoryJournalAuthority {
+  const ordered = entries
+    .flatMap((entry) =>
+      entry.timeline.transitions.map((transition) => ({
+        issueNumber: entry.issueNumber,
+        transition,
+      })),
+    )
+    .sort(
+      (left, right) =>
+        left.transition.commentId - right.transition.commentId,
+    );
+  const seenCommentIds = new Set<number>();
+  const issueStates = new Map<number, TransitionPayload["to"]>();
+  const currentByIssue = new Map<number, TrustedTransition>();
+  const acceptedByIssue = new Map<number, TrustedTransition[]>();
+  const logicalEvents = new Map<string, string>();
+  let active: TrustedTransition | undefined;
+  let leaseAuthority: TrustedTransition | undefined;
+
+  for (const { issueNumber, transition } of ordered) {
+    if (seenCommentIds.has(transition.commentId)) {
+      throw new DomainError(
+        "INVALID_TRANSITION",
+        `duplicate repository comment id ${String(transition.commentId)}`,
+      );
+    }
+    seenCommentIds.add(transition.commentId);
+    const payload = transition.payload;
+    const eventId = payload.metadata.event_id;
+    if (eventId !== undefined) {
+      const fingerprint = logicalEventFingerprint(payload);
+      const existing = logicalEvents.get(eventId);
+      if (existing !== undefined) {
+        if (existing !== fingerprint) {
+          throw new DomainError(
+            "INVALID_TRANSITION",
+            `conflicting logical event ${eventId}`,
+          );
+        }
+        continue;
+      }
+      logicalEvents.set(eventId, fingerprint);
+    }
+    const currentState = issueStates.get(issueNumber) ?? payload.from;
+
+    if (payload.event === "claim") {
+      if (payload.from !== "ready") {
+        throw new DomainError(
+          "INVALID_TRANSITION",
+          `invalid repository claim at comment ${String(transition.commentId)}`,
+        );
+      }
+      if (active !== undefined || currentState !== "ready") continue;
+      issueStates.set(issueNumber, payload.to);
+      currentByIssue.set(issueNumber, transition);
+      const accepted = acceptedByIssue.get(issueNumber) ?? [];
+      accepted.push(transition);
+      acceptedByIssue.set(issueNumber, accepted);
+      active = transition;
+      leaseAuthority = transition;
+      continue;
+    }
+
+    if (payload.from !== currentState) {
+      throw new DomainError(
+        "INVALID_TRANSITION",
+        `broken repository journal at comment ${String(transition.commentId)}`,
+      );
+    }
+    if (
+      active !== undefined &&
+      active.payload.issue_number === issueNumber &&
+      leaseAuthority !== undefined &&
+      (payload.installation_id !== leaseAuthority.payload.installation_id ||
+        payload.key_id !== leaseAuthority.payload.key_id ||
+        payload.metadata.lease_id !== leaseAuthority.payload.metadata.lease_id)
+    ) {
+      throw new DomainError(
+        "INVALID_TRANSITION",
+        `transition is outside repository lease at comment ${String(transition.commentId)}`,
+      );
+    }
+    issueStates.set(issueNumber, payload.to);
+    currentByIssue.set(issueNumber, transition);
+    const accepted = acceptedByIssue.get(issueNumber) ?? [];
+    accepted.push(transition);
+    acceptedByIssue.set(issueNumber, accepted);
+    if (active?.payload.issue_number !== issueNumber) continue;
+    if (repositoryActiveStates.has(payload.to)) {
+      active = transition;
+      continue;
+    }
+    active = undefined;
+    leaseAuthority = undefined;
+  }
+
+  return {
+    ...(active === undefined ? {} : { active }),
+    ...(leaseAuthority === undefined ? {} : { leaseAuthority }),
+    currentByIssue,
+    acceptedByIssue,
+  };
+}
+
 export function isExactClaimMetadata(
   payload: TransitionPayload,
   digest?: string,
@@ -113,6 +262,7 @@ export function readTrustedTimeline(
   let current: TrustedTransition | undefined;
   let readyAtCommentId = 0;
   let leaseAuthority: TrustedTransition | undefined;
+  const logicalEvents = new Map<string, string>();
   for (const transition of transitions) {
     if (
       transition.payload.event === "claim" &&
@@ -122,6 +272,21 @@ export function readTrustedTimeline(
         "INCOMPLETE_CLAIM_METADATA",
         `claim at comment ${String(transition.commentId)}`,
       );
+    }
+    const eventId = transition.payload.metadata.event_id;
+    if (eventId !== undefined) {
+      const fingerprint = logicalEventFingerprint(transition.payload);
+      const existing = logicalEvents.get(eventId);
+      if (existing !== undefined) {
+        if (existing !== fingerprint) {
+          throw new DomainError(
+            "INVALID_TRANSITION",
+            `conflicting logical event ${eventId}`,
+          );
+        }
+        continue;
+      }
+      logicalEvents.set(eventId, fingerprint);
     }
     if (current !== undefined && transition.payload.from !== current.payload.to) {
       if (

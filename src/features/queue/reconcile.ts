@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { DomainError } from "../../domain/errors.js";
 import { decodeWorkBody } from "../planning/index.js";
 import {
   analyzeLeaseTimeline,
   decideLease,
+  reconciliationEventId,
   type LeaseDecision,
   type LeaseTimelineAnalysis,
 } from "./lease.js";
@@ -18,7 +20,10 @@ import { signTransition, type TransitionPayload } from "./transition-record.js";
 import { mergeQueueDiagnostics } from "./diagnostics.js";
 import { isCanonicalQueueInstant } from "./timeline-validation.js";
 import {
+  arbitrateRepositoryJournal,
   readTrustedTimeline,
+  type RepositoryJournalAuthority,
+  type RepositoryJournalEntry,
   type TrustedTimeline as VerifiedTimeline,
   type TrustedTransition,
 } from "./trusted-timeline.js";
@@ -33,6 +38,12 @@ interface EvaluatedIssue {
   readonly issue: QueueWorkIssue;
   readonly timeline: TrustedTimeline;
   readonly malformed: boolean;
+}
+
+interface RepositoryReconcileSnapshot {
+  readonly authority: RepositoryJournalAuthority;
+  readonly evaluated: readonly EvaluatedIssue[];
+  readonly diagnostics: readonly QueueIssueDiagnostic[];
 }
 
 interface ReconcileMutation {
@@ -90,18 +101,20 @@ function labelFor(state: TransitionPayload["to"]): QueueStateLabel {
   return `opc:${state}`;
 }
 
-export async function reconcileRepository(
+async function readRepositorySnapshot(
   input: ReconcileRepositoryInput,
-): Promise<ReconcileRepositoryResult> {
-  const repository = validateQueueRepository(input.repository).canonical;
-  if (!isCanonicalQueueInstant(input.occurredAt)) {
-    throw new TypeError("INVALID_RECONCILE_INPUT: occurredAt");
-  }
-  const now = new Date(input.occurredAt);
+  repository: string,
+  now: Date,
+): Promise<RepositoryReconcileSnapshot> {
   const candidates = await input.github.listJournalCandidates(repository);
   let diagnostics = mergeQueueDiagnostics(candidates.diagnostics);
-  const evaluated: EvaluatedIssue[] = [];
   const seenIssues = new Map<number, QueueWorkIssue>();
+  const raw: Array<{
+    readonly issue: QueueWorkIssue;
+    readonly verified: VerifiedTimeline;
+    readonly malformed: boolean;
+  }> = [];
+  const entries: RepositoryJournalEntry[] = [];
 
   for (const issue of candidates.issues) {
     const prior = seenIssues.get(issue.number);
@@ -126,33 +139,64 @@ export async function reconcileRepository(
       ]);
     }
     const expectedDigest = malformed ? undefined : issue.digest;
-    const timeline = analyzeTimeline(
-      readTrustedTimeline(
-        await input.github.listTransitions(repository, issue.number),
-        input.verificationKeys,
-        { issueNumber: issue.number, workId: issue.workId },
-        expectedDigest,
-      ),
+    const verified = readTrustedTimeline(
+      await input.github.listTransitions(repository, issue.number),
+      input.verificationKeys,
+      { issueNumber: issue.number, workId: issue.workId },
       expectedDigest,
-      now,
     );
-    evaluated.push({ issue, timeline, malformed });
+    raw.push({ issue, verified, malformed });
+    entries.push({ issueNumber: issue.number, timeline: verified });
   }
 
   for (const diagnostic of candidates.diagnostics) {
-    if (diagnostic.issueNumber === undefined || seenIssues.has(diagnostic.issueNumber)) {
+    if (
+      diagnostic.issueNumber === undefined ||
+      seenIssues.has(diagnostic.issueNumber)
+    ) {
       continue;
     }
-    analyzeTimeline(
-      readTrustedTimeline(
-        await input.github.listTransitions(repository, diagnostic.issueNumber),
-        input.verificationKeys,
-        { issueNumber: diagnostic.issueNumber },
-      ),
-      undefined,
-      now,
+    const verified = readTrustedTimeline(
+      await input.github.listTransitions(repository, diagnostic.issueNumber),
+      input.verificationKeys,
+      { issueNumber: diagnostic.issueNumber },
     );
+    entries.push({ issueNumber: diagnostic.issueNumber, timeline: verified });
   }
+
+  const authority = arbitrateRepositoryJournal(entries);
+  const evaluated = raw.map(({ issue, verified, malformed }) => {
+    const current = authority.currentByIssue.get(issue.number);
+    const logical: VerifiedTimeline = {
+      transitions: verified.transitions,
+      accepted: authority.acceptedByIssue.get(issue.number) ?? [],
+      ...(current === undefined ? {} : { current }),
+      readyAtCommentId: verified.readyAtCommentId,
+    };
+    return {
+      issue,
+      malformed,
+      timeline: analyzeTimeline(
+        logical,
+        malformed ? undefined : issue.digest,
+        now,
+      ),
+    };
+  });
+  return { authority, evaluated, diagnostics };
+}
+
+export async function reconcileRepository(
+  input: ReconcileRepositoryInput,
+): Promise<ReconcileRepositoryResult> {
+  const repository = validateQueueRepository(input.repository).canonical;
+  if (!isCanonicalQueueInstant(input.occurredAt)) {
+    throw new TypeError("INVALID_RECONCILE_INPUT: occurredAt");
+  }
+  const now = new Date(input.occurredAt);
+  const snapshot = await readRepositorySnapshot(input, repository, now);
+  const diagnostics = snapshot.diagnostics;
+  const evaluated = snapshot.evaluated;
 
   const mutations: ReconcileMutation[] = [];
   let active = 0;
@@ -226,6 +270,14 @@ export async function reconcileRepository(
           ? "lease-expired"
           : "incident";
     const to = decision === "block" ? "blocked" : "ready";
+    const eventId = reconciliationEventId({
+      issueNumber: entry.issue.number,
+      workId: entry.issue.workId,
+      leaseId: claim.payload.metadata.lease_id ?? "",
+      from: currentState,
+      event,
+      to,
+    });
     mutations.push({
       issue: entry.issue,
       label: labelFor(to),
@@ -241,9 +293,11 @@ export async function reconcileRepository(
         to,
         occurred_at: input.occurredAt,
         metadata: {
+          event_id: eventId,
           lease_id: claim.payload.metadata.lease_id ?? "",
           outage_started_at: outageStartedAt.toISOString(),
           plan_digest: entry.issue.digest,
+          proposal_id: randomUUID(),
           reconcile_decision: decision,
           reconciled_at: input.occurredAt,
         },
@@ -260,6 +314,23 @@ export async function reconcileRepository(
         mutation.issue.number,
         JSON.stringify(signTransition(mutation.payload, input.signingKey)),
       );
+      const reread = await readRepositorySnapshot(input, repository, now);
+      const eventId = mutation.payload.metadata.event_id;
+      const winner = reread.authority.acceptedByIssue
+        .get(mutation.issue.number)
+        ?.find((transition) => transition.payload.metadata.event_id === eventId);
+      if (winner === undefined) {
+        throw new DomainError(
+          "INVALID_TRANSITION",
+          `reconcile append was not authoritative for #${String(mutation.issue.number)}`,
+        );
+      }
+      if (
+        winner.payload.metadata.proposal_id !==
+        mutation.payload.metadata.proposal_id
+      ) {
+        continue;
+      }
       if (mutation.decision === "requeue") requeued += 1;
       if (mutation.decision === "block") blocked += 1;
     }

@@ -151,6 +151,297 @@ test("two installations racing on one repository produce exactly one winner", as
   ).toHaveLength(1);
 });
 
+test("divergent ready snapshots still produce one repository-wide claim winner", async () => {
+  const base = createInMemoryGitHub({
+    now: () => "2026-08-10T00:00:00.000Z",
+  });
+  const firstNumber = await createReadyWork(base, {
+    workId: "work-divergent-a",
+    occurredAt: "2026-08-10T00:00:10.000Z",
+  });
+  const secondNumber = await createReadyWork(base, {
+    workId: "work-divergent-b",
+    occurredAt: "2026-08-10T00:00:20.000Z",
+  });
+  let appended = 0;
+  let releaseAppends = (): void => undefined;
+  const bothAppended = new Promise<void>((resolve) => {
+    releaseAppends = resolve;
+  });
+  const racingBase: QueueRepository = {
+    ...base,
+    async appendTransition(repositoryName, issueNumber, record) {
+      await base.appendTransition(repositoryName, issueNumber, record);
+      appended += 1;
+      if (appended === 2) releaseAppends();
+      await bothAppended;
+    },
+  };
+  function installationView(issueNumber: number): QueueRepository {
+    return {
+      ...racingBase,
+      async listReady(repositoryName, etag) {
+        const result = await base.listReady(repositoryName, etag);
+        return result.status === "not-modified"
+          ? result
+          : {
+              ...result,
+              issues: result.issues.filter((issue) => issue.number === issueNumber),
+            };
+      },
+    };
+  }
+  const verificationKeys = {
+    "key-a": signingKey,
+    "key-b": "installation-b-secret",
+  };
+
+  const results = await Promise.all([
+    pollAndClaim({
+      repository,
+      github: installationView(firstNumber),
+      installation: { id: "installation-a", keyId: "key-a" },
+      signingKey,
+      verificationKeys,
+      leaseId: "lease-divergent-a",
+      occurredAt: "2026-08-10T00:01:00.000Z",
+      leaseExpiresAt: "2026-08-10T00:31:00.000Z",
+    }),
+    pollAndClaim({
+      repository,
+      github: installationView(secondNumber),
+      installation: { id: "installation-b", keyId: "key-b" },
+      signingKey: verificationKeys["key-b"],
+      verificationKeys,
+      leaseId: "lease-divergent-b",
+      occurredAt: "2026-08-10T00:01:00.000Z",
+      leaseExpiresAt: "2026-08-10T00:31:00.000Z",
+    }),
+  ]);
+
+  expect(results.filter((result) => result.status === "claimed")).toHaveLength(1);
+  expect(results.filter((result) => result.status === "lost-race")).toHaveLength(1);
+  expect(results[0]).toMatchObject({
+    status: "claimed",
+    issueNumber: firstNumber,
+  });
+  expect(results[1]).toMatchObject({
+    status: "lost-race",
+    issueNumber: secondNumber,
+    winnerInstallationId: "installation-a",
+  });
+  expect(
+    (await base.listJournalCandidates(repository)).issues.filter(
+      (issue) => issue.stateLabel === "opc:claimed",
+    ),
+  ).toMatchObject([{ number: firstNumber, workId: "work-divergent-a" }]);
+});
+
+test("a losing cross-Issue proposal can win only after the repository epoch ends", async () => {
+  const base = createInMemoryGitHub({
+    now: () => "2026-08-10T00:00:00.000Z",
+  });
+  const firstNumber = await createReadyWork(base, {
+    workId: "work-epoch-a",
+    occurredAt: "2026-08-10T00:00:10.000Z",
+  });
+  const secondNumber = await createReadyWork(base, {
+    workId: "work-epoch-b",
+    occurredAt: "2026-08-10T00:00:20.000Z",
+  });
+  const first = await base.findWork(repository, "work-epoch-a");
+  const second = await base.findWork(repository, "work-epoch-b");
+  if (first === undefined || second === undefined) {
+    throw new Error("missing repository epoch fixtures");
+  }
+  const verificationKeys = {
+    "key-a": signingKey,
+    "key-b": "installation-b-secret",
+  };
+  await base.appendTransition(
+    repository,
+    firstNumber,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-a",
+          key_id: "key-a",
+          issue_number: firstNumber,
+          work_id: first.workId,
+          from: "ready",
+          event: "claim",
+          to: "claimed",
+          occurred_at: "2026-08-10T00:01:00.000Z",
+          metadata: {
+            claimed_at: "2026-08-10T00:01:00.000Z",
+            lease_expires_at: "2026-08-10T00:31:00.000Z",
+            lease_id: "lease-epoch-a",
+            plan_digest: first.digest,
+          },
+        },
+        signingKey,
+      ),
+    ),
+  );
+  await base.appendTransition(
+    repository,
+    secondNumber,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-b",
+          key_id: "key-b",
+          issue_number: secondNumber,
+          work_id: second.workId,
+          from: "ready",
+          event: "claim",
+          to: "claimed",
+          occurred_at: "2026-08-10T00:01:01.000Z",
+          metadata: {
+            claimed_at: "2026-08-10T00:01:01.000Z",
+            lease_expires_at: "2026-08-10T00:31:01.000Z",
+            lease_id: "lease-epoch-b-loser",
+            plan_digest: second.digest,
+          },
+        },
+        verificationKeys["key-b"],
+      ),
+    ),
+  );
+  await base.appendTransition(
+    repository,
+    firstNumber,
+    JSON.stringify(
+      signTransition(
+        {
+          version: 1,
+          installation_id: "installation-a",
+          key_id: "key-a",
+          issue_number: firstNumber,
+          work_id: first.workId,
+          from: "claimed",
+          event: "lease-expired",
+          to: "ready",
+          occurred_at: "2026-08-10T00:31:00.000Z",
+          metadata: { lease_id: "lease-epoch-a" },
+        },
+        signingKey,
+      ),
+    ),
+  );
+  const secondOnly: QueueRepository = {
+    ...base,
+    async listReady(repositoryName, etag) {
+      const result = await base.listReady(repositoryName, etag);
+      return result.status === "not-modified"
+        ? result
+        : {
+            ...result,
+            issues: result.issues.filter((issue) => issue.number === secondNumber),
+          };
+    },
+  };
+
+  const result = await pollAndClaim({
+    repository,
+    github: secondOnly,
+    installation: { id: "installation-b", keyId: "key-b" },
+    signingKey: verificationKeys["key-b"],
+    verificationKeys,
+    leaseId: "lease-epoch-b-winner",
+    occurredAt: "2026-08-10T00:32:00.000Z",
+    leaseExpiresAt: "2026-08-10T01:02:00.000Z",
+  });
+
+  expect(result).toMatchObject({
+    status: "claimed",
+    issueNumber: secondNumber,
+    workId: "work-epoch-b",
+  });
+});
+
+test("recovering keeps repository authority ahead of another Ready Work", async () => {
+  const github = createInMemoryGitHub({
+    now: () => "2026-08-10T00:00:00.000Z",
+  });
+  const recoveringNumber = await createReadyWork(github, {
+    workId: "work-recovering-authority",
+    occurredAt: "2026-08-10T00:00:10.000Z",
+  });
+  await createReadyWork(github, {
+    workId: "work-waits-for-recovery",
+    occurredAt: "2026-08-10T00:00:20.000Z",
+  });
+  const claimed = await pollAndClaim({
+    repository,
+    github,
+    installation: { id: "installation-a", keyId: "key-a" },
+    signingKey,
+    verificationKeys: { "key-a": signingKey },
+    leaseId: "lease-recovering-authority",
+    occurredAt: "2026-08-10T00:01:00.000Z",
+    leaseExpiresAt: "2026-08-10T00:31:00.000Z",
+  });
+  expect(claimed.status).toBe("claimed");
+  for (const transition of [
+    {
+      from: "claimed" as const,
+      event: "start" as const,
+      to: "running" as const,
+      occurred_at: "2026-08-10T00:01:01.000Z",
+    },
+    {
+      from: "running" as const,
+      event: "work-failure" as const,
+      to: "recovering" as const,
+      occurred_at: "2026-08-10T00:01:02.000Z",
+    },
+  ]) {
+    await github.appendTransition(
+      repository,
+      recoveringNumber,
+      JSON.stringify(
+        signTransition(
+          {
+            version: 1,
+            installation_id: "installation-a",
+            key_id: "key-a",
+            issue_number: recoveringNumber,
+            work_id: "work-recovering-authority",
+            ...transition,
+            metadata: { lease_id: "lease-recovering-authority" },
+          },
+          signingKey,
+        ),
+      ),
+    );
+  }
+  await github.setStateLabel(repository, recoveringNumber, "opc:recovering");
+
+  expect(
+    await pollAndClaim({
+      repository,
+      github,
+      installation: { id: "installation-b", keyId: "key-b" },
+      signingKey: "installation-b-secret",
+      verificationKeys: {
+        "key-a": signingKey,
+        "key-b": "installation-b-secret",
+      },
+      leaseId: "lease-must-wait",
+      occurredAt: "2026-08-10T00:02:00.000Z",
+      leaseExpiresAt: "2026-08-10T00:32:00.000Z",
+    }),
+  ).toMatchObject({
+    status: "active-claim",
+    issueNumber: recoveringNumber,
+    workId: "work-recovering-authority",
+    installationId: "installation-a",
+  });
+});
+
 test("fails closed when an OPC transition comment has an invalid signature", async () => {
   const github = createInMemoryGitHub({
     now: () => "2026-08-10T00:00:00.000Z",
@@ -791,7 +1082,7 @@ test("deduplicates all-candidate pages by Issue number before journal evaluation
     listTransitions(repositoryName, issueNumber) {
       if (issueNumber === noise.number) {
         noiseReads += 1;
-        if (noiseReads > 1) {
+        if (noiseReads > 2) {
           return Promise.reject(new Error("DUPLICATE_JOURNAL_READ"));
         }
       }
@@ -814,6 +1105,7 @@ test("deduplicates all-candidate pages by Issue number before journal evaluation
     status: "claimed",
     issueNumber: claimableNumber,
   });
+  expect(noiseReads).toBe(2);
 });
 
 test("rejects ready authority that is bound to a different plan digest", async () => {
