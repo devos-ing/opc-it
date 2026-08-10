@@ -30,6 +30,7 @@ export const queueWorkEvents = [
   "block",
   "lease-expired",
   "outage-block",
+  "heartbeat",
 ] as const;
 export type QueueWorkEvent = (typeof queueWorkEvents)[number];
 
@@ -42,18 +43,21 @@ const transitions = {
   "awaiting-approval": { approve: "ready" },
   ready: { claim: "claimed", invalidate: "awaiting-approval" },
   claimed: {
+    heartbeat: "claimed",
     start: "running",
     incident: "ready",
     "lease-expired": "ready",
     "outage-block": "blocked",
   },
   running: {
+    heartbeat: "running",
     candidate: "reviewing",
     "work-failure": "recovering",
     incident: "ready",
     "outage-block": "blocked",
   },
   reviewing: {
+    heartbeat: "reviewing",
     verify: "result-ready",
     "work-failure": "recovering",
     incident: "ready",
@@ -65,6 +69,7 @@ const transitions = {
     block: "blocked",
   },
   "result-ready": {
+    heartbeat: "result-ready",
     publish: "delivered",
     incident: "ready",
     "outage-block": "blocked",

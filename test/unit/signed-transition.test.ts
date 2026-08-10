@@ -56,6 +56,12 @@ test("models the v2 planning, delivery, and recovery transitions", () => {
   expect(transitionQueueWork("ready", "invalidate")).toBe("awaiting-approval");
   expect(transitionQueueWork("result-ready", "incident")).toBe("ready");
   expect(transitionQueueWork("result-ready", "outage-block")).toBe("blocked");
+  expect(transitionQueueWork("claimed", "heartbeat")).toBe("claimed");
+  expect(transitionQueueWork("running", "heartbeat")).toBe("running");
+  expect(transitionQueueWork("reviewing", "heartbeat")).toBe("reviewing");
+  expect(transitionQueueWork("result-ready", "heartbeat")).toBe(
+    "result-ready",
+  );
 });
 
 test("keeps delivered and blocked terminal", () => {

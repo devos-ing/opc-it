@@ -9,26 +9,26 @@ import {
   type InstallationRecord,
   type QueueIssueDiagnostic,
   type QueueRepository,
-  type QueueTransition,
   type QueueWorkIssue,
 } from "./ports.js";
 import {
   signTransition,
-  verifyTransition,
   type TransitionPayload,
 } from "./transition-record.js";
 import {
   deriveRecoveryWorkId,
   parseRecoveryWorkId,
 } from "./recovery-work-id.js";
+import {
+  readTrustedTimeline,
+  winningClaimTransition,
+  type TrustedTimeline,
+  type TrustedTransition,
+} from "./trusted-timeline.js";
+import { isCanonicalQueueInstant } from "./timeline-validation.js";
+import { mergeQueueDiagnostics } from "./diagnostics.js";
 
 const terminalStates = new Set(["blocked", "delivered"]);
-const claimMetadataKeys = [
-  "claimed_at",
-  "lease_expires_at",
-  "lease_id",
-  "plan_digest",
-] as const;
 
 export interface PollAndClaimInput {
   readonly repository: string;
@@ -70,17 +70,6 @@ export type PollAndClaimResult =
       readonly claim: TransitionPayload;
     } & ClaimResultBase);
 
-interface TrustedTransition {
-  readonly commentId: number;
-  readonly payload: TransitionPayload;
-}
-
-interface JournalView {
-  readonly transitions: readonly TrustedTransition[];
-  readonly current?: TrustedTransition | undefined;
-  readonly readyAtCommentId: number;
-}
-
 interface EligibleWork {
   readonly issue: QueueWorkIssue;
   readonly contract: ValidatedExecutionContract;
@@ -92,12 +81,7 @@ interface EligibleWork {
 interface EvaluatedCandidate {
   readonly workId: string;
   readonly digest: string;
-  readonly view: JournalView;
-}
-
-function isCanonicalInstant(value: string): boolean {
-  const timestamp = new Date(value);
-  return !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value;
+  readonly view: TrustedTimeline;
 }
 
 function requireNonEmpty(name: string, value: string): string {
@@ -113,111 +97,7 @@ function diagnostic(issueNumber?: number): QueueIssueDiagnostic {
     : { code: "MALFORMED_WORK_ISSUE", issueNumber };
 }
 
-function mergeDiagnostics(
-  ...groups: readonly (readonly QueueIssueDiagnostic[])[]
-): readonly QueueIssueDiagnostic[] {
-  const seen = new Set<string>();
-  const merged: QueueIssueDiagnostic[] = [];
-  for (const entry of groups.flat()) {
-    const key = `${entry.code}:${String(entry.issueNumber ?? "unknown")}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(entry);
-  }
-  return merged;
-}
-
-function parseTrustedTransitions(
-  records: readonly QueueTransition[],
-  verificationKeys: Readonly<Record<string, string>>,
-  identity?: { readonly issueNumber: number; readonly workId?: string },
-): readonly TrustedTransition[] {
-  const trusted: TrustedTransition[] = [];
-  for (const transition of records) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(transition.record) as unknown;
-    } catch {
-      throw new DomainError(
-        "INVALID_TRANSITION",
-        `malformed transition comment ${String(transition.commentId)}`,
-      );
-    }
-    const payload = verifyTransition(parsed, verificationKeys);
-    if (
-      identity !== undefined &&
-      (payload.issue_number !== identity.issueNumber ||
-        (identity.workId !== undefined && payload.work_id !== identity.workId))
-    ) {
-      throw new DomainError(
-        "INVALID_TRANSITION",
-        `transition identity mismatch at comment ${String(transition.commentId)}`,
-      );
-    }
-    trusted.push({ commentId: transition.commentId, payload });
-  }
-  return trusted.sort((left, right) => left.commentId - right.commentId);
-}
-
-function journalView(
-  transitions: readonly TrustedTransition[],
-  digest?: string,
-): JournalView {
-  let current: TrustedTransition | undefined;
-  let readyAtCommentId = 0;
-  let leaseAuthority: TrustedTransition | undefined;
-  for (const transition of transitions) {
-    if (
-      transition.payload.event === "claim" &&
-      !isExactClaimMetadata(transition.payload, digest)
-    ) {
-      throw new DomainError(
-        "INCOMPLETE_CLAIM_METADATA",
-        `claim at comment ${String(transition.commentId)}`,
-      );
-    }
-    if (current !== undefined && transition.payload.from !== current.payload.to) {
-      if (
-        transition.payload.event === "claim" &&
-        transition.payload.from === "ready" &&
-        transition.commentId > readyAtCommentId
-      ) {
-        continue;
-      }
-      throw new DomainError(
-        "INVALID_TRANSITION",
-        `broken journal sequence at comment ${String(transition.commentId)}`,
-      );
-    }
-    if (
-      leaseAuthority !== undefined &&
-      transition.payload.event !== "claim" &&
-      (transition.payload.installation_id !==
-        leaseAuthority.payload.installation_id ||
-        transition.payload.key_id !== leaseAuthority.payload.key_id ||
-        transition.payload.metadata.lease_id !==
-          leaseAuthority.payload.metadata.lease_id)
-    ) {
-      throw new DomainError(
-        "INVALID_TRANSITION",
-        `transition is outside the winning lease at comment ${String(transition.commentId)}`,
-      );
-    }
-    current = transition;
-    if (transition.payload.event === "claim") {
-      leaseAuthority = transition;
-    }
-    if (transition.payload.to === "ready") {
-      readyAtCommentId = transition.commentId;
-      leaseAuthority = undefined;
-    } else if (terminalStates.has(transition.payload.to)) {
-      leaseAuthority = undefined;
-    }
-  }
-  return { transitions, current, readyAtCommentId };
-}
-
-function activeAuthority(view: JournalView): TrustedTransition | undefined {
+function activeAuthority(view: TrustedTimeline): TrustedTransition | undefined {
   const current = view.current;
   if (
     current !== undefined &&
@@ -228,52 +108,9 @@ function activeAuthority(view: JournalView): TrustedTransition | undefined {
   return undefined;
 }
 
-function isExactClaimMetadata(
-  payload: TransitionPayload,
-  digest?: string,
-): boolean {
-  const metadata = payload.metadata;
-  const keys = Object.keys(metadata);
-  return (
-    keys.length === claimMetadataKeys.length &&
-    keys.every((key) => claimMetadataKeys.includes(key as never)) &&
-    typeof metadata.plan_digest === "string" &&
-    metadata.plan_digest.length > 0 &&
-    (digest === undefined || metadata.plan_digest === digest) &&
-    metadata.claimed_at === payload.occurred_at &&
-    typeof metadata.lease_id === "string" &&
-    metadata.lease_id.length > 0 &&
-    typeof metadata.lease_expires_at === "string" &&
-    isCanonicalInstant(metadata.lease_expires_at) &&
-    Date.parse(metadata.lease_expires_at) > Date.parse(payload.occurred_at)
-  );
-}
-
-function claimTransitions(
-  view: JournalView,
-  digest: string,
-): readonly TrustedTransition[] {
-  return view.transitions.filter(
-    ({ commentId, payload }) =>
-      commentId > view.readyAtCommentId &&
-      payload.from === "ready" &&
-      payload.event === "claim" &&
-      payload.to === "claimed" &&
-      isExactClaimMetadata(payload, digest),
-  );
-}
-
-function winner(
-  transitions: readonly TrustedTransition[],
-): TrustedTransition | undefined {
-  return [...transitions].sort(
-    (left, right) => left.commentId - right.commentId,
-  )[0];
-}
-
 function decodeEligible(
   issue: QueueWorkIssue,
-  view: JournalView,
+  view: TrustedTimeline,
 ): EligibleWork | undefined {
   const current = view.current;
   if (current === undefined) {
@@ -386,8 +223,8 @@ export async function pollAndClaim(
   const signingKey = requireNonEmpty("signingKey", input.signingKey);
   const leaseId = requireNonEmpty("leaseId", input.leaseId);
   if (
-    !isCanonicalInstant(input.occurredAt) ||
-    !isCanonicalInstant(input.leaseExpiresAt) ||
+    !isCanonicalQueueInstant(input.occurredAt) ||
+    !isCanonicalQueueInstant(input.leaseExpiresAt) ||
     Date.parse(input.leaseExpiresAt) <= Date.parse(input.occurredAt)
   ) {
     throw new TypeError("INVALID_CLAIM_INPUT: lease interval");
@@ -400,7 +237,7 @@ export async function pollAndClaim(
   }
 
   const candidates = await input.github.listJournalCandidates(repository);
-  let diagnostics = mergeDiagnostics(candidates.diagnostics);
+  let diagnostics = mergeQueueDiagnostics(candidates.diagnostics);
   const evaluatedCandidates = new Map<number, EvaluatedCandidate>();
 
   for (const candidate of candidates.issues) {
@@ -418,11 +255,13 @@ export async function pollAndClaim(
       continue;
     }
     const records = await input.github.listTransitions(repository, candidate.number);
-    const view = journalView(
-      parseTrustedTransitions(records, input.verificationKeys, {
+    const view = readTrustedTimeline(
+      records,
+      input.verificationKeys,
+      {
         issueNumber: candidate.number,
         workId: candidate.workId,
-      }),
+      },
       candidate.digest,
     );
     evaluatedCandidates.set(candidate.number, {
@@ -444,10 +283,12 @@ export async function pollAndClaim(
       malformed.issueNumber,
     );
     const active = activeAuthority(
-      journalView(
-        parseTrustedTransitions(records, input.verificationKeys, {
+      readTrustedTimeline(
+        records,
+        input.verificationKeys,
+        {
           issueNumber: malformed.issueNumber,
-        }),
+        },
       ),
     );
     if (
@@ -462,7 +303,7 @@ export async function pollAndClaim(
   if (ready.status === "not-modified") {
     return withBase({ status: "idle" as const }, diagnostics, ready.etag);
   }
-  diagnostics = mergeDiagnostics(diagnostics, ready.diagnostics);
+  diagnostics = mergeQueueDiagnostics(diagnostics, ready.diagnostics);
   const eligible: EligibleWork[] = [];
   const readyIssueNumbers = new Set<number>();
 
@@ -479,12 +320,10 @@ export async function pollAndClaim(
         `conflicting ready identity for #${String(issue.number)}`,
       );
     }
-    const view = evaluated?.view ?? journalView(
-      parseTrustedTransitions(
-        await input.github.listTransitions(repository, issue.number),
-        input.verificationKeys,
-        { issueNumber: issue.number, workId: issue.workId },
-      ),
+    const view = evaluated?.view ?? readTrustedTimeline(
+      await input.github.listTransitions(repository, issue.number),
+      input.verificationKeys,
+      { issueNumber: issue.number, workId: issue.workId },
       issue.digest,
     );
     const active = activeAuthority(view);
@@ -495,7 +334,7 @@ export async function pollAndClaim(
       const work = decodeEligible(issue, view);
       if (work !== undefined) eligible.push(work);
     } catch {
-      diagnostics = mergeDiagnostics(diagnostics, [diagnostic(issue.number)]);
+      diagnostics = mergeQueueDiagnostics(diagnostics, [diagnostic(issue.number)]);
     }
   }
 
@@ -530,15 +369,13 @@ export async function pollAndClaim(
     JSON.stringify(claim),
   );
 
-  const reread = journalView(
-    parseTrustedTransitions(
-      await input.github.listTransitions(repository, selected.issue.number),
-      input.verificationKeys,
-      { issueNumber: selected.issue.number, workId: selected.issue.workId },
-    ),
+  const reread = readTrustedTimeline(
+    await input.github.listTransitions(repository, selected.issue.number),
+    input.verificationKeys,
+    { issueNumber: selected.issue.number, workId: selected.issue.workId },
     selected.digest,
   );
-  const winningClaim = winner(claimTransitions(reread, selected.digest));
+  const winningClaim = winningClaimTransition(reread, selected.digest);
   if (winningClaim === undefined) {
     throw new DomainError(
       "INCOMPLETE_CLAIM_METADATA",

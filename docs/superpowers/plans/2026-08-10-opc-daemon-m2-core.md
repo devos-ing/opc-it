@@ -326,32 +326,48 @@ diff-check exit 0.
 - Modify: `src/features/queue/index.ts`
 - Test: `test/integration/daemon-reconcile.test.ts`
 
-- [ ] **Step 1: Write failing lease boundary tests**
+- [x] **Step 1: Write failing lease boundary tests**
 
 Use a fixed clock. Assert 29:59 without heartbeat stays active, 30:00 becomes stale, infrastructure requeue preserves `outageStarted`, a later valid heartbeat clears it, and 24 continuous hours becomes blocked. Assert terminal transitions are never revived by labels.
 
-- [ ] **Step 2: Run and verify reconcile modules are missing**
+- [x] **Step 2: Run and verify reconcile modules are missing**
 
 Run: `rtk bun test test/integration/daemon-reconcile.test.ts`
 
 Expected: FAIL with missing lease/reconcile modules.
 
-- [ ] **Step 3: Implement pure lease decisions and signed mutations**
+- [x] **Step 3: Implement pure lease decisions and signed mutations**
 
 Define `decideLease({ now, claimedAt, lastHeartbeatAt, outageStartedAt })` as a pure function returning `keep`, `requeue`, or `block`. `reconcileRepository` loads the latest trusted transition timeline, applies the decision, writes exactly one signed transition, then repairs the state label. It must run before any new claim.
 
-- [ ] **Step 4: Verify exact time boundaries**
+- [x] **Step 4: Verify exact time boundaries**
 
 Run: `rtk bun test test/integration/daemon-reconcile.test.ts test/integration/reconcile.test.ts`
 
 Expected: PASS with 0 failures.
 
-- [ ] **Step 5: Commit lease recovery**
+- [x] **Step 5: Commit lease recovery**
 
 ```bash
 rtk git add src/features/queue test/integration/daemon-reconcile.test.ts
 rtk git commit -m "feat: reconcile daemon leases"
 ```
+
+**Task 5 evidence (2026-08-10):** The first lease tracer failed because the
+queue public interface did not export `decideLease`; the first reconcile tracer
+failed because `reconcileRepository` was absent. The completed daemon reconcile
+suite passes 27/27 cases, and the combined Task 4/5, legacy reconcile, and signed
+transition set passes 68/68. Coverage fixes the 29:59/30:00 lease boundary,
+signed winner-bound heartbeat writes, stable five-minute heartbeat IDs with
+sequential and concurrent logical deduplication, signed outage continuity across
+requeue/reclaim, later-heartbeat clearing, 24-hour priority blocking, terminal
+non-revival, append-before-label crash repair, malformed-Issue isolation, and
+fail-closed signature, key, transition, reread, and transport paths. Shared
+trusted-timeline, timestamp, and diagnostic helpers keep claim and reconcile
+authority rules aligned without expanding the queue public interface. The fresh
+full suite passes 573/573 tests with 1,233 assertions; lint, typecheck, build,
+and diff-check exit 0. Final independent Spec and Standards reviews report 0
+findings.
 
 ### Task 6: Run the cancellable polling daemon
 

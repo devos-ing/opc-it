@@ -41,3 +41,15 @@ export {
   type PollAndClaimResult,
 } from "./poll-and-claim.js";
 export { deriveRecoveryWorkId } from "./recovery-work-id.js";
+export {
+  appendHeartbeat,
+  decideLease,
+  type AppendHeartbeatInput,
+  type DecideLeaseInput,
+  type LeaseDecision,
+} from "./lease.js";
+export {
+  reconcileRepository,
+  type ReconcileRepositoryInput,
+  type ReconcileRepositoryResult,
+} from "./reconcile.js";
