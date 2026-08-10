@@ -7,8 +7,11 @@ const featureRoot = "src/features/";
 
 function projectPath(filename) {
   const normalized = filename.replaceAll("\\", "/");
-  const root = normalized.lastIndexOf(`/${featureRoot}`);
-  return root === -1 ? normalized : normalized.slice(root + 1);
+  for (const root of ["src/", "test/", "scripts/"]) {
+    const index = normalized.lastIndexOf(`/${root}`);
+    if (index !== -1) return normalized.slice(index + 1);
+  }
+  return normalized;
 }
 
 function featureImportViolation(importer, specifier) {
@@ -19,22 +22,23 @@ function featureImportViolation(importer, specifier) {
       ? posix.normalize(specifier)
       : undefined;
   if (resolved === undefined) return undefined;
-  if (resolved === "src/platform" || resolved.startsWith("src/platform/")) {
+  const sourceFeature = projectImporter.startsWith(featureRoot)
+    ? projectImporter.slice(featureRoot.length).split("/")[0]
+    : undefined;
+  if (
+    sourceFeature !== undefined &&
+    (resolved === "src/platform" || resolved.startsWith("src/platform/"))
+  ) {
     return "Features own ports; platform supplies adapters.";
   }
   if (!resolved.startsWith(featureRoot)) return undefined;
 
-  const sourceFeature = projectImporter.slice(featureRoot.length).split("/")[0];
   const [targetFeature, ...targetPath] = resolved.slice(featureRoot.length).split("/");
   const target = targetPath.join("/");
-  if (
-    targetFeature !== sourceFeature &&
-    target !== "index.js" &&
-    target !== "index.ts"
-  ) {
-    return "Import another feature through its index.ts interface.";
-  }
-  return undefined;
+  if (sourceFeature !== undefined && targetFeature === sourceFeature) return undefined;
+  if (target === "index.js" || target === "index.ts") return undefined;
+  if (sourceFeature !== undefined) return "Import another feature through its index.ts interface.";
+  return "Feature callers must import through the feature index.ts interface.";
 }
 
 const featureSeamsPlugin = {
@@ -46,28 +50,54 @@ const featureSeamsPlugin = {
         messages: { violation: "{{message}}" },
       },
       create(context) {
-        function check(node) {
-          if (typeof node.source.value !== "string") {
-            context.report({
-              node,
-              messageId: "violation",
-              data: { message: "Dynamic feature imports must use a string literal." },
-            });
-            return;
-          }
-          const message = featureImportViolation(context.filename, node.source.value);
+        function reportUnresolved(node, form) {
+          context.report({
+            node,
+            messageId: "violation",
+            data: { message: `${form} must use a string literal.` },
+          });
+        }
+
+        function checkSpecifier(node, specifier) {
+          const message = featureImportViolation(context.filename, specifier);
           if (message !== undefined) {
             context.report({ node, messageId: "violation", data: { message } });
           }
         }
 
+        function checkExpression(node, expression, form) {
+          if (typeof expression?.value !== "string") {
+            reportUnresolved(node, form);
+            return;
+          }
+          checkSpecifier(node, expression.value);
+        }
+
         return {
-          ImportDeclaration: check,
-          ExportAllDeclaration: check,
-          ExportNamedDeclaration(node) {
-            if (node.source !== null) check(node);
+          ImportDeclaration(node) {
+            checkSpecifier(node, node.source.value);
           },
-          ImportExpression: check,
+          ExportAllDeclaration(node) {
+            checkSpecifier(node, node.source.value);
+          },
+          ExportNamedDeclaration(node) {
+            if (node.source !== null) checkSpecifier(node, node.source.value);
+          },
+          ImportExpression(node) {
+            checkExpression(node, node.source, "Dynamic import");
+          },
+          CallExpression(node) {
+            if (node.callee.type !== "Identifier" || node.callee.name !== "require") return;
+            checkExpression(node, node.arguments[0], "CommonJS require");
+          },
+          TSImportEqualsDeclaration(node) {
+            if (node.moduleReference.type === "TSExternalModuleReference") {
+              checkSpecifier(node, node.moduleReference.expression.value);
+            }
+          },
+          TSImportType(node) {
+            checkSpecifier(node, node.source.value);
+          },
         };
       },
     },
@@ -88,7 +118,7 @@ export default defineConfig(
     extends: [js.configs.recommended],
   },
   {
-    files: ["src/features/**/*.ts"],
+    files: ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"],
     plugins: { "opc-feature-seams": featureSeamsPlugin },
     rules: { "opc-feature-seams/imports": "error" },
   },
