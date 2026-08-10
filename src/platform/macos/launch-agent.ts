@@ -1,0 +1,748 @@
+import { randomBytes } from "node:crypto";
+import { dirname } from "node:path";
+import { types } from "node:util";
+import type {
+  LaunchAgentActivationManifest,
+  LaunchAgentInstallManifest,
+  LaunchAgentLifecycle,
+} from "../../features/onboarding/index.js";
+import type {
+  CommandRequest,
+  CommandResult,
+} from "../../adapters/local/process-runner.js";
+import { digestCanonical } from "../../domain/identity.js";
+
+export interface LaunchAgentFileEntry {
+  readonly kind: "missing" | "file" | "directory" | "symlink" | "other";
+  readonly uid?: number;
+  readonly mode?: number;
+}
+
+export interface LaunchAgentFileSystem {
+  inspect(path: string): Promise<LaunchAgentFileEntry>;
+  makeDirectory(path: string, mode: number): Promise<void>;
+  readFile(path: string): Promise<string>;
+  writeFileExclusive(path: string, contents: string, mode: number): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
+}
+
+export interface LaunchAgentAdapterOptions {
+  readonly currentHome: string;
+  readonly currentUid: number;
+  readonly trustedPath: string;
+  readonly fileSystem: LaunchAgentFileSystem;
+  readonly run: (request: CommandRequest) => Promise<CommandResult>;
+  readonly nonce?: () => string;
+}
+
+export class LaunchAgentCommandError extends Error {
+  override readonly name = "LaunchAgentCommandError";
+  readonly code = "LAUNCH_AGENT_BOOTSTRAP_FAILED";
+  readonly result: Readonly<CommandResult>;
+
+  constructor(result: Readonly<CommandResult>) {
+    super("LAUNCH_AGENT_BOOTSTRAP_FAILED");
+    this.result = result;
+  }
+}
+
+function snapshotAdapterOptions(value: unknown): LaunchAgentAdapterOptions {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    types.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
+  }
+  const required = ["currentHome", "currentUid", "trustedPath", "fileSystem", "run"];
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.some(
+      (key) =>
+        typeof key !== "string" ||
+        (!required.includes(key) && key !== "nonce"),
+    ) ||
+    required.some((key) => !keys.includes(key)) ||
+    keys.length > required.length + 1
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
+  }
+  const snapshot: Record<string, unknown> = {};
+  for (const key of keys as string[]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
+    }
+    snapshot[key] = descriptor.value;
+  }
+  if (
+    typeof snapshot.currentHome !== "string" ||
+    typeof snapshot.currentUid !== "number" ||
+    typeof snapshot.trustedPath !== "string" ||
+    typeof snapshot.fileSystem !== "object" ||
+    snapshot.fileSystem === null ||
+    typeof snapshot.run !== "function" ||
+    (snapshot.nonce !== undefined && typeof snapshot.nonce !== "function")
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_OPTIONS");
+  }
+  const fileSystem = snapshotFileSystem(snapshot.fileSystem);
+  return {
+    currentHome: snapshot.currentHome,
+    currentUid: snapshot.currentUid,
+    trustedPath: snapshot.trustedPath,
+    fileSystem,
+    run: snapshot.run as LaunchAgentAdapterOptions["run"],
+    ...(snapshot.nonce === undefined
+      ? {}
+      : { nonce: snapshot.nonce as NonNullable<LaunchAgentAdapterOptions["nonce"]> }),
+  };
+}
+
+function plainDataFields(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+  code: string,
+): Record<string, unknown> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    types.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new Error(code);
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.some(
+      (key) =>
+        typeof key !== "string" ||
+        (!required.includes(key) && !optional.includes(key)),
+    ) ||
+    required.some((key) => !keys.includes(key))
+  ) {
+    throw new Error(code);
+  }
+  const result: Record<string, unknown> = {};
+  for (const key of keys as string[]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error(code);
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function snapshotFileSystem(value: unknown): LaunchAgentFileSystem {
+  const fields = plainDataFields(
+    value,
+    ["inspect", "makeDirectory", "readFile", "writeFileExclusive", "rename", "chmod"],
+    [],
+    "INVALID_LAUNCH_AGENT_FILESYSTEM",
+  );
+  if (Object.values(fields).some((method) => typeof method !== "function")) {
+    throw new Error("INVALID_LAUNCH_AGENT_FILESYSTEM");
+  }
+  return fields as unknown as LaunchAgentFileSystem;
+}
+
+function snapshotFileEntry(value: unknown): LaunchAgentFileEntry {
+  const fields = plainDataFields(
+    value,
+    ["kind"],
+    ["uid", "mode"],
+    "INVALID_LAUNCH_AGENT_FILE_ENTRY",
+  );
+  if (
+    typeof fields.kind !== "string" ||
+    !["missing", "file", "directory", "symlink", "other"].includes(fields.kind) ||
+    (fields.uid !== undefined &&
+      (typeof fields.uid !== "number" || !Number.isSafeInteger(fields.uid) || fields.uid < 0)) ||
+    (fields.mode !== undefined &&
+      (typeof fields.mode !== "number" || !Number.isSafeInteger(fields.mode) || fields.mode < 0))
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_FILE_ENTRY");
+  }
+  return fields as unknown as LaunchAgentFileEntry;
+}
+
+async function inspect(
+  fileSystem: LaunchAgentFileSystem,
+  path: string,
+): Promise<LaunchAgentFileEntry> {
+  return snapshotFileEntry(await fileSystem.inspect(path));
+}
+
+function snapshotStringArray(value: unknown): readonly string[] {
+  if (
+    !Array.isArray(value) ||
+    types.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    !Object.isFrozen(value) ||
+    Reflect.ownKeys(value).length !== value.length + 1
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
+  }
+  const result: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      !descriptor.enumerable ||
+      typeof descriptor.value !== "string"
+    ) {
+      throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
+    }
+    result.push(descriptor.value);
+  }
+  return result;
+}
+
+function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
+  const manifest = plainDataFields(
+    value,
+    [
+      "version",
+      "operation",
+      "onboardingDigest",
+      "currentHome",
+      "currentUid",
+      "label",
+      "paths",
+      "programArguments",
+      "runAtLoad",
+      "keepAlive",
+      "enabled",
+    ],
+    [],
+    "INVALID_LAUNCH_AGENT_MANIFEST",
+  );
+  const paths = plainDataFields(
+    manifest.paths,
+    ["launchAgent", "program", "config", "stdout", "stderr"],
+    [],
+    "INVALID_LAUNCH_AGENT_MANIFEST",
+  );
+  const keepAlive = plainDataFields(
+    manifest.keepAlive,
+    ["successfulExit"],
+    [],
+    "INVALID_LAUNCH_AGENT_MANIFEST",
+  );
+  const argv = snapshotStringArray(manifest.programArguments);
+  if (
+    !Object.isFrozen(value) ||
+    !Object.isFrozen(manifest.paths) ||
+    !Object.isFrozen(manifest.keepAlive) ||
+    manifest.version !== 1 ||
+    manifest.operation !== "install" ||
+    typeof manifest.onboardingDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(manifest.onboardingDigest) ||
+    typeof manifest.currentHome !== "string" ||
+    typeof manifest.currentUid !== "number" ||
+    !Number.isSafeInteger(manifest.currentUid) ||
+    manifest.currentUid <= 0 ||
+    manifest.label !== "com.getsuperpower.opc" ||
+    Object.values(paths).some((path) => typeof path !== "string") ||
+    argv.length !== 4 ||
+    argv[1] !== "daemon" ||
+    argv[2] !== "--config" ||
+    argv[0] !== paths.program ||
+    argv[3] !== paths.config ||
+    manifest.runAtLoad !== true ||
+    keepAlive.successfulExit !== false ||
+    manifest.enabled !== false
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
+  }
+  const result = {
+    ...manifest,
+    paths: { ...paths },
+    programArguments: [...argv],
+    keepAlive: { successfulExit: false },
+  } as unknown as LaunchAgentInstallManifest;
+  Object.freeze(result.paths);
+  Object.freeze(result.programArguments);
+  Object.freeze(result.keepAlive);
+  Object.freeze(result);
+  return result;
+}
+
+function snapshotActivationManifest(value: unknown): LaunchAgentActivationManifest {
+  const manifest = plainDataFields(
+    value,
+    ["version", "operation", "installDigest", "install", "enabled"],
+    [],
+    "INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST",
+  );
+  if (
+    !Object.isFrozen(value) ||
+    manifest.version !== 1 ||
+    manifest.operation !== "activate" ||
+    typeof manifest.installDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(manifest.installDigest) ||
+    manifest.enabled !== true
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST");
+  }
+  const install = snapshotInstallManifest(manifest.install);
+  if (
+    Object.getOwnPropertyDescriptor(Object.prototype, "toJSON") !== undefined ||
+    Object.getOwnPropertyDescriptor(Array.prototype, "toJSON") !== undefined ||
+    digestCanonical(install) !== manifest.installDigest
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_ACTIVATION_MANIFEST");
+  }
+  return Object.freeze({
+    version: 1,
+    operation: "activate",
+    installDigest: manifest.installDigest,
+    install,
+    enabled: true,
+  });
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+export function renderLaunchAgentPlist(manifest: LaunchAgentInstallManifest): string {
+  const args = manifest.programArguments
+    .map((argument) => `      <string>${escapeXml(argument)}</string>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${manifest.label}</string>
+    <key>ProgramArguments</key>
+    <array>
+${args}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>${escapeXml(manifest.paths.stdout)}</string>
+    <key>StandardErrorPath</key>
+    <string>${escapeXml(manifest.paths.stderr)}</string>
+  </dict>
+</plist>
+`;
+}
+
+function requireSafeNonce(value: string): string {
+  if (!/^[a-f0-9]{32}$/.test(value)) throw new Error("INVALID_LAUNCH_AGENT_NONCE");
+  return value;
+}
+
+function requireCanonicalAbsolute(value: string, code: string): string {
+  if (
+    !value.startsWith("/") ||
+    value.includes("\0") ||
+    /[\r\n]/.test(value) ||
+    value.includes("/../") ||
+    value.includes("/./") ||
+    value.endsWith("/..") ||
+    value.endsWith("/.") ||
+    value.includes("//")
+  ) {
+    throw new Error(code);
+  }
+  return value;
+}
+
+function requireAuthority(
+  manifest: LaunchAgentInstallManifest,
+  options: LaunchAgentAdapterOptions,
+): void {
+  if (
+    !Number.isSafeInteger(options.currentUid) ||
+    options.currentUid <= 0 ||
+    manifest.currentUid !== options.currentUid ||
+    manifest.currentHome !== options.currentHome ||
+    manifest.paths.launchAgent !==
+      `${options.currentHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`
+  ) {
+    throw new Error("LAUNCH_AGENT_AUTHORITY_CHANGED");
+  }
+  const applicationSupport = `${options.currentHome}/Library/Application Support/OPC`;
+  if (
+    manifest.paths.program !== `${applicationSupport}/dist/cli.js` ||
+    manifest.paths.config !== `${applicationSupport}/config.json` ||
+    manifest.paths.stdout !== `${options.currentHome}/Library/Logs/OPC/daemon.stdout.log` ||
+    manifest.paths.stderr !== `${options.currentHome}/Library/Logs/OPC/daemon.stderr.log` ||
+    manifest.programArguments[0] !== manifest.paths.program ||
+    manifest.programArguments[3] !== manifest.paths.config
+  ) {
+    throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
+  }
+  for (const path of [
+    options.currentHome,
+    manifest.paths.launchAgent,
+    manifest.paths.program,
+    manifest.paths.config,
+    manifest.paths.stdout,
+    manifest.paths.stderr,
+  ]) {
+    requireCanonicalAbsolute(path, "UNSAFE_LAUNCH_AGENT_PATH");
+    if (path !== options.currentHome && !path.startsWith(`${options.currentHome}/`)) {
+      throw new Error("UNSAFE_LAUNCH_AGENT_PATH");
+    }
+  }
+  if (
+    options.currentHome === "/" ||
+    options.currentHome === "/Users/opc-runner" ||
+    manifest.paths.launchAgent.startsWith("/Library/") ||
+    manifest.paths.launchAgent.startsWith("/System/")
+  ) {
+    throw new Error("UNSAFE_LAUNCH_AGENT_PATH");
+  }
+}
+
+function requireEntry(
+  entry: LaunchAgentFileEntry,
+  kinds: readonly LaunchAgentFileEntry["kind"][],
+  uid: number,
+): void {
+  if (!kinds.includes(entry.kind) || entry.kind === "symlink") {
+    throw new Error("UNSAFE_LAUNCH_AGENT_PATH");
+  }
+  if (entry.kind !== "missing" && entry.uid !== uid) {
+    throw new Error("LAUNCH_AGENT_OWNERSHIP_CHANGED");
+  }
+  if (
+    entry.kind === "directory" &&
+    (typeof entry.mode !== "number" || (entry.mode & 0o022) !== 0)
+  ) {
+    throw new Error("UNSAFE_LAUNCH_AGENT_PERMISSIONS");
+  }
+  if (
+    entry.kind === "file" &&
+    (typeof entry.mode !== "number" || (entry.mode & 0o777) !== 0o600)
+  ) {
+    throw new Error("UNSAFE_LAUNCH_AGENT_PERMISSIONS");
+  }
+}
+
+function requireExecutable(entry: LaunchAgentFileEntry, uid: number): void {
+  if (
+    entry.kind !== "file" ||
+    entry.uid !== uid ||
+    typeof entry.mode !== "number" ||
+    (entry.mode & 0o022) !== 0 ||
+    (entry.mode & 0o100) === 0
+  ) {
+    throw new Error(
+      entry.kind === "file" && entry.uid !== uid
+        ? "LAUNCH_AGENT_OWNERSHIP_CHANGED"
+        : "UNSAFE_LAUNCH_AGENT_EXECUTABLE",
+    );
+  }
+}
+
+async function validatePathAuthority(
+  fileSystem: LaunchAgentFileSystem,
+  manifest: LaunchAgentInstallManifest,
+  uid: number,
+): Promise<void> {
+  const currentHome = manifest.currentHome;
+  const launchAgentPath = manifest.paths.launchAgent;
+  const library = `${currentHome}/Library`;
+  const launchAgents = dirname(launchAgentPath);
+  const applicationSupport = `${library}/Application Support`;
+  const opcSupport = `${applicationSupport}/OPC`;
+  const distribution = `${opcSupport}/dist`;
+  const logs = `${library}/Logs`;
+  const opcLogs = `${logs}/OPC`;
+
+  requireEntry(await inspect(fileSystem, currentHome), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, library), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, applicationSupport), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, opcSupport), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, distribution), ["directory"], uid);
+  requireExecutable(await inspect(fileSystem, manifest.paths.program), uid);
+  requireEntry(await inspect(fileSystem, manifest.paths.config), ["missing", "file"], uid);
+  requireEntry(await inspect(fileSystem, logs), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, opcLogs), ["directory"], uid);
+  requireEntry(await inspect(fileSystem, manifest.paths.stdout), ["missing", "file"], uid);
+  requireEntry(await inspect(fileSystem, manifest.paths.stderr), ["missing", "file"], uid);
+
+  const launchAgentsEntry = await inspect(fileSystem, launchAgents);
+  requireEntry(launchAgentsEntry, ["missing", "directory"], uid);
+  requireEntry(await inspect(fileSystem, launchAgentPath), ["missing", "file"], uid);
+
+  if (launchAgentsEntry.kind === "missing") {
+    await fileSystem.makeDirectory(launchAgents, 0o700);
+    requireEntry(await inspect(fileSystem, launchAgents), ["directory"], uid);
+  }
+}
+
+function snapshotCommandResult(result: CommandResult): Readonly<CommandResult> {
+  const fields = plainDataFields(
+    result,
+    ["status", "exitCode", "stdout", "stderr", "durationMs"],
+    [],
+    "INVALID_LAUNCHCTL_RESULT",
+  );
+  if (
+    typeof fields.status !== "string" ||
+    !["pass", "fail", "timeout", "output-limit"].includes(fields.status) ||
+    (fields.exitCode !== null &&
+      (typeof fields.exitCode !== "number" || !Number.isSafeInteger(fields.exitCode))) ||
+    typeof fields.stdout !== "string" ||
+    typeof fields.stderr !== "string" ||
+    typeof fields.durationMs !== "number" ||
+    !Number.isFinite(fields.durationMs) ||
+    fields.durationMs < 0
+  ) {
+    throw new Error("INVALID_LAUNCHCTL_RESULT");
+  }
+  return Object.freeze({
+    status: fields.status,
+    exitCode: fields.exitCode,
+    stdout: fields.stdout,
+    stderr: fields.stderr,
+    durationMs: fields.durationMs,
+  } as CommandResult);
+}
+
+function requireCommandResult(result: CommandResult): void {
+  const fields = snapshotCommandResult(result);
+  if (fields.status !== "pass" || fields.exitCode !== 0) {
+    throw new LaunchAgentCommandError(fields);
+  }
+}
+
+function provesLoadedAuthority(
+  stdout: string,
+  manifest: LaunchAgentInstallManifest,
+): boolean {
+  if (stdout.includes("\0") || Buffer.byteLength(stdout) > 65_536) return false;
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim());
+  const required = [
+    `gui/${String(manifest.currentUid)}/${manifest.label} = {`,
+    `path = ${manifest.paths.launchAgent}`,
+    `program = ${manifest.paths.program}`,
+  ];
+  if (
+    required.some((line) => lines.filter((candidate) => candidate === line).length !== 1)
+  ) {
+    return false;
+  }
+  const argumentStarts = lines
+    .map((line, index) => (line === "arguments = {" ? index : -1))
+    .filter((index) => index >= 0);
+  if (argumentStarts.length !== 1) return false;
+  const start = argumentStarts[0];
+  if (start === undefined) return false;
+  const end = lines.indexOf("}", start + 1);
+  if (end < 0) return false;
+  const argumentsFromLaunchd = lines.slice(start + 1, end).filter((line) => line !== "");
+  return (
+    argumentsFromLaunchd.length === manifest.programArguments.length &&
+    argumentsFromLaunchd.every(
+      (argument, index) => argument === manifest.programArguments[index],
+    )
+  );
+}
+
+async function isAlreadyLoaded(
+  run: LaunchAgentAdapterOptions["run"],
+  manifest: LaunchAgentInstallManifest,
+  cwd: string,
+  trustedPath: string,
+): Promise<boolean> {
+  const result = await run({
+    command: "/bin/launchctl",
+    args: ["print", `gui/${String(manifest.currentUid)}/${manifest.label}`],
+    cwd,
+    env: { PATH: trustedPath },
+    timeoutMs: 10_000,
+    outputLimitBytes: 65_536,
+  });
+  const fields = snapshotCommandResult(result);
+  if (fields.status === "fail" && fields.exitCode === 113) return false;
+  if (
+    fields.status !== "pass" ||
+    fields.exitCode !== 0 ||
+    typeof fields.stdout !== "string" ||
+    !provesLoadedAuthority(fields.stdout, manifest)
+  ) {
+    throw new Error("LAUNCH_AGENT_LOADED_AUTHORITY_UNPROVEN");
+  }
+  return true;
+}
+
+function renderEnabledConfig(
+  installDigest: string,
+  activationDigest?: string,
+): string {
+  return `${JSON.stringify({
+    version: 1,
+    enabled: activationDigest !== undefined,
+    installDigest,
+    ...(activationDigest === undefined ? {} : { activationDigest }),
+  })}\n`;
+}
+
+async function writeAtomic(
+  fileSystem: LaunchAgentFileSystem,
+  path: string,
+  contents: string,
+  uid: number,
+  nonce: () => string,
+): Promise<void> {
+  const existing = await inspect(fileSystem, path);
+  requireEntry(existing, ["missing", "file"], uid);
+  if (existing.kind === "file" && (await fileSystem.readFile(path)) === contents) {
+    await fileSystem.chmod(path, 0o600);
+    return;
+  }
+  const temporary = `${path}.${requireSafeNonce(nonce())}.tmp`;
+  await fileSystem.writeFileExclusive(temporary, contents, 0o600);
+  await fileSystem.rename(temporary, path);
+  await fileSystem.chmod(path, 0o600);
+}
+
+async function ensurePrivateFile(
+  fileSystem: LaunchAgentFileSystem,
+  path: string,
+  uid: number,
+  nonce: () => string,
+): Promise<void> {
+  const existing = await inspect(fileSystem, path);
+  requireEntry(existing, ["missing", "file"], uid);
+  if (existing.kind === "file") return;
+  await writeAtomic(fileSystem, path, "", uid, nonce);
+}
+
+export function createLaunchAgentAdapter(
+  options: LaunchAgentAdapterOptions,
+): LaunchAgentLifecycle {
+  const snapshot = snapshotAdapterOptions(options);
+  const home = requireCanonicalAbsolute(snapshot.currentHome, "INVALID_CURRENT_HOME");
+  const trustedPath = snapshot.trustedPath;
+  if (
+    trustedPath.split(":").some((entry) => {
+      try {
+        requireCanonicalAbsolute(entry, "INVALID_LAUNCHCTL_PATH");
+        return false;
+      } catch {
+        return true;
+      }
+    })
+  ) {
+    throw new Error("INVALID_LAUNCHCTL_PATH");
+  }
+  const nonce = snapshot.nonce ?? (() => randomBytes(16).toString("hex"));
+
+  return {
+    async install(manifest) {
+      const install = snapshotInstallManifest(manifest);
+      requireAuthority(install, { ...snapshot, currentHome: home });
+      const path = install.paths.launchAgent;
+      await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid);
+      const plist = renderLaunchAgentPlist(install);
+      const installDigest = digestCanonical(install);
+      await writeAtomic(
+        snapshot.fileSystem,
+        install.paths.config,
+        renderEnabledConfig(installDigest),
+        snapshot.currentUid,
+        nonce,
+      );
+      await ensurePrivateFile(
+        snapshot.fileSystem,
+        install.paths.stdout,
+        snapshot.currentUid,
+        nonce,
+      );
+      await ensurePrivateFile(
+        snapshot.fileSystem,
+        install.paths.stderr,
+        snapshot.currentUid,
+        nonce,
+      );
+      await writeAtomic(snapshot.fileSystem, path, plist, snapshot.currentUid, nonce);
+    },
+    async activate(manifest: LaunchAgentActivationManifest) {
+      const activation = snapshotActivationManifest(manifest);
+      requireAuthority(activation.install, { ...snapshot, currentHome: home });
+      await validatePathAuthority(snapshot.fileSystem, activation.install, snapshot.currentUid);
+      const entry = await inspect(snapshot.fileSystem, activation.install.paths.launchAgent);
+      requireEntry(entry, ["file"], snapshot.currentUid);
+      if (
+        (await snapshot.fileSystem.readFile(activation.install.paths.launchAgent)) !==
+        renderLaunchAgentPlist(activation.install)
+      ) {
+        throw new Error("LAUNCH_AGENT_INSTALLATION_CHANGED");
+      }
+      const activationDigest = digestCanonical(activation);
+      const alreadyLoaded = await isAlreadyLoaded(
+        snapshot.run,
+        activation.install,
+        home,
+        trustedPath,
+      );
+      await writeAtomic(
+        snapshot.fileSystem,
+        activation.install.paths.config,
+        renderEnabledConfig(activation.installDigest, activationDigest),
+        snapshot.currentUid,
+        nonce,
+      );
+      if (alreadyLoaded) return;
+      try {
+        const result = await snapshot.run({
+          command: "/bin/launchctl",
+          args: [
+            "bootstrap",
+            `gui/${String(snapshot.currentUid)}`,
+            activation.install.paths.launchAgent,
+          ],
+          cwd: home,
+          env: { PATH: trustedPath },
+          timeoutMs: 10_000,
+          outputLimitBytes: 65_536,
+        });
+        requireCommandResult(result);
+      } catch (bootstrapError) {
+        try {
+          await writeAtomic(
+            snapshot.fileSystem,
+            activation.install.paths.config,
+            renderEnabledConfig(activation.installDigest),
+            snapshot.currentUid,
+            nonce,
+          );
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [bootstrapError, rollbackError],
+            "LAUNCH_AGENT_BOOTSTRAP_AND_ROLLBACK_FAILED",
+          );
+        }
+        throw bootstrapError;
+      }
+    },
+  };
+}

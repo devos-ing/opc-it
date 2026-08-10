@@ -17,3 +17,22 @@ export {
   type GitHubIdentity,
   type OnboardingGrantPresenter,
 } from "./onboard-repository.js";
+export {
+  applyInstall,
+  launchAgentLabel,
+  previewInstall,
+  type ActivationPreview,
+  type ApplyInstallDependencies,
+  type ApplyInstallInput,
+  type InstallPreview,
+  type LaunchAgentActivationManifest,
+  type LaunchAgentInstallManifest,
+  type LaunchAgentLifecycle,
+  type PreviewInstallInput,
+} from "./lifecycle.js";
+export {
+  activate,
+  type ActivateDependencies,
+  type ActivateInput,
+  type ActivatedLaunchAgent,
+} from "./activate.js";

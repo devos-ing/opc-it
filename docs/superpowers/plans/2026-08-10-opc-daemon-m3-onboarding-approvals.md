@@ -99,11 +99,13 @@ Task 3 evidence: the initial focused RED failed with the required missing `src/f
 
 **Files:** Create `src/features/onboarding/lifecycle.ts`, `activate.ts`, `src/platform/macos/launch-agent.ts`, `in-memory-launch-agent.ts`; test `test/acceptance/current-user-launch-agent.test.ts`.
 
-- [ ] Write failing tests that render only `~/Library/LaunchAgents/com.getsuperpower.opc.plist`, contain no secrets, run `dist/cli.js daemon`, and remain unloaded/disabled until a second approved digest is supplied.
-- [ ] Run the acceptance test; expect missing renderer.
-- [ ] Implement `previewInstall`, `applyInstall(approvedDigest)`, and `activate(approvedDigest)` as separate functions. Render `RunAtLoad=true`, `KeepAlive` only for non-zero exit, explicit stdout/stderr log paths, and config path only. Use `launchctl bootstrap gui/<current uid>` only inside `activate`.
-- [ ] Run the acceptance test using a temporary home and fake launchctl; assert zero writes outside it and zero calls before activation.
-- [ ] Commit `feat: install current-user daemon launch agent`.
+- [x] Write failing tests that render only `~/Library/LaunchAgents/com.getsuperpower.opc.plist`, contain no secrets, run `dist/cli.js daemon`, and remain unloaded/disabled until a second approved digest is supplied.
+- [x] Run the acceptance test; expect missing renderer.
+- [x] Implement `previewInstall`, `applyInstall(approvedDigest)`, and `activate(approvedDigest)` as separate functions. Render `RunAtLoad=true`, `KeepAlive` only for non-zero exit, explicit stdout/stderr log paths, and config path only. Use `launchctl bootstrap gui/<current uid>` only inside `activate`.
+- [x] Run the acceptance test using a temporary home and fake launchctl; assert zero writes outside it and zero calls before activation.
+- [x] Commit `feat: install current-user daemon launch agent`.
+
+Task 4 evidence: the first acceptance RED failed on the required missing `src/platform/macos/in-memory-launch-agent.js` module (0 pass, 1 fail). The lifecycle now produces two separate immutable, freshly canonicalized approval surfaces: an install digest that can only atomically write a disabled digest-bound config, private log files, and the exact current-user plist, followed by an activation digest that can atomically persist enabled authority and invoke launchctl. The plist runs only `Application Support/OPC/dist/cli.js daemon --config <approved path>`, has `RunAtLoad=true`, retries only unsuccessful exits, declares a private `077` umask, and contains no credential or environment fields. The injected production adapter validates the full home, Application Support, executable, config, logs, and LaunchAgents path chains for symlink, UID, type, mode, and argv drift before mutation; writes files through exclusive temporary files plus atomic rename at mode `0600`; and proves any already-loaded job has the exact approved label, plist, program, and argv before treating a crash retry as complete. Only a missing service (`launchctl print` exit 113) reaches the fixed `launchctl bootstrap gui/<uid> <plist>` call; bootstrap failures restore disabled config, retain the validated redacted command result, and preserve both failures if rollback also fails. The in-memory seam accepts a canonical approval restored from persistence rather than depending on object identity. Focused verification passes 12 tests / 70 expectations; the full suite passes 670 tests / 1,638 expectations; lint, typecheck, build, diff checks, and credential/host-mutation scans pass. No real filesystem, launchctl, bootstrap, user, Keychain, GitHub, Telegram, or host configuration was touched. Independent Spec and Standards reviews report 0 findings each.
 
 ### Task 5: Expose lifecycle CLI commands
 
