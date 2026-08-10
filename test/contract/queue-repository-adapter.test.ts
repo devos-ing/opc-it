@@ -419,8 +419,6 @@ test("discovers immutable queue markers after the umbrella label is removed", as
       ]),
     ),
     result(JSON.stringify([])),
-    result(JSON.stringify([])),
-    result(JSON.stringify([])),
   ];
   const requests: CommandRequest[] = [];
   const github = createGhCliGitHubAdapter({
@@ -466,9 +464,7 @@ test("discovers immutable queue markers after the umbrella label is removed", as
   expect(issueRequests[0]?.args).toContain("page=1");
   expect(issueRequests[1]?.args).toContain("page=2");
   expect(requests.slice(3).map((request) => request.args[1])).toEqual([
-    "repos/roy/app/issues/90/comments",
-    "repos/roy/app/issues/91/comments",
-    "repos/roy/app/issues/96/comments",
+    "repos/roy/app/issues/comments",
   ]);
 });
 
@@ -488,8 +484,12 @@ test("probes signed journals after every Issue marker and OPC label is removed",
   const responses = [
     result(JSON.stringify([wipedJournal, ordinary])),
     result(
-      `HTTP/2.0 200 OK\nlink: <https://api.github.test/issues/100/comments?page=2>; rel="next"\n\n${JSON.stringify([
-        { id: 50, body: "human note" },
+      `HTTP/2.0 200 OK\nlink: <https://api.github.test/repos/roy/app/issues/comments?page=2>; rel="next"\n\n${JSON.stringify([
+        {
+          id: 50,
+          body: "human note",
+          issue_url: "https://api.github.com/repos/roy/app/issues/101",
+        },
       ])}`,
     ),
     result(
@@ -497,10 +497,10 @@ test("probes signed journals after every Issue marker and OPC label is removed",
         {
           id: 51,
           body: "<!-- opc-transition:v1 -->\nhostile-signed-record",
+          issue_url: "https://api.github.com/repos/roy/app/issues/100",
         },
       ]),
     ),
-    result(JSON.stringify([])),
   ];
   const requests: CommandRequest[] = [];
   const github = createGhCliGitHubAdapter({
@@ -536,7 +536,7 @@ test("probes signed journals after every Issue marker and OPC label is removed",
     ],
     [
       "api",
-      "repos/roy/app/issues/100/comments",
+      "repos/roy/app/issues/comments",
       "--method",
       "GET",
       "-f",
@@ -547,7 +547,7 @@ test("probes signed journals after every Issue marker and OPC label is removed",
     ],
     [
       "api",
-      "repos/roy/app/issues/100/comments",
+      "repos/roy/app/issues/comments",
       "--method",
       "GET",
       "-f",
@@ -556,18 +556,129 @@ test("probes signed journals after every Issue marker and OPC label is removed",
       "page=2",
       "--include",
     ],
-    [
-      "api",
-      "repos/roy/app/issues/101/comments",
-      "--method",
-      "GET",
-      "-f",
-      "per_page=100",
-      "-f",
-      "page=1",
-      "--include",
-    ],
   ]);
+});
+
+test("preserves Retry-After from a later repository comment page", async () => {
+  const responses = [
+    result(JSON.stringify([{
+      number: 110,
+      body: "stripped issue",
+      labels: [],
+      created_at: "2026-08-10T00:05:00Z",
+    }])),
+    result("HTTP/2.0 200 OK\nlink: <https://api.github.test/issues/comments?page=2>; rel=\"next\"\n\n[]"),
+    {
+      status: "fail" as const,
+      exitCode: 1,
+      stdout: "HTTP/2.0 429 Too Many Requests\nretry-after: 45\n\n{}",
+      stderr: "ignored",
+      durationMs: 1,
+    },
+  ];
+  const requests: CommandRequest[] = [];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: (request) => {
+      requests.push(request);
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected call");
+      return Promise.resolve(response);
+    },
+  });
+
+  try {
+    await github.listJournalCandidates("roy/app");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({
+      code: "rate-limited",
+      statusCode: 429,
+      retryAfter: "45",
+    });
+  }
+  expect(requests[2]?.args).toContain("page=2");
+});
+
+test("fails closed when repository comments exceed the page bound", async () => {
+  const requests: CommandRequest[] = [];
+  const github = createGhCliGitHubAdapter({
+    cwd: "/opt/opc",
+    trustedPath: "/usr/bin:/bin",
+    run: (request) => {
+      requests.push(request);
+      if (request.args[1] === "repos/roy/app/issues") {
+        return Promise.resolve(result(JSON.stringify([{
+          number: 120,
+          body: "stripped issue",
+          labels: [],
+          created_at: "2026-08-10T00:06:00Z",
+        }])));
+      }
+      return Promise.resolve(result(
+        "HTTP/2.0 200 OK\nlink: <https://api.github.test/issues/comments?page=next>; rel=\"next\"\n\n[]",
+      ));
+    },
+  });
+
+  try {
+    await github.listJournalCandidates("roy/app");
+    throw new Error("EXPECTED_REJECTION");
+  } catch (error) {
+    expect(error).toBeInstanceOf(QueueTransportError);
+    expect(error).toMatchObject({ code: "fatal" });
+  }
+  expect(requests).toHaveLength(101);
+  expect(requests.at(-1)?.args).toContain("page=100");
+  expect(requests.some((request) => request.args.includes("page=101"))).toBeFalse();
+});
+
+test("fails closed for foreign and malformed repository comment identity", async () => {
+  const cases = [
+    {
+      comment: {
+        id: 61,
+        body: "<!-- opc-transition:v1 -->\nforeign",
+        issue_url: "https://api.github.com/repos/other/app/issues/130",
+      },
+      message: "foreign comment issue_url",
+    },
+    {
+      comment: {
+        id: 62,
+        body: "<!-- opc-transition:v1 -->\nmissing-url",
+      },
+      message: "comment issue_url",
+    },
+  ];
+
+  for (const { comment, message } of cases) {
+    const responses = [
+      result(JSON.stringify([{
+        number: 130,
+        body: "stripped issue",
+        labels: [],
+        created_at: "2026-08-10T00:07:00Z",
+      }])),
+      result(JSON.stringify([comment])),
+    ];
+    const github = createGhCliGitHubAdapter({
+      cwd: "/opt/opc",
+      trustedPath: "/usr/bin:/bin",
+      run: () => {
+        const response = responses.shift();
+        if (!response) throw new Error("unexpected call");
+        return Promise.resolve(response);
+      },
+    });
+
+    await expectRejection(
+      () => github.listJournalCandidates("roy/app"),
+      message,
+    );
+  }
 });
 
 test("appends and lists only OPC transition comments", async () => {

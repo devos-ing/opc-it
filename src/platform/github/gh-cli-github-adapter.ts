@@ -270,6 +270,71 @@ function parseCommentList(value: unknown): readonly { readonly id: number; reado
   return value.map(parseComment);
 }
 
+interface RepositoryComment {
+  readonly id: number;
+  readonly body: string;
+  readonly issueNumber: number;
+}
+
+function parseRepositoryIssueNumber(
+  issueUrl: string,
+  repository: string,
+): number {
+  let parsed: URL;
+  try {
+    parsed = new URL(issueUrl);
+  } catch {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: comment issue_url");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: comment issue_url");
+  }
+  const apiPath = `/repos/${repository}/issues/`;
+  const enterpriseApiPath = `/api/v3${apiPath}`;
+  const prefix = parsed.pathname.startsWith(apiPath)
+    ? apiPath
+    : parsed.pathname.startsWith(enterpriseApiPath)
+      ? enterpriseApiPath
+      : undefined;
+  const encodedNumber = prefix === undefined
+    ? undefined
+    : parsed.pathname.slice(prefix.length);
+  if (encodedNumber === undefined || !/^[1-9]\d*$/.test(encodedNumber)) {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: foreign comment issue_url");
+  }
+  return validateQueueIssueNumber(Number(encodedNumber));
+}
+
+function parseRepositoryComment(
+  value: unknown,
+  repository: string,
+): RepositoryComment {
+  const comment = parseComment(value);
+  if (!isRecord(value) || typeof value.issue_url !== "string") {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: comment issue_url");
+  }
+  return {
+    ...comment,
+    issueNumber: parseRepositoryIssueNumber(value.issue_url, repository),
+  };
+}
+
+function parseRepositoryCommentList(
+  value: unknown,
+  repository: string,
+): readonly RepositoryComment[] {
+  if (!Array.isArray(value)) {
+    throw new Error("MALFORMED_GITHUB_RESPONSE: repository comment list");
+  }
+  return value.map((comment) => parseRepositoryComment(comment, repository));
+}
+
 function parseIncluded(stdout: string): {
   readonly statusCode: number;
   readonly etag?: string;
@@ -452,10 +517,11 @@ export function createGhCliGitHubAdapter(
     throw new QueueTransportError({ code: "fatal" });
   }
 
-  async function listCommentPages(
+  async function listCommentPages<T>(
     baseArgs: readonly string[],
-  ): Promise<readonly { readonly id: number; readonly body: string }[]> {
-    const comments: { readonly id: number; readonly body: string }[] = [];
+    parsePage: (value: unknown) => readonly T[],
+  ): Promise<readonly T[]> {
+    const comments: T[] = [];
     for (let page = 1; page <= maximumPageCount; page += 1) {
       const { command, included } = await requestIncluded([
         ...baseArgs,
@@ -463,7 +529,7 @@ export function createGhCliGitHubAdapter(
         `page=${String(page)}`,
       ]);
       requireSuccessfulIncluded(command, included);
-      comments.push(...parseCommentList(parseJson(included.body)));
+      comments.push(...parsePage(parseJson(included.body)));
       if (!included.hasNextPage) return comments;
     }
     throw new QueueTransportError({ code: "fatal" });
@@ -493,14 +559,17 @@ export function createGhCliGitHubAdapter(
   ): Promise<readonly QueueTransition[]> {
     const repository = validateQueueRepository(repositoryName);
     const issueNumber = validateQueueIssueNumber(issueNumberValue);
-    const comments = await listCommentPages([
-      "api",
-      `repos/${repository.owner}/${repository.repo}/issues/${String(issueNumber)}/comments`,
-      "--method",
-      "GET",
-      "-f",
-      "per_page=100",
-    ]);
+    const comments = await listCommentPages(
+      [
+        "api",
+        `repos/${repository.owner}/${repository.repo}/issues/${String(issueNumber)}/comments`,
+        "--method",
+        "GET",
+        "-f",
+        "per_page=100",
+      ],
+      parseCommentList,
+    );
     return comments.flatMap((comment) =>
       comment.body.startsWith(transitionMarker)
         ? [{
@@ -508,6 +577,30 @@ export function createGhCliGitHubAdapter(
             record: comment.body.slice(transitionMarker.length),
           }]
         : [],
+    );
+  }
+
+  async function listRepositoryTransitionIssueNumbers(
+    repositoryName: string,
+  ): Promise<ReadonlySet<number>> {
+    const repository = validateQueueRepository(repositoryName);
+    const comments = await listCommentPages(
+      [
+        "api",
+        `repos/${repository.owner}/${repository.repo}/issues/comments`,
+        "--method",
+        "GET",
+        "-f",
+        "per_page=100",
+      ],
+      (value) => parseRepositoryCommentList(value, repository.canonical),
+    );
+    return new Set(
+      comments.flatMap((comment) =>
+        comment.body.startsWith(transitionMarker)
+          ? [comment.issueNumber]
+          : [],
+      ),
     );
   }
 
@@ -627,9 +720,11 @@ export function createGhCliGitHubAdapter(
     async listJournalCandidates(repository: string): Promise<QueueIssueBatch> {
       const batch = await listIssues(repository, "all");
       const diagnostics = [...batch.diagnostics];
-      for (const issueNumber of new Set(batch.probeIssueNumbers)) {
-        const transitions = await listIssueTransitions(repository, issueNumber);
-        if (transitions.length > 0) {
+      const probeIssueNumbers = new Set(batch.probeIssueNumbers);
+      if (probeIssueNumbers.size > 0) {
+        const transitionIssueNumbers = await listRepositoryTransitionIssueNumbers(repository);
+        for (const issueNumber of probeIssueNumbers) {
+          if (!transitionIssueNumbers.has(issueNumber)) continue;
           diagnostics.push({ code: "MALFORMED_WORK_ISSUE", issueNumber });
         }
       }
