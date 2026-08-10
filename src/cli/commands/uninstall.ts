@@ -6,6 +6,7 @@ import {
   outputCodec,
   pathOutput,
   numberOutput,
+  nullOutput,
   stringOutput,
   unionOutput,
   type OutputCodec,
@@ -22,10 +23,29 @@ export interface UninstallPreservedAuthority {
   readonly lifecycleLock: "preserved";
 }
 
+export interface UninstallConfigAuthority {
+  readonly configDigest: string;
+  readonly state: "installed" | "paused" | "enabled";
+  readonly installDigest: string;
+  readonly activationDigest: string | null;
+}
+
+export interface ProductionUninstallManifest {
+  readonly version: 1;
+  readonly operation: "uninstall";
+  readonly onboardingDigest: string;
+  readonly currentHome: string;
+  readonly currentUid: number;
+  readonly selection: UninstallSelection;
+  readonly authority: UninstallConfigAuthority;
+  readonly receiptDigest: string | null;
+  readonly preserved: UninstallPreservedAuthority;
+}
+
 export type UninstallCommandResult =
   | {
       readonly digest: string;
-      readonly manifest: object;
+      readonly manifest: ProductionUninstallManifest;
       readonly preserved: UninstallPreservedAuthority;
     }
   | {
@@ -36,6 +56,10 @@ export type UninstallCommandResult =
   | { readonly removed: UninstallSelection; readonly preserved: UninstallPreservedAuthority };
 
 export type UninstallPreviewResult = Exclude<UninstallCommandResult, { readonly removed: UninstallSelection; readonly preserved: UninstallPreservedAuthority }>;
+export type ProductionUninstallPreviewResult = Extract<
+  UninstallPreviewResult,
+  { readonly manifest: ProductionUninstallManifest }
+>;
 
 export interface UninstallCommandService {
   preview(selection: UninstallSelection): Promise<UninstallPreviewResult>;
@@ -57,6 +81,12 @@ const selectionSchema = objectOutput({
 const preservedSchema = objectOutput({
   lifecycleLock: stringOutput((value) => value === "preserved"),
 });
+const authoritySchema = objectOutput({
+  configDigest: digestOutput,
+  state: stringOutput((value) => value === "installed" || value === "paused" || value === "enabled"),
+  installDigest: digestOutput,
+  activationDigest: unionOutput(digestOutput, nullOutput),
+});
 
 export const uninstallOutputCodec: OutputCodec<UninstallCommandResult> = outputCodec(
   unionOutput(
@@ -67,7 +97,10 @@ export const uninstallOutputCodec: OutputCodec<UninstallCommandResult> = outputC
         operation: stringOutput((value) => value === "uninstall"),
         onboardingDigest: digestOutput,
         currentHome: pathOutput,
+        currentUid: numberOutput,
         selection: selectionSchema,
+        authority: authoritySchema,
+        receiptDigest: unionOutput(digestOutput, nullOutput),
         preserved: preservedSchema,
       }),
       preserved: preservedSchema,

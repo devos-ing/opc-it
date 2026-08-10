@@ -379,12 +379,12 @@ export function createProductionCliFactories(
       },
     }),
     uninstall: () => ({
-      preview: (selection) => Promise.resolve(uninstallPreview(selection)),
+      preview: (selection) => uninstallPreview(selection),
       async apply(input) {
-        if (uninstallPreview(input.selection).digest !== input.approvedDigest) {
+        if (!("manifest" in input.preview) || input.preview.digest !== input.approvedDigest) {
           throw new Error("UNINSTALL_DIGEST_NOT_APPROVED");
         }
-        return applyProductionUninstall(input.selection);
+        return applyProductionUninstall(input.selection, input.preview.manifest);
       },
     }),
   };

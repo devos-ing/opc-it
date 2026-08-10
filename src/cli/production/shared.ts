@@ -450,6 +450,14 @@ export async function writeDaemonConfig(
       ? createPausedDaemonConfig(config.activation)
       : createDisabledDaemonConfig(config.install);
   await lifecycleConfigLock(currentHome(config.onboarding), uid).withLock(path, async () => {
+    try {
+      await lstat(`${posix.dirname(path)}/uninstall-receipt.json`);
+      throw new Error("UNINSTALL_IN_PROGRESS");
+    } catch (error) {
+      if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
     const stats = await lstat(path);
     if (
       !stats.isFile() ||

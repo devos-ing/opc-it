@@ -29,6 +29,7 @@ import {
   type LaunchAgentFileEntry,
   type LaunchAgentFileSystem,
 } from "../../src/platform/macos/launch-agent.js";
+import { encodeUninstallReceipt } from "../../src/platform/macos/uninstall-receipt.js";
 import type {
   CommandRequest,
   CommandResult,
@@ -93,7 +94,7 @@ interface FakeEntry extends LaunchAgentFileEntry {
 
 function fakeFileSystem() {
   const entries = new Map<string, FakeEntry>([
-    [currentHome, { kind: "directory", uid: 501, mode: 0o700 }],
+    [currentHome, { kind: "directory", uid: 501, mode: 0o755 }],
     [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Application Support`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Application Support/OPC`, { kind: "directory", uid: 501, mode: 0o700 }],
@@ -176,8 +177,12 @@ function exclusiveLifecycleLock(): LifecycleConfigLock {
   });
 }
 
-function productionAdapterFixture(lifecycleLock = exclusiveLifecycleLock()) {
+function productionAdapterFixture(
+  lifecycleLock = exclusiveLifecycleLock(),
+  customize?: (fileSystem: LaunchAgentFileSystem) => void,
+) {
   const fake = fakeFileSystem();
+  customize?.(fake.fileSystem);
   const commands: CommandRequest[] = [];
   const adapter = createLaunchAgentAdapter({
     currentHome,
@@ -614,6 +619,46 @@ describe("current-user LaunchAgent lifecycle", () => {
     ).toMatchObject({ message: "UNSAFE_LAUNCH_AGENT_PATH" });
     expect(symlink.operations.some((operation) => operation.startsWith("write:"))).toBe(false);
 
+    const uninstallReserved = productionAdapterFixture();
+    uninstallReserved.entries.set(
+      `${currentHome}/Library/Application Support/OPC/uninstall-receipt.json`,
+      {
+        kind: "file",
+        uid: 501,
+        mode: 0o600,
+        contents: encodeUninstallReceipt({
+          version: 1,
+          operation: "uninstall-receipt",
+          onboardingDigest: installPreview.manifest.onboarding.digest,
+          currentHome,
+          currentUid: 501,
+          authority: {
+            configDigest: `sha256:${"2".repeat(64)}`,
+            state: "installed",
+            installDigest: installPreview.digest,
+            activationDigest: null,
+          },
+          completed: {
+            programFiles: true,
+            stateAndLogs: true,
+            telegramToken: false,
+            transitionKey: false,
+          },
+          programRemoval: "reserved",
+        }),
+      },
+    );
+    uninstallReserved.entries.set(`${currentHome}/.local/bin/opc`, {
+      kind: "file", uid: 501, mode: 0o700, contents: "#!/usr/bin/env bun\n",
+    });
+    expect(
+      await applyInstall(
+        { preview: installPreview, approvedDigest: installPreview.digest },
+        { launchAgent: uninstallReserved.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "UNINSTALL_IN_PROGRESS" });
+    expect(uninstallReserved.operations.some((operation) => operation.startsWith("write:"))).toBe(false);
+
     const uidDrift = productionAdapterFixture();
     uidDrift.entries.set(currentHome, { kind: "directory", uid: 502, mode: 0o700 });
     expect(
@@ -654,6 +699,198 @@ describe("current-user LaunchAgent lifecycle", () => {
       ).catch((error: unknown) => error),
     ).toMatchObject({ message: "INSTALL_DIGEST_NOT_APPROVED" });
     expect(calls).toBe(0);
+  });
+
+  test("takes over a reserved or completed uninstall only after old authority is absent", async () => {
+    const receiptPath = `${currentHome}/Library/Application Support/OPC/uninstall-receipt.json`;
+    const preview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    for (const programRemoval of ["reserved", "complete"] as const) {
+      const fixture = productionAdapterFixture();
+      fixture.entries.set(receiptPath, {
+        kind: "file",
+        uid: 501,
+        mode: 0o600,
+        contents: encodeUninstallReceipt({
+          version: 1,
+          operation: "uninstall-receipt",
+          onboardingDigest: preview.manifest.onboarding.digest,
+          currentHome,
+          currentUid: 501,
+          authority: {
+            configDigest: `sha256:${"2".repeat(64)}`,
+            state: "installed",
+            installDigest: preview.digest,
+            activationDigest: null,
+          },
+          completed: {
+            programFiles: true,
+            stateAndLogs: true,
+            telegramToken: false,
+            transitionKey: false,
+          },
+          programRemoval,
+        }),
+      });
+      await applyInstall(
+        { preview, approvedDigest: preview.digest },
+        { launchAgent: fixture.adapter },
+      );
+      expect(fixture.operations).toContain(`remove:${receiptPath}`);
+      expect(fixture.entries.get(receiptPath)).toBeUndefined();
+      expect(fixture.entries.get(preview.manifest.paths.config)?.kind).toBe("file");
+    }
+  });
+
+  test("retries an exact takeover after receipt removal failure and rejects plist drift", async () => {
+    const preview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const receiptPath = `${currentHome}/Library/Application Support/OPC/uninstall-receipt.json`;
+    const receiptContents = encodeUninstallReceipt({
+      version: 1,
+      operation: "uninstall-receipt",
+      onboardingDigest: preview.manifest.onboarding.digest,
+      currentHome,
+      currentUid: 501,
+      authority: {
+        configDigest: `sha256:${"2".repeat(64)}`,
+        state: "installed",
+        installDigest: preview.digest,
+        activationDigest: null,
+      },
+      completed: {
+        programFiles: true,
+        stateAndLogs: true,
+        telegramToken: false,
+        transitionKey: false,
+      },
+      programRemoval: "complete",
+    });
+    const setup = (driftPlist: boolean) => {
+      let failReceiptRemove = true;
+      const fixture = productionAdapterFixture(exclusiveLifecycleLock(), (fileSystem) => {
+        const removeFile = fileSystem.removeFile.bind(fileSystem);
+        fileSystem.removeFile = (path) => {
+          if (path === receiptPath && failReceiptRemove) {
+            failReceiptRemove = false;
+            return Promise.reject(new Error("receipt removal failed"));
+          }
+          return removeFile(path);
+        };
+      });
+      fixture.entries.set(receiptPath, {
+        kind: "file", uid: 501, mode: 0o600, contents: receiptContents,
+      });
+      return { fixture, driftPlist };
+    };
+    for (const driftPlist of [false, true]) {
+      const { fixture } = setup(driftPlist);
+      const first = await applyInstall(
+        { preview, approvedDigest: preview.digest },
+        { launchAgent: fixture.adapter },
+      ).catch((caught: unknown) => caught);
+      expect(first).toMatchObject({ message: "receipt removal failed" });
+      expect(fixture.entries.get(preview.manifest.paths.launchAgent)?.kind).toBe("file");
+      if (driftPlist) {
+        fixture.entries.set(preview.manifest.paths.launchAgent, {
+          kind: "file", uid: 501, mode: 0o600, contents: "hostile plist",
+        });
+      }
+      const beforeRetry = fixture.operations.length;
+      const retry = await applyInstall(
+        { preview, approvedDigest: preview.digest },
+        { launchAgent: fixture.adapter },
+      ).catch((caught: unknown) => caught);
+      if (driftPlist) {
+        expect(retry).toMatchObject({ message: "UNINSTALL_IN_PROGRESS" });
+        expect(fixture.operations.slice(beforeRetry).some((operation) =>
+          operation.startsWith("write:") || operation.startsWith("remove:"))).toBe(false);
+      } else {
+        expect(retry).toEqual(preview);
+        expect(fixture.entries.get(receiptPath)).toBeUndefined();
+      }
+    }
+  });
+
+  test("reinstalls program files while preserving exact receipt-bound daemon config", async () => {
+    const fixture = productionAdapterFixture();
+    const preview = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    const config = createEnabledDaemonConfig(activationPreview(preview));
+    if (!("activation" in config)) throw new Error("expected enabled config");
+    const configContents = encodeDaemonConfig(config);
+    const receiptPath = `${currentHome}/Library/Application Support/OPC/uninstall-receipt.json`;
+    fixture.entries.set(preview.manifest.paths.config, {
+      kind: "file", uid: 501, mode: 0o600, contents: configContents,
+    });
+    fixture.entries.set(receiptPath, {
+      kind: "file",
+      uid: 501,
+      mode: 0o600,
+      contents: encodeUninstallReceipt({
+        version: 1,
+        operation: "uninstall-receipt",
+        onboardingDigest: preview.manifest.onboarding.digest,
+        currentHome,
+        currentUid: 501,
+        authority: {
+          configDigest: digestCanonical(config),
+          state: "enabled",
+          installDigest: preview.digest,
+          activationDigest: config.activation.digest,
+        },
+        completed: {
+          programFiles: true,
+          stateAndLogs: false,
+          telegramToken: false,
+          transitionKey: false,
+        },
+        programRemoval: "complete",
+      }),
+    });
+
+    await applyInstall(
+      { preview, approvedDigest: preview.digest },
+      { launchAgent: fixture.adapter },
+    );
+
+    expect(fixture.entries.get(preview.manifest.paths.config)?.contents).toBe(configContents);
+    expect(fixture.entries.get(receiptPath)).toBeUndefined();
+    expect(fixture.entries.get(preview.manifest.paths.launchAgent)?.kind).toBe("file");
+
+    const drifted = productionAdapterFixture();
+    drifted.entries.set(preview.manifest.paths.config, {
+      kind: "file", uid: 501, mode: 0o600, contents: configContents,
+    });
+    drifted.entries.set(receiptPath, {
+      kind: "file",
+      uid: 501,
+      mode: 0o600,
+      contents: encodeUninstallReceipt({
+        version: 1,
+        operation: "uninstall-receipt",
+        onboardingDigest: preview.manifest.onboarding.digest,
+        currentHome,
+        currentUid: 501,
+        authority: {
+          configDigest: `sha256:${"0".repeat(64)}`,
+          state: "enabled",
+          installDigest: preview.digest,
+          activationDigest: config.activation.digest,
+        },
+        completed: {
+          programFiles: true,
+          stateAndLogs: false,
+          telegramToken: false,
+          transitionKey: false,
+        },
+        programRemoval: "complete",
+      }),
+    });
+    const error = await applyInstall(
+      { preview, approvedDigest: preview.digest },
+      { launchAgent: drifted.adapter },
+    ).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ message: "UNINSTALL_IN_PROGRESS" });
+    expect(drifted.operations.some((operation) =>
+      operation.startsWith("write:") || operation.startsWith("remove:"))).toBe(false);
   });
 
   test("does not evaluate hostile input or adapter option accessors", () => {
@@ -778,6 +1015,10 @@ describe("current-user LaunchAgent lifecycle", () => {
       [
         `${currentHome}/Library/Application Support/OPC`,
         { kind: "symlink", uid: 501, mode: 0o700 },
+      ],
+      [
+        `${currentHome}/Library/Application Support/OPC`,
+        { kind: "directory", uid: 501, mode: 0o755 },
       ],
       [installPreview.manifest.paths.program, { kind: "missing" }],
       [installPreview.manifest.paths.program, { kind: "file", uid: 501, mode: 0o722 }],

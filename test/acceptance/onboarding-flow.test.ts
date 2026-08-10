@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { runCli, type CliFactoryOverrides } from "../../src/cli/main.js";
+import { uninstallOutputCodec } from "../../src/cli/commands/uninstall.js";
 import { createProductionCliFactories } from "../../src/cli/production.js";
 import {
   requireCurrentDaemonConfig,
@@ -35,7 +36,13 @@ import { createInMemoryApprovalChannel } from "../../src/platform/approvals/in-m
 import { createHmacApprovalTransitionSigner } from "../../src/platform/approvals/hmac-approval-transition-signer.js";
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 import { createProductionApprovalQueue } from "../../src/cli/production/approval-queue.js";
-import { applyProductionUninstall } from "../../src/cli/production/uninstall.js";
+import {
+  applyProductionUninstall,
+  loadPrivateUninstallReceipt,
+  savePrivateUninstallReceipt,
+  uninstallPreview,
+  type UninstallReceipt,
+} from "../../src/cli/production/uninstall.js";
 import { validateTelegramPairingStagePreview } from "../../src/cli/production/telegram-onboarding.js";
 import {
   runProductionDaemon,
@@ -1245,15 +1252,22 @@ describe("current-user lifecycle CLI", () => {
 
   it("holds the lifecycle lock across uninstall and preserves its stable coordination files", async () => {
     const onboarding = disabledProductionConfig().onboarding;
+    const config = disabledProductionConfig();
+    const selection = {
+      programFiles: false,
+      stateAndLogs: true,
+      telegramToken: true,
+      transitionKey: false,
+    };
+    const preview = await uninstallPreview(selection, {
+      onboarding: () => onboarding,
+      loadDaemonConfig: () => Promise.resolve(config),
+    });
     const events: string[] = [];
     let locked = false;
     const result = await applyProductionUninstall(
-      {
-        programFiles: false,
-        stateAndLogs: true,
-        telegramToken: true,
-        transitionKey: false,
-      },
+      selection,
+      preview.manifest,
       {
         onboarding: () => onboarding,
         lifecycleLock: {
@@ -1268,7 +1282,12 @@ describe("current-user lifecycle CLI", () => {
             }
           },
         },
-        loadDaemonConfig: () => Promise.resolve(disabledProductionConfig()),
+        loadDaemonConfig: () => Promise.resolve(config),
+        saveReceipt: (path) => {
+          expect(locked).toBe(true);
+          events.push(`receipt:${path}`);
+          return Promise.resolve();
+        },
         stopLaunchAgent: () => {
           expect(locked).toBe(true);
           events.push("bootout");
@@ -1312,15 +1331,22 @@ describe("current-user lifecycle CLI", () => {
 
   it("rejects uninstall config authority drift before bootout or deletion", async () => {
     const onboarding = disabledProductionConfig().onboarding;
+    const approvedConfig = disabledProductionConfig();
+    const selection = {
+      programFiles: true,
+      stateAndLogs: true,
+      telegramToken: true,
+      transitionKey: true,
+    };
+    const preview = await uninstallPreview(selection, {
+      onboarding: () => onboarding,
+      loadDaemonConfig: () => Promise.resolve(approvedConfig),
+    });
     let mutations = 0;
     const drifted = createDisabledDaemonConfig(previewInstall({ onboarding, currentUid: 502 }));
     const error = await applyProductionUninstall(
-      {
-        programFiles: true,
-        stateAndLogs: true,
-        telegramToken: true,
-        transitionKey: true,
-      },
+      selection,
+      preview.manifest,
       {
         onboarding: () => onboarding,
         lifecycleLock: { withLock: (_path, operation) => operation() },
@@ -1347,6 +1373,408 @@ describe("current-user lifecycle CLI", () => {
 
     expect(error).toMatchObject({ message: "UNINSTALL_CONFIG_AUTHORITY_CHANGED" });
     expect(mutations).toBe(0);
+  });
+
+  it("binds uninstall preview to exact daemon state and rejects later activation", async () => {
+    const onboarding = disabledProductionConfig().onboarding;
+    const selection = {
+      programFiles: true,
+      stateAndLogs: true,
+      telegramToken: true,
+      transitionKey: true,
+    };
+    let current: DaemonConfig = disabledProductionConfig();
+    const approved = await uninstallPreview(selection, {
+      onboarding: () => onboarding,
+      loadDaemonConfig: () => Promise.resolve(current),
+    });
+    expect(approved.manifest.authority).toMatchObject({
+      state: "installed",
+      installDigest: current.install.digest,
+      activationDigest: null,
+    });
+    expect(uninstallOutputCodec.encode(approved)).toMatchObject({
+      manifest: {
+        authority: { state: "installed" },
+        receiptDigest: null,
+      },
+    });
+    const activation = previewActivation({
+      install: current.install,
+      telegram: { userId: "42", chatId: "99" },
+    });
+    current = createEnabledDaemonConfig(activation);
+    const changed = await uninstallPreview(selection, {
+      onboarding: () => onboarding,
+      loadDaemonConfig: () => Promise.resolve(current),
+    });
+    expect(changed.digest).not.toBe(approved.digest);
+    expect(changed.manifest.authority).toMatchObject({
+      state: "enabled",
+      installDigest: current.install.digest,
+      activationDigest: activation.digest,
+    });
+    let mutations = 0;
+    const error = await applyProductionUninstall(selection, approved.manifest, {
+      onboarding: () => onboarding,
+      lifecycleLock: { withLock: (_path, operation) => operation() },
+      loadDaemonConfig: () => Promise.resolve(current),
+      stopLaunchAgent: () => {
+        mutations += 1;
+        return Promise.resolve();
+      },
+      validateRemovalPath: () => Promise.resolve(),
+      removePath: () => {
+        mutations += 1;
+        return Promise.resolve();
+      },
+      credentialStore: {
+        read: () => Promise.resolve(undefined),
+        write: () => Promise.resolve(),
+        remove: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ message: "UNINSTALL_CONFIG_AUTHORITY_CHANGED" });
+    expect(mutations).toBe(0);
+
+    const pairingApproved = await uninstallPreview(selection, {
+      onboarding: () => onboarding,
+      loadDaemonConfig: () => Promise.resolve(current),
+    });
+    current = createEnabledDaemonConfig(previewActivation({
+      install: current.install,
+      telegram: { userId: "43", chatId: "100" },
+    }));
+    const pairingError = await applyProductionUninstall(
+      selection,
+      pairingApproved.manifest,
+      {
+        onboarding: () => onboarding,
+        lifecycleLock: { withLock: (_path, operation) => operation() },
+        loadDaemonConfig: () => Promise.resolve(current),
+        saveReceipt: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+        stopLaunchAgent: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+        validateRemovalPath: () => Promise.resolve(),
+        removePath: () => {
+          mutations += 1;
+          return Promise.resolve();
+        },
+        credentialStore: {
+          read: () => Promise.resolve(undefined),
+          write: () => Promise.resolve(),
+          remove: () => {
+            mutations += 1;
+            return Promise.resolve();
+          },
+        },
+      },
+    ).catch((caught: unknown) => caught);
+    expect(pairingError).toMatchObject({ message: "UNINSTALL_CONFIG_AUTHORITY_CHANGED" });
+    expect(mutations).toBe(0);
+  });
+
+  it("continues program and credential removal from a receipt after state removal deletes config", async () => {
+    const config = disabledProductionConfig();
+    const onboarding = config.onboarding;
+    const configPath = config.install.manifest.paths.config;
+    let configExists = true;
+    let receipt: UninstallReceipt | undefined;
+    const removed: string[] = [];
+    const credentialsRemoved: string[] = [];
+    const shared = {
+      onboarding: () => onboarding,
+      lifecycleLock: {
+        withLock<T>(_path: string, operation: () => Promise<T>): Promise<T> {
+          return operation();
+        },
+      },
+      loadDaemonConfig: () => configExists
+        ? Promise.resolve(config)
+        : Promise.reject(Object.assign(new Error("missing"), { code: "ENOENT" })),
+      loadReceipt: () => Promise.resolve(receipt),
+      saveReceipt: (_path: string, next: UninstallReceipt) => {
+        receipt = next;
+        return Promise.resolve();
+      },
+      stopLaunchAgent: () => Promise.resolve(),
+      validateRemovalPath: () => Promise.resolve(),
+      removePath: (path: string) => {
+        removed.push(path);
+        if (path === configPath) configExists = false;
+        return Promise.resolve();
+      },
+      credentialStore: {
+        read: () => Promise.resolve(undefined),
+        write: () => Promise.resolve(),
+        remove: (name: string) => {
+          credentialsRemoved.push(name);
+          return Promise.resolve();
+        },
+      },
+    };
+    const stateOnly = {
+      programFiles: false, stateAndLogs: true, telegramToken: false, transitionKey: false,
+    };
+    const statePreview = await uninstallPreview(stateOnly, shared);
+    await applyProductionUninstall(stateOnly, statePreview.manifest, shared);
+    expect(configExists).toBe(false);
+    expect(receipt?.completed.stateAndLogs).toBe(true);
+
+    const remainder = {
+      programFiles: true, stateAndLogs: false, telegramToken: true, transitionKey: true,
+    };
+    const remainderPreview = await uninstallPreview(remainder, shared);
+    expect(remainderPreview.manifest.receiptDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    await applyProductionUninstall(remainder, remainderPreview.manifest, shared);
+
+    expect(removed).toContain(onboarding.manifest.paths.binary);
+    expect(credentialsRemoved).toEqual(["telegram-token", "transition-key"]);
+    expect(receipt?.completed).toEqual({
+      programFiles: true, stateAndLogs: true, telegramToken: true, transitionKey: true,
+    });
+    expect(receipt?.programRemoval).toBe("complete");
+  });
+
+  it("keeps the CLI binary until every recoverable uninstall step is durable and replayable", async () => {
+    const failurePoints = [
+      "base-receipt", "state", "credential", "config", "final-receipt",
+      "launch-agent", "dist", "binary",
+    ] as const;
+    for (const failurePoint of failurePoints) {
+      const config = disabledProductionConfig();
+      const onboarding = config.onboarding;
+      const support = onboarding.manifest.paths.applicationSupport;
+      const configPath = config.install.manifest.paths.config;
+      let configExists = true;
+      let receipt: UninstallReceipt | undefined;
+      let receiptWrites = 0;
+      let failOnce: string | undefined = failurePoint;
+      const removed: string[] = [];
+      const selection = {
+        programFiles: true, stateAndLogs: true, telegramToken: true, transitionKey: true,
+      };
+      const dependencies = {
+        onboarding: () => onboarding,
+        lifecycleLock: {
+          withLock<T>(_path: string, operation: () => Promise<T>): Promise<T> {
+            return operation();
+          },
+        },
+        loadDaemonConfig: () => configExists
+          ? Promise.resolve(config)
+          : Promise.reject(Object.assign(new Error("missing"), { code: "ENOENT" })),
+        loadReceipt: () => Promise.resolve(receipt),
+        saveReceipt: (_path: string, next: UninstallReceipt) => {
+          receiptWrites += 1;
+          const stage = receiptWrites === 1 ? "base-receipt" : "final-receipt";
+          if (failOnce === stage) {
+            failOnce = undefined;
+            return Promise.reject(new Error(`fail:${stage}`));
+          }
+          receipt = next;
+          return Promise.resolve();
+        },
+        stopLaunchAgent: () => Promise.resolve(),
+        validateRemovalPath: () => Promise.resolve(),
+        removePath: (path: string) => {
+          const stage = path === configPath
+            ? "config"
+            : path === onboarding.manifest.paths.launchAgent
+              ? "launch-agent"
+              : path === `${support}/dist`
+                ? "dist"
+                : path === onboarding.manifest.paths.binary
+                  ? "binary"
+                  : path === `${support}/state.sqlite`
+                    ? "state"
+                    : undefined;
+          if (stage !== undefined && failOnce === stage) {
+            failOnce = undefined;
+            return Promise.reject(new Error(`fail:${stage}`));
+          }
+          removed.push(path);
+          if (path === configPath) configExists = false;
+          return Promise.resolve();
+        },
+        credentialStore: {
+          read: () => Promise.resolve(undefined),
+          write: () => Promise.resolve(),
+          remove: () => {
+            if (failOnce === "credential") {
+              failOnce = undefined;
+              return Promise.reject(new Error("fail:credential"));
+            }
+            return Promise.resolve();
+          },
+        },
+      };
+      const preview = await uninstallPreview(selection, dependencies);
+      const first = await applyProductionUninstall(
+        selection,
+        preview.manifest,
+        dependencies,
+      ).catch((caught: unknown) => caught);
+      expect(first).toBeInstanceOf(Error);
+      expect(removed).not.toContain(onboarding.manifest.paths.binary);
+
+      receiptWrites = 0;
+      const retryPreview = await uninstallPreview(selection, dependencies);
+      await applyProductionUninstall(selection, retryPreview.manifest, dependencies);
+      expect(removed.at(-1)).toBe(onboarding.manifest.paths.binary);
+    }
+  });
+
+  it("does not delete the CLI binary when lifecycle lock finalization fails", async () => {
+    const config = disabledProductionConfig();
+    const selection = {
+      programFiles: true, stateAndLogs: false, telegramToken: false, transitionKey: false,
+    };
+    const preview = await uninstallPreview(selection, {
+      onboarding: () => config.onboarding,
+      loadDaemonConfig: () => Promise.resolve(config),
+    });
+    const removed: string[] = [];
+    let receipt: UninstallReceipt | undefined;
+    const dependencies = {
+      onboarding: () => config.onboarding,
+      lifecycleLock: {
+        async withLock<T>(_path: string, operation: () => Promise<T>): Promise<T> {
+          await operation();
+          throw new Error("lifecycle cleanup failed");
+        },
+      },
+      loadDaemonConfig: () => Promise.resolve(config),
+      loadReceipt: () => Promise.resolve(receipt),
+      saveReceipt: (_path: string, next: UninstallReceipt) => {
+        receipt = next;
+        return Promise.resolve();
+      },
+      stopLaunchAgent: () => Promise.resolve(),
+      validateRemovalPath: () => Promise.resolve(),
+      removePath: (path: string) => {
+        removed.push(path);
+        return Promise.resolve();
+      },
+      credentialStore: {
+        read: () => Promise.resolve(undefined),
+        write: () => Promise.resolve(),
+        remove: () => Promise.resolve(),
+      },
+    };
+
+    const error = await applyProductionUninstall(
+      selection,
+      preview.manifest,
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "lifecycle cleanup failed" });
+    expect(removed).not.toContain(config.onboarding.manifest.paths.binary);
+    expect(receipt).toBeDefined();
+  });
+
+  it("leaves a reserved takeover receipt when terminalization fails after binary unlink", async () => {
+    const config = disabledProductionConfig();
+    const selection = {
+      programFiles: true, stateAndLogs: true, telegramToken: false, transitionKey: false,
+    };
+    let configExists = true;
+    let receipt: UninstallReceipt | undefined;
+    const removed: string[] = [];
+    const dependencies = {
+      onboarding: () => config.onboarding,
+      lifecycleLock: { withLock: <T>(_path: string, operation: () => Promise<T>) => operation() },
+      loadDaemonConfig: () => configExists
+        ? Promise.resolve(config)
+        : Promise.reject(Object.assign(new Error("missing"), { code: "ENOENT" })),
+      loadReceipt: () => Promise.resolve(receipt),
+      saveReceipt: (_path: string, next: UninstallReceipt) => {
+        if (next.programRemoval === "complete") {
+          return Promise.reject(new Error("terminal receipt failed"));
+        }
+        receipt = next;
+        return Promise.resolve();
+      },
+      stopLaunchAgent: () => Promise.resolve(),
+      validateRemovalPath: () => Promise.resolve(),
+      removePath: (path: string) => {
+        removed.push(path);
+        if (path === config.install.manifest.paths.config) configExists = false;
+        return Promise.resolve();
+      },
+      credentialStore: {
+        read: () => Promise.resolve(undefined),
+        write: () => Promise.resolve(),
+        remove: () => Promise.resolve(),
+      },
+    };
+    const preview = await uninstallPreview(selection, dependencies);
+
+    const error = await applyProductionUninstall(
+      selection,
+      preview.manifest,
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "terminal receipt failed" });
+    expect(removed).toContain(config.onboarding.manifest.paths.binary);
+    expect(receipt?.programRemoval).toBe("reserved");
+    expect(configExists).toBe(false);
+  });
+
+  it("persists the uninstall receipt canonically as a private regular file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opc-uninstall-receipt-"));
+    try {
+      const config = disabledProductionConfig();
+      const preview = await uninstallPreview(
+        { programFiles: false, stateAndLogs: true, telegramToken: false, transitionKey: false },
+        {
+          onboarding: () => config.onboarding,
+          loadDaemonConfig: () => Promise.resolve(config),
+        },
+      );
+      const receipt: UninstallReceipt = {
+        version: 1,
+        operation: "uninstall-receipt",
+        onboardingDigest: config.onboarding.digest,
+        currentHome: config.install.manifest.currentHome,
+        currentUid: config.install.manifest.currentUid,
+        authority: preview.manifest.authority,
+        completed: {
+          programFiles: false, stateAndLogs: true, telegramToken: false, transitionKey: false,
+        },
+        programRemoval: "none",
+      };
+      const path = join(directory, "uninstall-receipt.json");
+      await savePrivateUninstallReceipt(path, receipt);
+      const stats = await lstat(path);
+      expect(stats.isFile()).toBe(true);
+      expect(stats.mode & 0o777).toBe(0o600);
+      expect(await loadPrivateUninstallReceipt(path)).toEqual(receipt);
+
+      await chmod(path, 0o644);
+      const publicError = await loadPrivateUninstallReceipt(path).catch((caught: unknown) => caught);
+      expect(publicError).toMatchObject({ message: "INVALID_UNINSTALL_RECEIPT" });
+      await rm(path, { force: true });
+      const target = join(directory, "target.json");
+      await writeFile(target, "{}\n", { mode: 0o600 });
+      await symlink(target, path);
+      const symlinkError = await savePrivateUninstallReceipt(path, receipt).catch(
+        (caught: unknown) => caught,
+      );
+      expect(symlinkError).toMatchObject({ message: "INVALID_UNINSTALL_RECEIPT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects unknown, missing, extra, malformed, NUL, and oversized arguments before factories", async () => {

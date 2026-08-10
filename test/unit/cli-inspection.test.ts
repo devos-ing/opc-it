@@ -31,6 +31,7 @@ async function fixture(): Promise<{
   readonly approvals: string;
   readonly home: string;
   readonly processLock: string;
+  readonly lifecycleLock: string;
   readonly state: string;
   readonly support: string;
   readonly logs: string;
@@ -49,6 +50,9 @@ async function fixture(): Promise<{
   const processLock = join(support, "process-lock.sqlite");
   new Database(processLock, { create: true }).close();
   await chmod(processLock, 0o600);
+  const lifecycleLock = join(support, "lifecycle-lock.sqlite");
+  new Database(lifecycleLock, { create: true }).close();
+  await chmod(lifecycleLock, 0o600);
   const approvals = join(support, "approvals.sqlite");
   const database = new Database(approvals, { create: true });
   database.run("CREATE TABLE approval_transition_outbox (nonce TEXT)");
@@ -62,6 +66,7 @@ async function fixture(): Promise<{
     approvals,
     home: root,
     processLock,
+    lifecycleLock,
     state: statePath,
     support,
     logs,
@@ -135,6 +140,29 @@ describe("CLI operational inspection", () => {
     );
 
     expect(snapshot.sqliteHealthy).toBe(false);
+  });
+
+  it("fails SQLite health closed for unsafe lifecycle-lock main and sidecar artifacts", async () => {
+    const mutations = [
+      async (setup: Awaited<ReturnType<typeof fixture>>) => chmod(setup.lifecycleLock, 0o644),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        symlink(setup.lifecycleLock, `${setup.lifecycleLock}-wal`),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        writeFile(`${setup.lifecycleLock}-shm`, "", { mode: 0o644 }),
+      async (setup: Awaited<ReturnType<typeof fixture>>) =>
+        symlink(setup.lifecycleLock, `${setup.lifecycleLock}-journal`),
+    ];
+    for (const mutate of mutations) {
+      const setup = await fixture();
+      await mutate(setup);
+      const snapshot = await inspectOperationalState(
+        setup.onboarding,
+        github(),
+        credentials(),
+        new Date("2026-08-11T01:00:00.000Z"),
+      );
+      expect(snapshot.sqliteHealthy).toBe(false);
+    }
   });
 
   it("fails SQLite health closed for unsafe main, WAL, SHM, or rollback-journal artifacts", async () => {

@@ -260,23 +260,37 @@ export async function inspectOperationalState(
   let outboxCount = 0;
   let canonicalPairing = false;
   if (sandboxHealthy) {
-    try {
-      await readonlyCount(`${support}/state.sqlite`, "SELECT COUNT(*) AS count FROM poll_cursor");
-    } catch {
-      sqliteHealthy = false;
-    }
-    try {
-      const approvals = await inspectApprovals(`${support}/approvals.sqlite`);
-      outboxCount = approvals.outboxCount;
-      canonicalPairing = approvals.canonicalPairing;
-    } catch {
-      sqliteHealthy = false;
-    }
+    let lockArtifactsHealthy = true;
     try {
       await validatePrivateSqliteArtifacts(`${support}/process-lock.sqlite`);
-      await validatePrivateSqliteArtifacts(`${support}/process-lock.sqlite`);
+      await validatePrivateSqliteArtifacts(`${support}/lifecycle-lock.sqlite`);
     } catch {
       sqliteHealthy = false;
+      lockArtifactsHealthy = false;
+    }
+    if (lockArtifactsHealthy) {
+      try {
+        await readonlyCount(`${support}/state.sqlite`, "SELECT COUNT(*) AS count FROM poll_cursor");
+      } catch {
+        sqliteHealthy = false;
+      }
+    }
+    if (lockArtifactsHealthy) {
+      try {
+        const approvals = await inspectApprovals(`${support}/approvals.sqlite`);
+        outboxCount = approvals.outboxCount;
+        canonicalPairing = approvals.canonicalPairing;
+      } catch {
+        sqliteHealthy = false;
+      }
+    }
+    if (lockArtifactsHealthy) {
+      try {
+        await validatePrivateSqliteArtifacts(`${support}/process-lock.sqlite`);
+        await validatePrivateSqliteArtifacts(`${support}/lifecycle-lock.sqlite`);
+      } catch {
+        sqliteHealthy = false;
+      }
     }
   }
   let telegramToken = false;

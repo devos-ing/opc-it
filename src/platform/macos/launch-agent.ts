@@ -24,6 +24,7 @@ import type {
 } from "../../adapters/local/process-runner.js";
 import { digestCanonical } from "../../domain/identity.js";
 import type { LifecycleConfigLock } from "./lifecycle-config-lock.js";
+import { decodeUninstallReceipt } from "./uninstall-receipt.js";
 
 export interface LaunchAgentFileEntry {
   readonly kind: "missing" | "file" | "directory" | "symlink" | "other";
@@ -524,10 +525,16 @@ function requireExecutable(entry: LaunchAgentFileEntry, uid: number): void {
   }
 }
 
+function requirePrivateDirectory(entry: LaunchAgentFileEntry, uid: number): void {
+  requireEntry(entry, ["directory"], uid);
+  if (entry.mode !== 0o700) throw new Error("UNSAFE_LAUNCH_AGENT_PERMISSIONS");
+}
+
 async function validatePathAuthority(
   fileSystem: LaunchAgentFileSystem,
   manifest: LaunchAgentInstallManifest,
   uid: number,
+  requireNoUninstallReceipt = true,
 ): Promise<void> {
   const currentHome = manifest.currentHome;
   const launchAgentPath = manifest.paths.launchAgent;
@@ -540,25 +547,89 @@ async function validatePathAuthority(
   const opcLogs = `${logs}/OPC`;
 
   requireEntry(await inspect(fileSystem, currentHome), ["directory"], uid);
-  requireEntry(await inspect(fileSystem, library), ["directory"], uid);
-  requireEntry(await inspect(fileSystem, applicationSupport), ["directory"], uid);
-  requireEntry(await inspect(fileSystem, opcSupport), ["directory"], uid);
-  requireEntry(await inspect(fileSystem, distribution), ["directory"], uid);
+  requirePrivateDirectory(await inspect(fileSystem, library), uid);
+  requirePrivateDirectory(await inspect(fileSystem, applicationSupport), uid);
+  requirePrivateDirectory(await inspect(fileSystem, opcSupport), uid);
+  if (
+    requireNoUninstallReceipt &&
+    (await inspect(fileSystem, `${opcSupport}/uninstall-receipt.json`)).kind !== "missing"
+  ) {
+    throw new Error("UNINSTALL_IN_PROGRESS");
+  }
+  requirePrivateDirectory(await inspect(fileSystem, distribution), uid);
   requireExecutable(await inspect(fileSystem, manifest.paths.program), uid);
   requireEntry(await inspect(fileSystem, manifest.paths.config), ["missing", "file"], uid);
-  requireEntry(await inspect(fileSystem, logs), ["directory"], uid);
-  requireEntry(await inspect(fileSystem, opcLogs), ["directory"], uid);
+  requirePrivateDirectory(await inspect(fileSystem, logs), uid);
+  requirePrivateDirectory(await inspect(fileSystem, opcLogs), uid);
   requireEntry(await inspect(fileSystem, manifest.paths.stdout), ["missing", "file"], uid);
   requireEntry(await inspect(fileSystem, manifest.paths.stderr), ["missing", "file"], uid);
 
   const launchAgentsEntry = await inspect(fileSystem, launchAgents);
   requireEntry(launchAgentsEntry, ["missing", "directory"], uid);
+  if (launchAgentsEntry.kind === "directory") requirePrivateDirectory(launchAgentsEntry, uid);
   requireEntry(await inspect(fileSystem, launchAgentPath), ["missing", "file"], uid);
 
   if (launchAgentsEntry.kind === "missing") {
     await fileSystem.makeDirectory(launchAgents, 0o700);
-    requireEntry(await inspect(fileSystem, launchAgents), ["directory"], uid);
+    requirePrivateDirectory(await inspect(fileSystem, launchAgents), uid);
   }
+}
+
+interface UninstallTakeover {
+  readonly receiptPath: string;
+  readonly preservedConfigContents?: string;
+}
+
+async function validateUninstallTakeover(
+  fileSystem: LaunchAgentFileSystem,
+  manifest: LaunchAgentInstallManifest,
+  uid: number,
+): Promise<UninstallTakeover | undefined> {
+  const receiptPath = `${manifest.currentHome}/Library/Application Support/OPC/uninstall-receipt.json`;
+  const entry = await inspect(fileSystem, receiptPath);
+  if (entry.kind === "missing") return undefined;
+  requireEntry(entry, ["file"], uid);
+  const receipt = decodeUninstallReceipt(await fileSystem.readFile(receiptPath));
+  const preview = installPreview(manifest);
+  const configEntry = await inspect(fileSystem, manifest.paths.config);
+  const launchAgentEntry = await inspect(fileSystem, manifest.paths.launchAgent);
+  if (
+    receipt.currentHome !== manifest.currentHome || receipt.currentUid !== uid ||
+    !receipt.completed.programFiles || receipt.programRemoval === "none" ||
+    receipt.onboardingDigest !== preview.manifest.onboarding.digest ||
+    receipt.authority.installDigest !== preview.digest ||
+    (await inspect(fileSystem, `${manifest.currentHome}/.local/bin/opc`)).kind !== "missing"
+  ) throw new Error("UNINSTALL_IN_PROGRESS");
+  requireEntry(launchAgentEntry, ["missing", "file"], uid);
+  if (
+    launchAgentEntry.kind === "file" &&
+    (await fileSystem.readFile(manifest.paths.launchAgent)) !== renderLaunchAgentPlist(manifest)
+  ) throw new Error("UNINSTALL_IN_PROGRESS");
+  if (configEntry.kind === "missing") {
+    if (!receipt.completed.stateAndLogs) throw new Error("UNINSTALL_IN_PROGRESS");
+    return Object.freeze({ receiptPath });
+  }
+  requireEntry(configEntry, ["file"], uid);
+  const configContents = await fileSystem.readFile(manifest.paths.config);
+  if (receipt.completed.stateAndLogs) {
+    const disabledContents = encodeDaemonConfig(createDisabledDaemonConfig(preview));
+    if (configContents !== disabledContents) throw new Error("UNINSTALL_IN_PROGRESS");
+    return Object.freeze({ receiptPath, preservedConfigContents: configContents });
+  }
+  const config = decodeDaemonConfig(configContents);
+  const activationDigest = "activation" in config ? config.activation.digest : null;
+  const state = config.enabled ? "enabled" : "activation" in config ? "paused" : "installed";
+  if (
+    digestCanonical(config) !== receipt.authority.configDigest ||
+    config.onboarding.digest !== receipt.onboardingDigest ||
+    config.install.digest !== receipt.authority.installDigest ||
+    config.install.manifest.currentUid !== uid ||
+    config.install.manifest.paths.config !== manifest.paths.config ||
+    state !== receipt.authority.state || activationDigest !== receipt.authority.activationDigest
+  ) {
+    throw new Error("UNINSTALL_IN_PROGRESS");
+  }
+  return Object.freeze({ receiptPath, preservedConfigContents: configContents });
 }
 
 function snapshotCommandResult(result: CommandResult): Readonly<CommandResult> {
@@ -795,26 +866,35 @@ export function createLaunchAgentAdapter(
       const install = snapshotInstallManifest(manifest);
       requireAuthority(install, { ...snapshot, currentHome: home });
       const path = install.paths.launchAgent;
-      await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid);
+      await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid, false);
       const preview = installPreview(install);
       const disabledContents = encodeDaemonConfig(createDisabledDaemonConfig(preview));
       await snapshot.lifecycleLock.withLock(install.paths.config, async () => {
-        await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid);
+        const takeover = await validateUninstallTakeover(snapshot.fileSystem, install, snapshot.currentUid);
+        await validatePathAuthority(
+          snapshot.fileSystem,
+          install,
+          snapshot.currentUid,
+          takeover === undefined,
+        );
         const configEntry = await inspect(snapshot.fileSystem, install.paths.config);
         requireEntry(configEntry, ["missing", "file"], snapshot.currentUid);
         if (
           configEntry.kind === "file" &&
-          (await snapshot.fileSystem.readFile(install.paths.config)) !== disabledContents
+          (await snapshot.fileSystem.readFile(install.paths.config)) !==
+            (takeover?.preservedConfigContents ?? disabledContents)
         ) {
           throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
         }
-        await writeAtomic(
-          snapshot.fileSystem,
-          install.paths.config,
-          disabledContents,
-          snapshot.currentUid,
-          nonce,
-        );
+        if (takeover?.preservedConfigContents === undefined) {
+          await writeAtomic(
+            snapshot.fileSystem,
+            install.paths.config,
+            disabledContents,
+            snapshot.currentUid,
+            nonce,
+          );
+        }
         await ensurePrivateFile(
           snapshot.fileSystem,
           install.paths.stdout,
@@ -834,6 +914,12 @@ export function createLaunchAgentAdapter(
           snapshot.currentUid,
           nonce,
         );
+        if (takeover !== undefined) {
+          await snapshot.fileSystem.removeFile(takeover.receiptPath);
+          if ((await inspect(snapshot.fileSystem, takeover.receiptPath)).kind !== "missing") {
+            throw new Error("UNINSTALL_IN_PROGRESS");
+          }
+        }
       });
     },
     async activate(manifest: LaunchAgentActivationManifest) {

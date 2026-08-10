@@ -116,6 +116,7 @@ const allowedErrorCodes = new Set([
   "SENSITIVE_OUTPUT_REJECTED",
   "UNINSTALL_DIGEST_NOT_APPROVED",
   "UNINSTALL_CONFIG_AUTHORITY_CHANGED",
+  "UNINSTALL_IN_PROGRESS",
 ]);
 
 const defaultFactories = createProductionCliFactories();
