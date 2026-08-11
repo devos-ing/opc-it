@@ -45,9 +45,9 @@ Evidence: SQLite/in-memory adapter parity; same-digest submit idempotency; one-w
 
 Evidence: distinct onboarding/install/pairing/activation/uninstall digests; current `gh` identity and per-repository grants; independent `CODEX_HOME`; one-time durable Telegram pairing and replay-safe approval; config/SQLite/lifecycle authority fail closed across crash recovery; safe current-user LaunchAgent preview remains unactivated. Final M3 focused gate passes 149 tests / 884 expectations, full suite passes 763 tests / 2,251 expectations, lint/typecheck/build/diff checks pass, and independent whole-M3 Spec and Standards/security reviews report 0 findings.
 
-- [ ] **Checkpoint 4: Complete M4 and review security probes before publication**
+- [x] **Checkpoint 4: Complete M4 and review security probes before publication**
 
-Evidence: target credential reads and network access fail; candidate review is independent; frozen tree produces one commit/push; Recovery budget is bounded.
+Evidence: Target credential reads and unapproved network access fail closed; Codex execution and review are independently digest-bound; the frozen candidate produces one deterministic commit/push with crash-safe reconciliation; Recovery is bounded to three attempts with signed heartbeat, outage, policy-ceiling, and terminal replay authority. Final focused M4 verification passes 119 tests with 1 exact parent-Seatbelt skip and 0 failures; the delivery-loop acceptance passes twice at 8/8; the full suite passes 876 tests with 1 exact skip, 0 failures, and 2,663 expectations. Lint, typecheck, build, and diff checks pass, and independent whole-M4 Spec and Standards/security reviews report 0 findings. No real GitHub endpoint, credential, network push, Codex, Target command, Keychain, LaunchAgent activation, or persistent repository was used.
 
 - [ ] **Checkpoint 5: Complete M5 and ask for final activation approval**
 
