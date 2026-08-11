@@ -1,5 +1,5 @@
 import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { canonicalize } from "json-canonicalize";
 import { DomainError } from "../../domain/errors.js";
 import type { Sha256 } from "../../domain/identity.js";
@@ -21,10 +21,18 @@ export interface BundleRecord {
   directory: string;
   artifactSha256: Sha256;
   bytes: number;
+  ownershipToken: object;
 }
 
-export interface VerifiedBundle extends BundleRecord {
+export interface VerifiedBundle {
+  directory: string;
+  artifactSha256: Sha256;
+  bytes: number;
   entries: readonly BundleEntry[];
+}
+
+export interface OwnedVerifiedBundle extends VerifiedBundle {
+  ownershipToken: object;
 }
 
 function comparePaths(left: { path: string }, right: { path: string }): number {
@@ -69,29 +77,104 @@ function objectCode(value: unknown): unknown {
   return typeof value === "object" && value !== null && "code" in value ? value.code : undefined;
 }
 
+const ownedBundleDirectories = new Map<string, object>();
+const ownedBundleTokens = new WeakMap<object, {
+  readonly device: number;
+  readonly directory: string;
+  readonly inode: number;
+  readonly temporaryRoot: string;
+}>();
+
+async function removeOwnedBundle(directory: string, ownershipToken: object): Promise<void> {
+  if (
+    ownedBundleTokens.get(ownershipToken)?.directory !== directory ||
+    ownedBundleDirectories.get(directory) !== ownershipToken
+  ) {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", directory);
+  }
+  const ownership = ownedBundleTokens.get(ownershipToken);
+  if (ownership === undefined) throw new DomainError("UNSAFE_BUNDLE_PATH", directory);
+  assertContained(ownership.temporaryRoot, directory, directory);
+  const stats = await lstat(directory).catch(() => undefined);
+  if (
+    stats === undefined ||
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    stats.dev !== ownership.device ||
+    stats.ino !== ownership.inode
+  ) {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", directory);
+  }
+  await rm(directory, { recursive: true, force: false });
+  ownedBundleTokens.delete(ownershipToken);
+  ownedBundleDirectories.delete(directory);
+}
+
 async function prepareRoot(
   root: string,
   context?: DeliveryOperationContext,
-): Promise<string> {
+): Promise<{ readonly directory: string; readonly ownershipToken: object }> {
   assertOperationActive(context);
+  if (!isAbsolute(root) || resolve(root) !== root || Array.from(root).some((character) => {
+    const code = character.codePointAt(0);
+    return code !== undefined && (code <= 31 || code === 127);
+  })) {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", root);
+  }
   const existing = await lstat(root).catch((error: unknown) => {
     if (objectCode(error) === "ENOENT") return undefined;
     throw error;
   });
-  if (existing?.isSymbolicLink()) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  assertOperationActive(context);
-  const resolvedRoot = await realpath(root);
-  if (resolvedRoot === resolve("/")) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
-  const existingEntries = await readdir(resolvedRoot, { withFileTypes: true });
-  const unsafeEntry = existingEntries[0];
-  if (unsafeEntry?.isSymbolicLink()) {
-    throw new DomainError("UNSAFE_BUNDLE_PATH", unsafeEntry.name);
+  if (existing !== undefined) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
+  const canonicalParent = await realpath(dirname(root)).catch(() => "");
+  const directory = resolve(canonicalParent, basename(root));
+  assertContained(canonicalParent, directory, root);
+  const parentStats = await lstat(canonicalParent).catch(() => undefined);
+  const currentUid = process.getuid?.();
+  if (
+    currentUid === undefined ||
+    parentStats === undefined ||
+    !parentStats.isDirectory() ||
+    parentStats.isSymbolicLink() ||
+    parentStats.uid !== currentUid ||
+    (parentStats.mode & 0o022) !== 0
+  ) {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", root);
   }
-  if (unsafeEntry !== undefined) {
-    throw new DomainError("UNSAFE_BUNDLE_CONTENT", unsafeEntry.name);
+  try {
+    await mkdir(directory, { recursive: false, mode: 0o700 });
+  } catch {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", root);
   }
-  return resolvedRoot;
+  let ownershipToken: object | undefined;
+  try {
+    const stats = await lstat(directory);
+    if (
+      !stats.isDirectory() ||
+      stats.isSymbolicLink() ||
+      stats.uid !== currentUid ||
+      (stats.mode & 0o077) !== 0
+    ) {
+      throw new DomainError("UNSAFE_BUNDLE_PATH", root);
+    }
+    ownershipToken = Object.freeze(Object.create(null) as object);
+    ownedBundleDirectories.set(directory, ownershipToken);
+    ownedBundleTokens.set(ownershipToken, {
+      device: stats.dev,
+      directory,
+      inode: stats.ino,
+      temporaryRoot: canonicalParent,
+    });
+    const resolvedRoot = await realpath(directory);
+    if (resolvedRoot !== directory) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
+    assertOperationActive(context);
+    return { directory, ownershipToken };
+  } catch (error) {
+    if (ownershipToken !== undefined) {
+      await removeOwnedBundle(directory, ownershipToken);
+    }
+    throw error;
+  }
 }
 
 async function writeContainedFile(
@@ -145,16 +228,21 @@ export async function writeBundle(
   const total = ordered.reduce((sum, entry) => sum + entry.bytes.byteLength, indexBytes.byteLength);
   if (total > maximumBytes) throw new DomainError("EVIDENCE_BUNDLE_TOO_LARGE", String(total));
 
-  const directory = await prepareRoot(root, context);
-  for (const entry of ordered) {
-    await writeContainedFile(directory, entry.path, entry.bytes, 0o600, context);
+  const owned = await prepareRoot(root, context);
+  try {
+    for (const entry of ordered) {
+      await writeContainedFile(owned.directory, entry.path, entry.bytes, 0o600, context);
+    }
+    await writeFile(resolve(owned.directory, "bundle-index.json"), indexBytes, {
+      mode: 0o600,
+      flag: "wx",
+      signal: context?.signal,
+    });
+  } catch (error) {
+    await removeOwnedBundle(owned.directory, owned.ownershipToken);
+    throw error;
   }
-  await writeFile(resolve(directory, "bundle-index.json"), indexBytes, {
-    mode: 0o600,
-    flag: "wx",
-    signal: context?.signal,
-  });
-  return { directory, artifactSha256: sha256Bytes(indexBytes), bytes: total };
+  return { ...owned, artifactSha256: sha256Bytes(indexBytes), bytes: total };
 }
 
 function parseIndex(value: unknown): BundleIndexEntry[] {
@@ -316,11 +404,31 @@ export async function verifyBundle(
   return { directory, artifactSha256: actualArtifactSha256, bytes: total, entries };
 }
 
+export async function verifyOwnedBundle(
+  bundle: BundleRecord,
+  maximumBytes: number,
+  context?: DeliveryOperationContext,
+): Promise<OwnedVerifiedBundle> {
+  if (
+    ownedBundleTokens.get(bundle.ownershipToken)?.directory !== bundle.directory ||
+    ownedBundleDirectories.get(bundle.directory) !== bundle.ownershipToken
+  ) {
+    throw new DomainError("UNSAFE_BUNDLE_PATH", bundle.directory);
+  }
+  const verified = await verifyBundle(
+    bundle.directory,
+    bundle.artifactSha256,
+    maximumBytes,
+    context,
+  );
+  return { ...verified, ownershipToken: bundle.ownershipToken };
+}
+
 export async function cleanupBundle(
   bundle: BundleRecord,
   context?: DeliveryOperationContext,
 ): Promise<void> {
   assertOperationActive(context);
-  await rm(bundle.directory, { recursive: true, force: true });
+  await removeOwnedBundle(bundle.directory, bundle.ownershipToken);
   assertOperationActive(context);
 }

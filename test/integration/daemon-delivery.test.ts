@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "bun:test";
@@ -9,7 +9,7 @@ import {
 } from "../../src/adapters/local/change-collector.js";
 import {
   cleanupBundle,
-  verifyBundle,
+  verifyOwnedBundle,
   writeBundle,
 } from "../../src/adapters/local/evidence-bundle.js";
 import {
@@ -197,7 +197,7 @@ it("executes and independently verifies a candidate without publishing", async (
     changes: { collect: collectChanges, diff: collectCandidateDiff },
     bundles: {
       write: writeBundle,
-      verify: verifyBundle,
+      verify: verifyOwnedBundle,
       cleanup: cleanupBundle,
     },
     now: () => 1_010_000,
@@ -282,6 +282,7 @@ interface HarnessOptions {
   readonly execute?: () => unknown;
   readonly now?: () => number;
   readonly cleanupFails?: boolean;
+  readonly cleanupError?: Error;
   readonly workspaceResult?: unknown;
   readonly freezeDigest?: Sha256;
   readonly afterFreeze?: () => void;
@@ -389,6 +390,7 @@ async function runBoundedHarness(options: HarnessOptions = {}) {
       },
       remove() {
         calls.remove += 1;
+        if (options.cleanupError !== undefined) return Promise.reject(options.cleanupError);
         return options.cleanupFails ? Promise.reject(new Error("cleanup unavailable")) : Promise.resolve();
       },
     },
@@ -413,15 +415,19 @@ async function runBoundedHarness(options: HarnessOptions = {}) {
       async write(directory, entries, maximumBytes) {
         writtenEntries = entries;
         const record = await writeBundle(directory, entries, maximumBytes);
-        if (options.writeFailure) throw new Error("bundle write interrupted");
+        if (options.writeFailure) {
+          calls.bundleCleanup += 1;
+          await cleanupBundle(record);
+          throw new Error("bundle write interrupted");
+        }
         if (options.invalidBundleMetadata) return { ...record, bytes: -1 };
         return options.bundleRedirect === undefined
           ? record
           : { ...record, directory: options.bundleRedirect };
       },
-      async verify(directory, artifactSha256, maximumBytes) {
+      async verify(bundle, maximumBytes) {
         await options.verifyBundle?.(writtenEntries, input);
-        return await verifyBundle(directory, artifactSha256, maximumBytes);
+        return await verifyOwnedBundle(bundle, maximumBytes);
       },
       async cleanup(bundle, context) {
         calls.bundleCleanup += 1;
@@ -764,6 +770,7 @@ it("makes reused local git and worktree helpers honor an aborted delivery contex
     directory: join(fixture.root, "aborted-bundle"),
     artifactSha256: sha256Fixture("a"),
     bytes: 0,
+    ownershipToken: {},
   }, context).catch((error: unknown) => error);
   expect(cleanupError).toMatchObject({ code: "EXECUTION_TIMEOUT" });
 });
@@ -940,14 +947,51 @@ it("rejects a reviewer model that differs from the approved fresh session", asyn
   expect(result).toBeInstanceOf(DeliveryContractViolation);
 });
 
-it("reports cleanup failure as infrastructure failure", async () => {
+it("preserves the primary Work Failure classification when cleanup also fails", async () => {
   const result = await runBoundedHarness({
     sandbox: (attempt) => attempt === 1
       ? { status: "fail", exitCode: 1, stdout: "", stderr: "failed", durationMs: 2 }
       : { status: "pass", exitCode: 0, stdout: "", stderr: "", durationMs: 1 },
     cleanupFails: true,
   });
-  expect(result.outcome).toMatchObject({ status: "infrastructure-failure", report: { code: "CLEANUP_FAILURE" } });
-  expect(result.outcome.status === "infrastructure-failure" ? result.outcome.report.summary : "")
-    .toContain("EVIDENCE_FAILED");
+  expect(result.outcome).toMatchObject({
+    status: "work-failure",
+    report: { category: "WORK_FAILURE", code: "EVIDENCE_FAILED" },
+  });
+  expect(result.outcome.status === "work-failure" ? result.outcome.report.summary : "")
+    .toContain("cleanup=");
+});
+
+it("records secondary cleanup evidence without coercing a hostile failure", async () => {
+  let coercions = 0;
+  const cleanupError = new (class extends Error {
+    [Symbol.toPrimitive]() {
+      coercions += 1;
+      throw new Error("must not coerce cleanup failure");
+    }
+  })();
+  const result = await runBoundedHarness({
+    sandbox: (attempt) => attempt === 1
+      ? { status: "fail", exitCode: 1, stdout: "", stderr: "failed", durationMs: 2 }
+      : { status: "pass", exitCode: 0, stdout: "", stderr: "", durationMs: 1 },
+    cleanupError,
+  });
+
+  expect(result.outcome).toMatchObject({
+    status: "work-failure",
+    report: { category: "WORK_FAILURE", code: "EVIDENCE_FAILED" },
+  });
+  expect(coercions).toBe(0);
+});
+
+it("never removes a caller-supplied bundle directory that already exists", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-existing-delivery-bundle-"));
+  const existing = join(temporary, "bundle");
+  await mkdir(existing);
+  await writeFile(join(existing, "keep.txt"), "keep");
+
+  const result = await runBoundedHarness({ input: { bundleDirectory: existing } });
+
+  expect(result.outcome).toMatchObject({ status: "work-failure", report: { code: "EVIDENCE_FAILED" } });
+  expect(await readFile(join(existing, "keep.txt"), "utf8")).toBe("keep");
 });

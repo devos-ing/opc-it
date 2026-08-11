@@ -111,6 +111,11 @@ function containsPath(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
+function protectedPathAliases(path: string): readonly string[] {
+  if (path.startsWith("/System/Volumes/Data/")) return [];
+  return [`/System/Volumes/Data${path}`];
+}
+
 async function validateRequest(request: SandboxRequest): Promise<{
   readonly cwd: string;
   readonly command: string;
@@ -199,11 +204,13 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
         ...paths.readOnly,
         ...(ownedProtectedPath === undefined ? [] : [ownedProtectedPath]),
       ])];
+      if (Object.keys(paths.env).some((key) => !rolePolicy.allowedEnvironment.has(key))) {
+        throw new SandboxContractViolation(`${request.role} environment boundary`);
+      }
       if (ownedProtectedPath !== undefined) {
         if (
           paths.env[rolePolicy.requiredEnvironment] !== ownedProtectedPath ||
-          !paths.readOnly.includes(ownedProtectedPath) ||
-          Object.keys(paths.env).some((key) => !rolePolicy.allowedEnvironment.has(key))
+          !paths.readOnly.includes(ownedProtectedPath)
         ) {
           throw new SandboxContractViolation(`${request.role} protected read boundary`);
         }
@@ -218,9 +225,9 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
       ) {
         throw new SandboxContractViolation("read-only write boundary");
       }
-      const deniedProbePaths = Object.entries(protectedProbePaths)
+      const deniedProbePaths = [...new Set(Object.entries(protectedProbePaths)
         .filter(([key]) => key !== rolePolicy.ownedProtectedPath)
-        .map(([, path]) => path);
+        .flatMap(([, path]) => [path, ...protectedPathAliases(path)]))];
       if (!Number.isSafeInteger(request.deadlineEpochMs) || request.deadlineEpochMs <= 0) {
         throw new SandboxContractViolation("execution deadline");
       }

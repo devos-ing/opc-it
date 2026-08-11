@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalize } from "json-canonicalize";
@@ -21,7 +21,6 @@ async function candidateFixture(evidenceStatus: "pass" | "fail" = "pass"): Promi
 }> {
   const runnerTemp = await mkdtemp(join(tmpdir(), "opc-prepare-review-"));
   const directory = join(runnerTemp, "opc-review-input");
-  await mkdir(directory);
   const content = Buffer.from("export const value = 1;\n");
   const log = Buffer.from("pass\n");
   const policy: RepositoryPolicy = {

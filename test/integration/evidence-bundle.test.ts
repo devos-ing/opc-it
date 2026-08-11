@@ -1,13 +1,16 @@
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalize } from "json-canonicalize";
 import { expect, it } from "bun:test";
 import {
+  cleanupBundle,
   verifyBundle,
   writeBundle,
 } from "../../src/adapters/local/evidence-bundle.js";
 import { buildCandidate } from "../../src/application/build-candidate.js";
 import type { MilestoneContract, RepositoryPolicy } from "../../src/domain/contracts.js";
+import { sha256Bytes } from "../../src/security/content.js";
 import { createChangeFixture } from "../fixtures/git-repository.js";
 
 const bytes = (value: string): Uint8Array => Buffer.from(value);
@@ -74,6 +77,86 @@ it("detects an entry changed after bundle creation", async () => {
   expect(error).toMatchObject({ code: "BUNDLE_ENTRY_DIGEST_MISMATCH" });
 });
 
+it("cleanup requires the opaque ownership token returned after safe creation", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-owned-bundle-cleanup-"));
+  const victim = join(temporary, "victim");
+  await mkdir(victim);
+  await writeFile(join(victim, "keep.txt"), "keep");
+
+  const forgedCleanup = await cleanupBundle({
+    directory: victim,
+    artifactSha256: `sha256:${"0".repeat(64)}`,
+    bytes: 0,
+    ownershipToken: {},
+  }).catch((caught: unknown) => caught);
+
+  expect(forgedCleanup).toMatchObject({ code: "UNSAFE_BUNDLE_PATH" });
+  expect(await readFile(join(victim, "keep.txt"), "utf8")).toBe("keep");
+
+  const owned = await writeBundle(
+    join(temporary, "owned"),
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  );
+  await cleanupBundle(owned);
+  const removed = await readFile(join(owned.directory, "context.json")).catch((error: unknown) => error);
+  expect(errorCode(removed)).toBe("ENOENT");
+});
+
+it("bundle creation rejects a caller path outside the host-owned temporary root", async () => {
+  const error = await writeBundle(
+    process.cwd(),
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ code: "UNSAFE_BUNDLE_PATH" });
+});
+
+it("bundle creation rejects a writable-by-others temporary parent", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-untrusted-bundle-parent-"));
+  await chmod(temporary, 0o777);
+  const result = await writeBundle(
+    join(temporary, "bundle"),
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  ).catch((caught: unknown) => caught);
+  if (errorCode(result) === undefined) await cleanupBundle(result as Awaited<ReturnType<typeof writeBundle>>);
+
+  expect(result).toMatchObject({ code: "UNSAFE_BUNDLE_PATH" });
+});
+
+it("accepts a private host temp root that differs from the process temp root", async () => {
+  const hostTemporaryRoot = await mkdtemp("/private/tmp/opc-configured-bundle-root-");
+  const bundle = await writeBundle(
+    join(hostTemporaryRoot, "bundle"),
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  );
+
+  expect(bundle.directory).toBe(`${await realpath(hostTemporaryRoot)}/bundle`);
+  await cleanupBundle(bundle);
+});
+
+it("verifies an externally materialized bundle without granting cleanup authority", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-external-bundle-"));
+  const directory = join(temporary, "downloaded");
+  await mkdir(directory);
+  const content = bytes("approved");
+  const indexBytes = Buffer.from(canonicalize([{
+    path: "context.json",
+    sha256: sha256Bytes(content),
+    bytes: content.byteLength,
+  }]));
+  await writeFile(join(directory, "context.json"), content);
+  await writeFile(join(directory, "bundle-index.json"), indexBytes);
+
+  const verified = await verifyBundle(directory, sha256Bytes(indexBytes), 10_000);
+  expect(verified.entries).toHaveLength(1);
+  expect("ownershipToken" in verified).toBeFalse();
+  expect(await readFile(join(directory, "context.json"), "utf8")).toBe("approved");
+});
+
 it("rejects files outside the exact bundle index before write and after download", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "opc-extra-bundle-entry-"));
   const prefilled = join(temporary, "prefilled");
@@ -84,7 +167,7 @@ it("rejects files outside the exact bundle index before write and after download
     [{ path: "context.json", bytes: bytes("approved") }],
     10_000,
   ).catch((caught: unknown) => caught);
-  expect(writeError).toMatchObject({ code: "UNSAFE_BUNDLE_CONTENT" });
+  expect(writeError).toMatchObject({ code: "UNSAFE_BUNDLE_PATH" });
 
   const bundle = await writeBundle(
     join(temporary, "downloaded"),

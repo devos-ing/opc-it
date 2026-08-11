@@ -8,6 +8,7 @@ import type { CommandRequest } from "../../src/adapters/local/process-runner.js"
 import { createFakeSandboxAdapter } from "../../src/platform/sandbox/fake-sandbox-adapter.js";
 import { createMacosSandboxAdapter } from "../../src/platform/sandbox/macos-sandbox-adapter.js";
 import type { MacosSandboxAdapterOptions } from "../../src/platform/sandbox/macos-sandbox-adapter.js";
+import { renderSandboxProfile } from "../../src/platform/sandbox/profiles.js";
 
 function protectedProbes(paths: readonly string[]): MacosSandboxAdapterOptions["protectedPaths"] {
   const [dailyCodex, opcCodex, github, ssh, keychain, personalData] = paths;
@@ -133,27 +134,26 @@ macosSandboxTest("Target commands can read and write only approved worktree and 
         "-c",
         [
           "set -eu",
-          "test \"$OPC_EXPLICIT\" = explicit",
           "test -z \"${OPC_AMBIENT_SENTINEL+x}\"",
           "printf allowed > target-output",
-          "printf temporary > \"$OPC_TEMP/output\"",
+          "printf temporary > \"$1/output\"",
+          "local_port=$2",
+          "shift 2",
           "for path do",
           "  if /bin/cat \"$path\" >/dev/null 2>&1; then exit 41; fi",
           "  if /usr/bin/touch \"$path\" >/dev/null 2>&1; then exit 42; fi",
           "done",
-          "if /usr/bin/nc -G 1 -z 127.0.0.1 \"$OPC_LOCAL_PORT\"; then exit 43; fi",
+          "if /usr/bin/nc -G 1 -z 127.0.0.1 \"$local_port\"; then exit 43; fi",
           "if /usr/bin/curl --fail --silent --connect-timeout 1 --max-time 2 https://example.com/ >/dev/null 2>&1; then exit 44; fi",
           "cat target-output",
         ].join("\n"),
         "sandbox-contract",
+        await realpath(temporary),
+        String(localAddress.port),
         ...canonicalProtectedPaths,
       ],
       cwd,
-      env: {
-        OPC_EXPLICIT: "explicit",
-        OPC_TEMP: await realpath(temporary),
-        OPC_LOCAL_PORT: String(localAddress.port),
-      },
+      env: {},
       readable: [cwd, await realpath(temporary)],
       writable: [cwd, await realpath(temporary)],
       network: "deny",
@@ -204,6 +204,100 @@ test("sandbox paths reject traversal before profile rendering", async () => {
     .catch((reason: unknown) => reason);
   expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
   expect(executed).toBeFalse();
+});
+
+test("sandbox profiles grant only narrow immutable system runtime paths", () => {
+  const profile = renderSandboxProfile({
+    role: "target",
+    executables: ["/usr/bin/true"],
+    readable: ["/private/tmp/opc-worktree"],
+    writable: ["/private/tmp/opc-worktree"],
+    network: "deny",
+  });
+
+  expect(profile).not.toContain('(subpath "/System")');
+  expect(profile).not.toContain("/System/Volumes/Data");
+  expect(profile).toContain('(subpath "/System/Library")');
+});
+
+test("Controller and Target reject non-allowlisted credential environments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opc-sandbox-env-allowlist-"));
+  try {
+    const cwd = await realpath(root);
+    let executed = false;
+    const sandbox = createMacosSandboxAdapter({
+      protectedPaths: protectedProbes(Array.from({ length: 6 }, () => cwd)),
+      allowedCommands: everyRoleAllows(["/usr/bin/true"]),
+      run: () => {
+        executed = true;
+        throw new Error("must not execute");
+      },
+    });
+
+    for (const [role, key] of [["controller", "TELEGRAM_BOT_TOKEN"], ["target", "GH_TOKEN"]] as const) {
+      const error = await sandbox.run({
+        role,
+        command: "/usr/bin/true",
+        args: [],
+        cwd,
+        env: { [key]: "must-not-cross" },
+        readable: [cwd],
+        writable: [cwd],
+        network: "deny",
+        deadlineEpochMs: Date.now() + 5_000,
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
+    }
+    expect(executed).toBeFalse();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("permission probes deny Data-volume aliases of protected paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opc-sandbox-data-alias-"));
+  try {
+    const cwd = await realpath(root);
+    const protectedRoot = join(root, "protected");
+    await mkdir(protectedRoot);
+    const protectedPaths = await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+      const path = join(protectedRoot, `sentinel-${String(index)}`);
+      await writeFile(path, "sentinel");
+      return realpath(path);
+    }));
+    const probes: string[] = [];
+    const sandbox = createMacosSandboxAdapter({
+      protectedPaths: protectedProbes(protectedPaths),
+      allowedCommands: everyRoleAllows(["/usr/bin/true"]),
+      run: (request) => {
+        if (request.args[2] === "/bin/test") {
+          probes.push(request.args[4] ?? "");
+          const allowed = request.args[4] === cwd;
+          return Promise.resolve({ status: allowed ? "pass" : "fail", exitCode: allowed ? 0 : 1, stdout: "", stderr: allowed ? "" : "denied", durationMs: 0 });
+        }
+        if (request.args[2] === "/usr/bin/nc" || request.args[2] === "/usr/bin/curl") {
+          return Promise.resolve({ status: "fail", exitCode: request.args[2] === "/usr/bin/curl" ? 6 : 1, stdout: "", stderr: "denied", durationMs: 0 });
+        }
+        return Promise.resolve({ status: "pass", exitCode: 0, stdout: "", stderr: "", durationMs: 0 });
+      },
+    });
+
+    await sandbox.run({
+      role: "controller",
+      command: "/usr/bin/true",
+      args: [],
+      cwd,
+      env: {},
+      readable: [cwd],
+      writable: [cwd],
+      network: "deny",
+      deadlineEpochMs: Date.now() + 5_000,
+    });
+
+    expect(probes).toContain(`/System/Volumes/Data${protectedPaths[0] ?? ""}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("only Publisher can request the closed GitHub HTTPS network authority", async () => {
@@ -449,7 +543,10 @@ test("Target attempts probe every credential class and both denied networks befo
         requests.push(request);
         const childCommand = request.args[2];
         const probePath = request.args[4];
-        const protectedProbe = childCommand === "/bin/test" && canonicalProtectedPaths.includes(probePath ?? "");
+        const protectedProbe = childCommand === "/bin/test" && (
+          canonicalProtectedPaths.includes(probePath ?? "") ||
+          probePath?.startsWith("/System/Volumes/Data/") === true
+        );
         if (protectedProbe || childCommand === "/usr/bin/nc" || childCommand === "/usr/bin/curl") {
           return Promise.resolve({
             status: "fail",
@@ -474,7 +571,7 @@ test("Target attempts probe every credential class and both denied networks befo
       command: "/bin/sh",
       args: ["-c", "printf %s \"$OPC_EXPLICIT\""],
       cwd: await realpath(worktree),
-      env: { OPC_EXPLICIT: "explicit" },
+      env: {},
       readable: [await realpath(worktree), await realpath(temporary)],
       writable: [await realpath(worktree), await realpath(temporary)],
       network: "deny",
@@ -488,7 +585,7 @@ test("Target attempts probe every credential class and both denied networks befo
     ).toHaveLength(12);
     expect(requests.some((request) => request.args[2] === "/usr/bin/nc")).toBeTrue();
     expect(requests.some((request) => request.args[2] === "/usr/bin/curl")).toBeTrue();
-    expect(requests.every((request) => request.env.OPC_EXPLICIT === "explicit" && Object.keys(request.env).length === 1)).toBeTrue();
+    expect(requests.every((request) => Object.keys(request.env).length === 0)).toBeTrue();
     expect(requests.every((request) => request.args[1]?.includes("host-owned role: target") === true)).toBeTrue();
     expect(requests.every((request) => request.args[1]?.includes("(deny network*)") === true)).toBeTrue();
     expect(requests.map((request) => request.timeoutMs)).toEqual(
@@ -770,7 +867,10 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
           });
         }
         if (
-          (childCommand === "/bin/test" && roleProbes.includes(request.args[4] ?? "")) ||
+          (childCommand === "/bin/test" && (
+            roleProbes.includes(request.args[4] ?? "") ||
+            request.args[4]?.startsWith("/System/Volumes/Data/") === true
+          )) ||
           childCommand === "/usr/bin/nc" ||
           childCommand === "/usr/bin/curl"
         ) {

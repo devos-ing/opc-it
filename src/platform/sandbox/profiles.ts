@@ -1,7 +1,9 @@
 import type { SandboxRequest } from "../../features/delivery/index.js";
 
 const systemReadRules = [
-  "/System",
+  "/System/Library",
+  "/System/Cryptexes/App/usr/lib",
+  "/System/Cryptexes/App/usr/share",
   "/Library/Apple/System",
   "/usr/lib",
   "/usr/share",

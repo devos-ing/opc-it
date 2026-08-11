@@ -219,6 +219,7 @@ export interface DeliveryBundleRecord {
   readonly directory: string;
   readonly artifactSha256: Sha256;
   readonly bytes: number;
+  readonly ownershipToken: object;
 }
 
 export interface DeliveryVerifiedBundle extends DeliveryBundleRecord {
@@ -233,8 +234,7 @@ export interface DeliveryBundlePort {
     context: DeliveryOperationContext,
   ): Promise<DeliveryBundleRecord>;
   verify(
-    root: string,
-    expectedArtifactSha256: Sha256,
+    bundle: DeliveryBundleRecord,
     maximumBytes: number,
     context: DeliveryOperationContext,
   ): Promise<DeliveryVerifiedBundle>;

@@ -273,7 +273,7 @@ function candidateTreeDigest(changes: readonly DeliveryChange[]): Sha256 {
 }
 
 function snapshotBundleRecord(value: unknown, name: string): DeliveryBundleRecord {
-  const fields = exactDataRecord(value, ["directory", "artifactSha256", "bytes"], name);
+  const fields = exactDataRecord(value, ["directory", "artifactSha256", "bytes", "ownershipToken"], name);
   if (
     typeof fields.directory !== "string" ||
     !posix.isAbsolute(fields.directory) ||
@@ -282,7 +282,10 @@ function snapshotBundleRecord(value: unknown, name: string): DeliveryBundleRecor
     !digestPattern.test(fields.artifactSha256) ||
     !Number.isSafeInteger(fields.bytes) ||
     Number(fields.bytes) < 0 ||
-    Number(fields.bytes) > maximumBundleBytes
+    Number(fields.bytes) > maximumBundleBytes ||
+    typeof fields.ownershipToken !== "object" ||
+    fields.ownershipToken === null ||
+    types.isProxy(fields.ownershipToken)
   ) {
     throw new DeliveryContractViolation(name);
   }
@@ -290,13 +293,42 @@ function snapshotBundleRecord(value: unknown, name: string): DeliveryBundleRecor
     directory: fields.directory,
     artifactSha256: fields.artifactSha256 as Sha256,
     bytes: Number(fields.bytes),
+    ownershipToken: fields.ownershipToken,
+  });
+}
+
+function snapshotBundleOwnership(
+  value: unknown,
+  expectedArtifactSha256: Sha256,
+  expectedBytes: number,
+): DeliveryBundleRecord {
+  const fields = exactDataRecord(
+    value,
+    ["directory", "artifactSha256", "bytes", "ownershipToken"],
+    "bundle write result",
+  );
+  if (
+    typeof fields.directory !== "string" ||
+    !posix.isAbsolute(fields.directory) ||
+    posix.normalize(fields.directory) !== fields.directory ||
+    typeof fields.ownershipToken !== "object" ||
+    fields.ownershipToken === null ||
+    types.isProxy(fields.ownershipToken)
+  ) {
+    throw new DeliveryContractViolation("bundle write result");
+  }
+  return Object.freeze({
+    directory: fields.directory,
+    artifactSha256: expectedArtifactSha256,
+    bytes: expectedBytes,
+    ownershipToken: fields.ownershipToken,
   });
 }
 
 function snapshotVerifiedBundle(value: unknown): DeliveryVerifiedBundle {
   const fields = exactDataRecord(
     value,
-    ["directory", "artifactSha256", "bytes", "entries"],
+    ["directory", "artifactSha256", "bytes", "ownershipToken", "entries"],
     "bundle verification result",
   );
   if (
@@ -335,6 +367,7 @@ function snapshotVerifiedBundle(value: unknown): DeliveryVerifiedBundle {
       directory: fields.directory,
       artifactSha256: fields.artifactSha256,
       bytes: fields.bytes,
+      ownershipToken: fields.ownershipToken,
     },
     "bundle verification result",
   );
@@ -541,6 +574,10 @@ async function cleanupOwnedResources(
   return errors;
 }
 
+function cleanupEvidence(errors: readonly unknown[]): string {
+  return `${String(errors.length)} secondary cleanup failure${errors.length === 1 ? "" : "s"}`;
+}
+
 async function removeAfterFailure(
   workspace: DeliveryWorkspace | undefined,
   dependencies: DeliveryDependencies,
@@ -549,9 +586,18 @@ async function removeAfterFailure(
 ): Promise<DeliveryOutcome> {
   const cleanupErrors = await cleanupOwnedResources(workspace, dependencies, bundle);
   if (cleanupErrors.length === 0) return outcome;
+  if (outcome.status === "work-failure" || outcome.status === "infrastructure-failure") {
+    return Object.freeze({
+      ...outcome,
+      report: Object.freeze({
+        ...outcome.report,
+        summary: `${outcome.report.summary}; cleanup=${cleanupEvidence(cleanupErrors)}`,
+      }),
+    });
+  }
   return infrastructureFailure(
     "CLEANUP_FAILURE",
-    `primary=${JSON.stringify(outcome)}; cleanup=${cleanupErrors.map(String).join("; ")}`,
+    `primary=${JSON.stringify(outcome)}; cleanup=${cleanupEvidence(cleanupErrors)}`,
   );
 }
 
@@ -563,6 +609,11 @@ async function cleanupThrownFailure(
 ): Promise<never> {
   const cleanupErrors = await cleanupOwnedResources(workspace, dependencies, bundle);
   if (cleanupErrors.length > 0) {
+    if (primary instanceof DeliveryContractViolation) {
+      throw new DeliveryContractViolation(
+        `${primary.message}; cleanup=${cleanupEvidence(cleanupErrors)}`,
+      );
+    }
     throw new AggregateError([primary, ...cleanupErrors], "DELIVERY_AND_CLEANUP_FAILURE");
   }
   throw primary;
@@ -824,21 +875,23 @@ export async function runDelivery(
     const expectedBundleDigest = digestDeliveryEntries(bundleEntries);
     const expectedBundleBytes = deliveryBundleBytes(bundleEntries);
     try {
-      bundle = Object.freeze({
-        directory: input.bundleDirectory,
-        artifactSha256: expectedBundleDigest,
-        bytes: expectedBundleBytes,
-      });
-      const ownedBundleForWrite = bundle;
+      const rawWrittenBundle = await awaitDeadline((context) => dependencies.bundles.write(
+        input.bundleDirectory,
+        copyBundleEntries(bundleEntries),
+        maximumBundleBytes,
+        context,
+      ));
+      bundle = snapshotBundleOwnership(
+        rawWrittenBundle,
+        expectedBundleDigest,
+        expectedBundleBytes,
+      );
       const writtenBundle = snapshotBundleRecord(
-        await awaitDeadline((context) => dependencies.bundles.write(
-          input.bundleDirectory,
-          copyBundleEntries(bundleEntries),
-          maximumBundleBytes,
-          context,
-        )),
+        rawWrittenBundle,
         "bundle write result",
       );
+      bundle = writtenBundle;
+      const ownedBundleForWrite = writtenBundle;
       assertDeadline();
       if (
         writtenBundle.directory !== input.bundleDirectory ||
@@ -849,8 +902,7 @@ export async function runDelivery(
       }
       const verifiedBundle = snapshotVerifiedBundle(
         await awaitDeadline((context) => dependencies.bundles.verify(
-          ownedBundleForWrite.directory,
-          ownedBundleForWrite.artifactSha256,
+          ownedBundleForWrite,
           maximumBundleBytes,
           context,
         )),
@@ -863,6 +915,7 @@ export async function runDelivery(
         verifiedBundle.directory !== ownedBundleForWrite.directory ||
         verifiedBundle.artifactSha256 !== ownedBundleForWrite.artifactSha256 ||
         verifiedBundle.bytes !== ownedBundleForWrite.bytes ||
+        verifiedBundle.ownershipToken !== ownedBundleForWrite.ownershipToken ||
         digestDeliveryEntries(verifiedBundle.entries) !== expectedBundleDigest ||
         deliveryBundleBytes(verifiedBundle.entries) !== expectedBundleBytes ||
         verifiedBundle.entries.length !== bundleEntries.length ||
@@ -959,7 +1012,10 @@ export async function runDelivery(
       return await removeAfterFailure(
         workspace,
         dependencies,
-        infrastructureFailure("CLEANUP_FAILURE", `primary=result-ready; cleanup=${String(error)}`),
+        infrastructureFailure(
+          "CLEANUP_FAILURE",
+          `primary=result-ready; cleanup=${cleanupEvidence([error])}`,
+        ),
         bundle,
       );
     }
