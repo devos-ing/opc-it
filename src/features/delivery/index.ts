@@ -28,6 +28,11 @@ export type {
   DeliveryWorkspace,
   DeliveryWorkspacePort,
   FrozenWorkspace,
+  ApprovedPublisherOnboarding,
+  PublicationOutcome,
+  Publisher,
+  PublisherOnboardingManifest,
+  VerifiedCandidate,
   TargetCommandResolver,
 } from "./ports.js";
 export { DeliveryContractViolation, SandboxContractViolation } from "./ports.js";
@@ -41,3 +46,7 @@ export {
 } from "./execution.js";
 export { runDelivery } from "./run-delivery.js";
 export { snapshotResultReview, verifyResultReview } from "./verification.js";
+export {
+  snapshotApprovedPublisherOnboarding,
+  snapshotVerifiedCandidate,
+} from "./publication.js";

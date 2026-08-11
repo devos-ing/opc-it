@@ -13,6 +13,47 @@ import { renderSandboxProfile } from "./profiles.js";
 const sandboxExecPath = "/usr/bin/sandbox-exec";
 const outputLimitBytes = 1_048_576;
 const probeExecutables = ["/bin/test", "/usr/bin/nc", "/usr/bin/curl"] as const;
+type ProtectedPathKey = keyof MacosSandboxAdapterOptions["protectedPaths"];
+
+const rolePolicies = {
+  controller: {
+    githubNetwork: false,
+    ownedProtectedPath: null,
+    requiredEnvironment: "",
+    allowedEnvironment: new Set<string>(),
+  },
+  codex: {
+    githubNetwork: false,
+    ownedProtectedPath: "opcCodex",
+    requiredEnvironment: "CODEX_HOME",
+    allowedEnvironment: new Set(["CODEX_HOME"]),
+  },
+  target: {
+    githubNetwork: false,
+    ownedProtectedPath: null,
+    requiredEnvironment: "",
+    allowedEnvironment: new Set<string>(),
+  },
+  publisher: {
+    githubNetwork: true,
+    ownedProtectedPath: "github",
+    requiredEnvironment: "GH_CONFIG_DIR",
+    allowedEnvironment: new Set([
+      "PATH",
+      "GH_CONFIG_DIR",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_TERMINAL_PROMPT",
+      "LC_ALL",
+      "GIT_AUTHOR_DATE",
+      "GIT_COMMITTER_DATE",
+    ]),
+  },
+} as const satisfies Readonly<Record<SandboxRequest["role"], {
+  readonly githubNetwork: boolean;
+  readonly ownedProtectedPath: ProtectedPathKey | null;
+  readonly requiredEnvironment: string;
+  readonly allowedEnvironment: ReadonlySet<string>;
+}>>;
 
 export interface MacosSandboxAdapterOptions {
   readonly run?: (request: CommandRequest) => Promise<CommandResult>;
@@ -77,9 +118,31 @@ async function validateRequest(request: SandboxRequest): Promise<{
   readonly readOnly: readonly string[];
   readonly writable: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly network: SandboxRequest["network"];
 }> {
   const networkPolicy: unknown = request.network;
-  if (networkPolicy !== "deny") throw new SandboxContractViolation("network policy");
+  if (networkPolicy !== "deny") {
+    if (
+      !rolePolicies[request.role].githubNetwork ||
+      typeof networkPolicy !== "object" ||
+      networkPolicy === null ||
+      Array.isArray(networkPolicy) ||
+      Object.getPrototypeOf(networkPolicy) !== Object.prototype ||
+      Reflect.ownKeys(networkPolicy).length !== 3
+    ) {
+      throw new SandboxContractViolation("network policy");
+    }
+    const mode = Object.getOwnPropertyDescriptor(networkPolicy, "mode");
+    const host = Object.getOwnPropertyDescriptor(networkPolicy, "host");
+    const port = Object.getOwnPropertyDescriptor(networkPolicy, "port");
+    if (
+      mode === undefined || !("value" in mode) || mode.value !== "github-https" ||
+      host === undefined || !("value" in host) || host.value !== "github.com" ||
+      port === undefined || !("value" in port) || port.value !== 443
+    ) {
+      throw new SandboxContractViolation("network policy");
+    }
+  }
   const cwd = await requireHostPath(request.cwd, "cwd");
   const command = await requireHostPath(request.command, "command");
   const cwdStats = await lstat(cwd);
@@ -96,6 +159,7 @@ async function validateRequest(request: SandboxRequest): Promise<{
     ),
     writable: await Promise.all(request.writable.map((path) => requireHostPath(path, "writable path"))),
     env: requireEnvironment(request.env),
+    network: request.network,
   };
 }
 
@@ -126,21 +190,23 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
         keychain: await requireHostPath(protectedPaths.keychain, "protected probe path"),
         personalData: await requireHostPath(protectedPaths.personalData, "protected probe path"),
       };
-      const readable = request.role === "codex"
-        ? [...new Set([...paths.readable, ...paths.readOnly, protectedProbePaths.opcCodex])]
-        : [...new Set([...paths.readable, ...paths.readOnly])];
-      if (
-        request.role === "codex" &&
-        (Object.keys(paths.env).length !== 1 ||
-          paths.env.CODEX_HOME !== protectedProbePaths.opcCodex)
-      ) {
-        throw new SandboxContractViolation("Codex home environment boundary");
-      }
-      if (
-        request.role === "codex" &&
-        !paths.readOnly.includes(protectedProbePaths.opcCodex)
-      ) {
-        throw new SandboxContractViolation("Codex home read-only boundary");
+      const rolePolicy = rolePolicies[request.role];
+      const ownedProtectedPath = rolePolicy.ownedProtectedPath === null
+        ? undefined
+        : protectedProbePaths[rolePolicy.ownedProtectedPath];
+      const readable = [...new Set([
+        ...paths.readable,
+        ...paths.readOnly,
+        ...(ownedProtectedPath === undefined ? [] : [ownedProtectedPath]),
+      ])];
+      if (ownedProtectedPath !== undefined) {
+        if (
+          paths.env[rolePolicy.requiredEnvironment] !== ownedProtectedPath ||
+          !paths.readOnly.includes(ownedProtectedPath) ||
+          Object.keys(paths.env).some((key) => !rolePolicy.allowedEnvironment.has(key))
+        ) {
+          throw new SandboxContractViolation(`${request.role} protected read boundary`);
+        }
       }
       if (
         paths.writable.some((writable) =>
@@ -152,15 +218,9 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
       ) {
         throw new SandboxContractViolation("read-only write boundary");
       }
-      const deniedProbePaths = request.role === "codex"
-        ? [
-            protectedProbePaths.dailyCodex,
-            protectedProbePaths.github,
-            protectedProbePaths.ssh,
-            protectedProbePaths.keychain,
-            protectedProbePaths.personalData,
-          ]
-        : Object.values(protectedProbePaths);
+      const deniedProbePaths = Object.entries(protectedProbePaths)
+        .filter(([key]) => key !== rolePolicy.ownedProtectedPath)
+        .map(([, path]) => path);
       if (!Number.isSafeInteger(request.deadlineEpochMs) || request.deadlineEpochMs <= 0) {
         throw new SandboxContractViolation("execution deadline");
       }
@@ -169,6 +229,7 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
         executables: [...roleExecutables, ...probeExecutables],
         readable,
         writable: paths.writable,
+        network: paths.network,
       });
       const invoke = (
         command: string,
@@ -249,22 +310,24 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
           });
         });
       }
-      const publicNetworkProbe = await invoke("/usr/bin/curl", [
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--connect-timeout",
-        "1",
-        "--max-time",
-        "2",
-        "https://example.com/",
-      ]);
-      if (
-        publicNetworkProbe.status !== "fail" ||
-        publicNetworkProbe.exitCode === null ||
-        ![1, 5, 6, 7, 28, 35, 52, 56].includes(publicNetworkProbe.exitCode)
-      ) {
-        throw new SandboxContractViolation("public network permission probe");
+      if (paths.network === "deny") {
+        const publicNetworkProbe = await invoke("/usr/bin/curl", [
+          "--fail",
+          "--silent",
+          "--show-error",
+          "--connect-timeout",
+          "1",
+          "--max-time",
+          "2",
+          "https://example.com/",
+        ]);
+        if (
+          publicNetworkProbe.status !== "fail" ||
+          publicNetworkProbe.exitCode === null ||
+          ![1, 5, 6, 7, 28, 35, 52, 56].includes(publicNetworkProbe.exitCode)
+        ) {
+          throw new SandboxContractViolation("public network permission probe");
+        }
       }
       return invoke(paths.command, request.args, request.input);
     },

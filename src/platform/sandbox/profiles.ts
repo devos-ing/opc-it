@@ -39,6 +39,7 @@ export function renderSandboxProfile(input: {
   readonly executables: readonly string[];
   readonly readable: readonly string[];
   readonly writable: readonly string[];
+  readonly network?: SandboxRequest["network"];
 }): string {
   const executables = [...new Set(input.executables)];
   const readable = [...new Set([...systemReadRules, ...executables, ...input.readable, ...input.writable])];
@@ -52,7 +53,9 @@ export function renderSandboxProfile(input: {
     literalRules("file-read*", systemReadLiterals),
     subpathRules("file-read*", readable),
     subpathRules("file-write*", input.writable),
-    "(deny network*)",
+    input.network === "deny" || input.network === undefined
+      ? "(deny network*)"
+      : '(allow network-outbound (remote tcp "github.com:443"))',
   ]
     .filter(Boolean)
     .join("\n");

@@ -20,7 +20,13 @@ export interface SandboxRequest {
   readonly readable: readonly string[];
   readonly readOnly?: readonly string[];
   readonly writable: readonly string[];
-  readonly network: "deny";
+  readonly network:
+    | "deny"
+    | {
+        readonly mode: "github-https";
+        readonly host: "github.com";
+        readonly port: 443;
+      };
   readonly deadlineEpochMs: number;
   readonly input?: string;
 }
@@ -274,3 +280,40 @@ export type DeliveryOutcome =
   | { readonly status: "work-failure"; readonly report: FailureReport }
   | { readonly status: "infrastructure-failure"; readonly report: FailureReport }
   | { readonly status: "approval-required"; readonly reason: string };
+
+export type VerifiedCandidate = Extract<DeliveryOutcome, { readonly status: "result-ready" }>;
+
+export interface PublisherOnboardingManifest {
+  readonly version: 1;
+  readonly githubLogin: string;
+  readonly repositories: readonly string[];
+  readonly author: {
+    readonly name: string;
+    readonly email: string;
+  };
+  readonly githubConfigDirectory: string;
+}
+
+export interface ApprovedPublisherOnboarding {
+  readonly manifest: PublisherOnboardingManifest;
+  readonly digest: Sha256;
+}
+
+export type PublicationOutcome =
+  | {
+      readonly status: "published";
+      readonly branch: string;
+      readonly commitSha: string;
+      readonly treeSha: string;
+      readonly reused: boolean;
+    }
+  | {
+      readonly status: "ambiguous";
+      readonly branch: string;
+      readonly commitSha: string;
+      readonly reason: "PUSH_TIMEOUT";
+    };
+
+export interface Publisher {
+  publish(candidate: VerifiedCandidate): Promise<PublicationOutcome>;
+}

@@ -23,6 +23,9 @@ function snapshotRequest(request: SandboxRequest): SandboxRequest {
       ? {}
       : { readOnly: Object.freeze([...request.readOnly]) }),
     writable: Object.freeze([...request.writable]),
+    network: request.network === "deny"
+      ? "deny"
+      : Object.freeze({ ...request.network }),
   });
 }
 

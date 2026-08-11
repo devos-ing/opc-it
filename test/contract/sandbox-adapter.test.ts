@@ -44,6 +44,40 @@ function everyRoleAllows(
   };
 }
 
+async function expectNetworkAuthorityRejected(
+  role: "target" | "publisher",
+  network: unknown,
+): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), "opc-sandbox-network-reject-"));
+  try {
+    const cwd = await realpath(root);
+    let executed = false;
+    const sandbox = createMacosSandboxAdapter({
+      protectedPaths: protectedProbes(Array.from({ length: 6 }, () => cwd)),
+      allowedCommands: everyRoleAllows(["/usr/bin/true"]),
+      run: () => {
+        executed = true;
+        throw new Error("must not execute");
+      },
+    });
+    const error = await sandbox.run({
+      role,
+      command: "/usr/bin/true",
+      args: [],
+      cwd,
+      env: {},
+      readable: [cwd],
+      writable: [cwd],
+      network,
+      deadlineEpochMs: Date.now() + 5_000,
+    } as Parameters<typeof sandbox.run>[0]).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
+    expect(executed).toBeFalse();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 const nestedSandbox = await runBounded({
   command: "/usr/bin/sandbox-exec",
   args: ["-n", "no-network", "/usr/bin/true"],
@@ -170,6 +204,100 @@ test("sandbox paths reject traversal before profile rendering", async () => {
     .catch((reason: unknown) => reason);
   expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
   expect(executed).toBeFalse();
+});
+
+test("only Publisher can request the closed GitHub HTTPS network authority", async () => {
+  await expectNetworkAuthorityRejected(
+    "target",
+    { mode: "github-https", host: "github.com", port: 443 },
+  );
+});
+
+test("Publisher rejects any network host other than canonical github.com", async () => {
+  await expectNetworkAuthorityRejected(
+    "publisher",
+    { mode: "github-https", host: "example.com", port: 443 },
+  );
+});
+
+test("Publisher reads only exact gh config while other protected classes stay denied", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opc-sandbox-publisher-role-"));
+  try {
+    const worktree = join(root, "worktree");
+    const protectedRoot = join(root, "protected");
+    const protectedPaths = [
+      "daily-codex",
+      "opc-codex",
+      "gh-config",
+      "ssh",
+      "keychain",
+      "personal",
+    ].map((name) => join(protectedRoot, name));
+    await Promise.all([mkdir(worktree), mkdir(protectedRoot)]);
+    await Promise.all(protectedPaths.map((path) => mkdir(path)));
+    const canonicalWorktree = await realpath(worktree);
+    const canonicalProtected = await Promise.all(protectedPaths.map((path) => realpath(path)));
+    const ghConfig = canonicalProtected[2];
+    if (ghConfig === undefined) throw new Error("missing gh config fixture");
+    const profiles: string[] = [];
+    const sandbox = createMacosSandboxAdapter({
+      protectedPaths: protectedProbes(canonicalProtected),
+      allowedCommands: {
+        controller: ["/usr/bin/true"],
+        codex: ["/usr/bin/true"],
+        target: ["/usr/bin/true"],
+        publisher: ["/usr/bin/true"],
+      },
+      run(request) {
+        const [profileFlag, profile, command, access, path] = request.args;
+        expect(profileFlag).toBe("-p");
+        if (profile !== undefined) profiles.push(profile);
+        if (command === "/bin/test") {
+          const shouldPass =
+            (access === "-r" && (path === canonicalWorktree || path === ghConfig)) ||
+            (access === "-w" && path === canonicalWorktree);
+          return Promise.resolve({
+            status: shouldPass ? "pass" : "fail",
+            exitCode: shouldPass ? 0 : 1,
+            stdout: "",
+            stderr: "",
+            durationMs: 0,
+          });
+        }
+        if (command === "/usr/bin/nc") {
+          return Promise.resolve({ status: "fail", exitCode: 1, stdout: "", stderr: "", durationMs: 0 });
+        }
+        return Promise.resolve({ status: "pass", exitCode: 0, stdout: "ok", stderr: "", durationMs: 0 });
+      },
+    });
+
+    const result = await sandbox.run({
+      role: "publisher",
+      command: "/usr/bin/true",
+      args: [],
+      cwd: canonicalWorktree,
+      env: {
+        PATH: "/usr/bin:/bin",
+        GH_CONFIG_DIR: ghConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        LC_ALL: "C",
+      },
+      readable: [canonicalWorktree],
+      readOnly: [ghConfig],
+      writable: [canonicalWorktree],
+      network: { mode: "github-https", host: "github.com", port: 443 },
+      deadlineEpochMs: Date.now() + 5_000,
+    });
+    expect(result).toMatchObject({ status: "pass", stdout: "ok" });
+    expect(profiles.every((profile) =>
+      profile.includes('host-owned role: publisher') &&
+      profile.includes('(allow network-outbound (remote tcp "github.com:443"))') &&
+      profile.includes(ghConfig)
+    )).toBeTrue();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("sandbox paths reject symlinks before profile rendering", async () => {
@@ -604,7 +732,9 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
       }),
     );
     const opcRoleProbe = roleProbes[1];
+    const githubRoleProbe = roleProbes[2];
     if (opcRoleProbe === undefined) throw new Error("missing OPC role probe");
+    if (githubRoleProbe === undefined) throw new Error("missing GitHub role probe");
     const roles = ["controller", "codex", "target", "publisher"] as const;
     const createRoleCommand = async (role: (typeof roles)[number]): Promise<string> => {
         const path = join(root, `${role}-command`);
@@ -626,8 +756,10 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
         if (
           childCommand === "/bin/test" &&
           request.args[3] === "-r" &&
-          request.args[4] === opcRoleProbe &&
-          request.args[1]?.includes("host-owned role: codex") === true
+          ((request.args[4] === opcRoleProbe &&
+            request.args[1]?.includes("host-owned role: codex") === true) ||
+            (request.args[4] === githubRoleProbe &&
+              request.args[1]?.includes("host-owned role: publisher") === true))
         ) {
           return Promise.resolve({
             status: "pass",
@@ -666,9 +798,17 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
         command: roleCommands[role][0] ?? "",
         args: [],
         cwd,
-        env: role === "codex" ? { CODEX_HOME: opcRoleProbe } : {},
+        env: role === "codex"
+          ? { CODEX_HOME: opcRoleProbe }
+          : role === "publisher"
+            ? { GH_CONFIG_DIR: githubRoleProbe }
+            : {},
         readable: [cwd],
-        ...(role === "codex" ? { readOnly: [opcRoleProbe] } : {}),
+        ...(role === "codex"
+          ? { readOnly: [opcRoleProbe] }
+          : role === "publisher"
+            ? { readOnly: [githubRoleProbe] }
+            : {}),
         writable: [cwd],
         network: "deny",
         deadlineEpochMs: Date.now() + 5_000,
