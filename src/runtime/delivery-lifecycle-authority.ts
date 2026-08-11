@@ -24,13 +24,14 @@ import type { LeaseMutationCoordinator } from "./lease-mutation-coordinator.js";
 function assertDeliveryContextActive(
   delivery: EnabledDeliveryRuntime,
   context: DaemonDeliveryContext,
+  allowElapsedDeadline = false,
 ): void {
   if (context.signal.aborted) throw new TypeError("DELIVERY_ABORTED");
   const now: unknown = delivery.now();
   if (
     typeof now !== "number" ||
     !Number.isSafeInteger(now) ||
-    now >= context.deadlineEpochMs
+    (!allowElapsedDeadline && now >= context.deadlineEpochMs)
   ) throw new TypeError("DELIVERY_DEADLINE_ELAPSED");
 }
 
@@ -102,13 +103,44 @@ export async function recheckDeliveryProjection(
   boundary: DeliveryLoopBoundary,
   context: DaemonDeliveryContext,
 ): Promise<void> {
-  assertDeliveryContextActive(delivery, context);
+  await recheckDeliveryProjectionAuthority(
+    configured,
+    delivery,
+    boundary,
+    context,
+    false,
+  );
+}
+
+export async function recheckRecoveryTerminalAuthority(
+  configured: EnabledRepositoryRuntime,
+  delivery: EnabledDeliveryRuntime,
+  boundary: DeliveryLoopBoundary,
+  context: DaemonDeliveryContext,
+): Promise<void> {
+  await recheckDeliveryProjectionAuthority(
+    configured,
+    delivery,
+    boundary,
+    context,
+    true,
+  );
+}
+
+async function recheckDeliveryProjectionAuthority(
+  configured: EnabledRepositoryRuntime,
+  delivery: EnabledDeliveryRuntime,
+  boundary: DeliveryLoopBoundary,
+  context: DaemonDeliveryContext,
+  allowElapsedDeadline: boolean,
+): Promise<void> {
+  assertDeliveryContextActive(delivery, context, allowElapsedDeadline);
   if (!(await currentRepositoryEnabled(configured))) throw new TypeError("DELIVERY_DISABLED");
-  assertDeliveryContextActive(delivery, context);
+  assertDeliveryContextActive(delivery, context, allowElapsedDeadline);
   const pending: unknown = delivery.revalidate(boundary, context);
   if (!(pending instanceof Promise)) throw new TypeError("INVALID_DELIVERY_REVALIDATION");
   const result: unknown = await pending;
-  assertDeliveryContextActive(delivery, context);
+  assertDeliveryContextActive(delivery, context, allowElapsedDeadline);
   if (
     ownDataProperty(result, "enabled") !== true ||
     ownDataProperty(result, "policyDigest") !== context.approvedPolicyDigest ||

@@ -41,6 +41,7 @@ import {
   latestLeaseLifecycleTransition,
   recheckDeliveryBoundary,
   recheckDeliveryProjection,
+  recheckRecoveryTerminalAuthority,
 } from "./delivery-lifecycle-authority.js";
 import { startLeaseHeartbeat } from "./lease-heartbeat.js";
 import { createLeaseMutationCoordinator } from "./lease-mutation-coordinator.js";
@@ -289,10 +290,16 @@ export async function resumeInterruptedRecovery(
   const issue = issues.get(issueNumber);
   const timeline = timelines.get(issueNumber);
   const metadata = pending.transition.payload.metadata;
+  const recoveryLeaseAuthority = timeline?.leaseAuthority ?? timeline?.accepted.findLast(
+    ({ payload }) =>
+      payload.event === "claim" &&
+      payload.metadata.lease_id === metadata.lease_id,
+  );
   if (
     issue === undefined ||
-    timeline?.current?.payload.event !== "work-failure" ||
-    timeline.leaseAuthority === undefined
+    (timeline?.current?.payload.event !== "work-failure" &&
+      timeline?.current?.payload.event !== "block") ||
+    recoveryLeaseAuthority === undefined
   ) {
     throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   }
@@ -336,7 +343,7 @@ export async function resumeInterruptedRecovery(
     throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   }
   await assertRecoveryIssueRooted(configured, issue, root, attempt);
-  const claim = signTransition(timeline.leaseAuthority.payload, configured.signingKey);
+  const claim = signTransition(recoveryLeaseAuthority.payload, configured.signingKey);
   const context: DaemonDeliveryContext = Object.freeze({
     repository: configured.repository,
     issueNumber,
@@ -354,7 +361,29 @@ export async function resumeInterruptedRecovery(
     ),
     signal,
   });
-  await recheckDeliveryBoundary(configured, delivery, "result", context);
+  const exhaustedBlockReplay = timeline.current.payload.event === "block";
+  const assertRecoveryMutation = exhaustedBlockReplay
+    ? async (): Promise<void> => {
+        await recheckRecoveryTerminalAuthority(configured, delivery, "result", context);
+        const current = readTrustedTimeline(
+          await configured.github.listTransitions(configured.repository, context.issueNumber),
+          configured.verificationKeys,
+          { issueNumber: context.issueNumber, workId: context.workId },
+          context.contractDigest,
+        );
+        const historicalClaim = current.accepted.findLast(({ payload }) =>
+          payload.event === "claim" &&
+          payload.metadata.lease_id === context.claim.payload.metadata.lease_id
+        );
+        if (
+          current.current?.payload.event !== "block" ||
+          historicalClaim === undefined ||
+          JSON.stringify(signTransition(historicalClaim.payload, configured.signingKey)) !==
+            JSON.stringify(context.claim)
+        ) throw new TypeError("INVALID_RECOVERY_CONTINUATION");
+      }
+    : () => recheckDeliveryBoundary(configured, delivery, "result", context);
+  await assertRecoveryMutation();
   await recoverWork({
     repository: configured.repository,
     rootIssueNumber,
@@ -375,10 +404,10 @@ export async function resumeInterruptedRecovery(
     signingKey: configured.signingKey,
     verificationKeys: configured.verificationKeys,
     now: delivery.now,
-    assertMutationAuthority: () =>
-      recheckDeliveryBoundary(configured, delivery, "result", context),
-    assertProjectionAuthority: () =>
-      recheckDeliveryProjection(configured, delivery, "result", context),
+    assertMutationAuthority: assertRecoveryMutation,
+    assertProjectionAuthority: exhaustedBlockReplay
+      ? () => recheckRecoveryTerminalAuthority(configured, delivery, "result", context)
+      : () => recheckDeliveryProjection(configured, delivery, "result", context),
   }, configured.github);
   return true;
 }

@@ -178,7 +178,7 @@ test("blocks a 24-hour continuous outage even immediately after reclaim", () => 
   ).toBe("block");
 });
 
-test("a valid heartbeat after an outage starts clears continuous outage time", () => {
+test("a valid heartbeat renews the lease without clearing continuous outage time", () => {
   expect(
     decideLease({
       now,
@@ -186,7 +186,7 @@ test("a valid heartbeat after an outage starts clears continuous outage time", (
       lastHeartbeatAt: new Date("2026-08-10T09:30:00.000Z"),
       outageStartedAt: new Date("2026-08-09T09:00:00.000Z"),
     }),
-  ).toBe("requeue");
+  ).toBe("block");
 });
 
 test("rejects non-causal lease timestamps", () => {
@@ -827,7 +827,7 @@ test("preserves the first signed outage across requeue and reclaim, then blocks 
   });
 });
 
-test("a later valid heartbeat clears signed outage history before the next stale lease", async () => {
+test("a later valid heartbeat cannot clear signed outage history before reconciliation", async () => {
   const github = createInMemoryGitHub({
     now: () => "2026-08-09T08:00:00.000Z",
   });
@@ -872,7 +872,7 @@ test("a later valid heartbeat clears signed outage history before the next stale
     occurredAt: "2026-08-10T10:05:00.000Z",
   });
 
-  expect(result).toMatchObject({ active: 1, kept: 0, requeued: 1, blocked: 0 });
+  expect(result).toMatchObject({ active: 1, kept: 0, requeued: 0, blocked: 1 });
   const transitions = await github.listTransitions(repository, issueNumber);
   expect(
     verifyTransition(
@@ -880,8 +880,8 @@ test("a later valid heartbeat clears signed outage history before the next stale
       { "key-a": signingKey },
     ),
   ).toMatchObject({
-    event: "lease-expired",
-    metadata: { outage_started_at: "2026-08-09T10:05:00.000Z" },
+    event: "outage-block",
+    metadata: { outage_started_at: "2026-08-09T09:00:00.000Z" },
   });
 });
 

@@ -104,12 +104,7 @@ export function decideLease(input: DecideLeaseInput): LeaseDecision {
   ) {
     throw new TypeError("INVALID_LEASE_INPUT: non-causal timestamps");
   }
-  const activeOutageStartedAt =
-    input.outageStartedAt !== undefined &&
-    (input.lastHeartbeatAt === undefined ||
-      input.lastHeartbeatAt.getTime() <= input.outageStartedAt.getTime())
-      ? input.outageStartedAt
-      : undefined;
+  const activeOutageStartedAt = input.outageStartedAt;
   if (
     activeOutageStartedAt !== undefined &&
     nowAt - activeOutageStartedAt.getTime() >=
@@ -273,12 +268,6 @@ export function analyzeLeaseTimeline(
       if (seenHeartbeatIds.has(heartbeatIdentity)) continue;
       seenHeartbeatIds.add(heartbeatIdentity);
       lastHeartbeatAt = timestamp;
-      if (
-        outageStartedAt !== undefined &&
-        timestamp.getTime() > outageStartedAt.getTime()
-      ) {
-        outageStartedAt = undefined;
-      }
     } else if (authorityDigest !== undefined) {
       const recordedOutage = reconciliationOutage(
         transition,

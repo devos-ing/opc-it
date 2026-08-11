@@ -225,11 +225,20 @@ export function arbitrateRepositoryJournal(
     ) {
       rootWorkIdByIssue.set(issueNumber, payload.metadata.root_work_id);
     }
-    if (
+    const pendingRootIssueNumber = Number(
+      pendingRecovery?.transition.payload.metadata.root_issue_number,
+    );
+    const completesExhaustedRecovery =
+      pendingRecovery !== undefined &&
+      payload.event === "block" &&
+      Number.isSafeInteger(pendingRootIssueNumber) &&
+      issueNumber === pendingRootIssueNumber;
+    const leavesPendingRecovery =
       pendingRecovery?.transition.payload.issue_number === issueNumber &&
       payload.from === "recovering" &&
-      payload.to !== "recovering"
-    ) {
+      payload.to !== "recovering" &&
+      payload.event !== "block";
+    if (completesExhaustedRecovery || leavesPendingRecovery) {
       pendingRecovery = undefined;
       pendingRecoveryLeaseAuthority = undefined;
     }

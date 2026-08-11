@@ -256,13 +256,7 @@ export async function reconcileRepository(
       );
     }
     const lastActivityAt = entry.timeline.lastHeartbeatAt ?? new Date(claim.payload.occurred_at);
-    const outageStartedAt =
-      entry.timeline.outageStartedAt !== undefined &&
-      (entry.timeline.lastHeartbeatAt === undefined ||
-        entry.timeline.lastHeartbeatAt.getTime() <=
-          entry.timeline.outageStartedAt.getTime())
-        ? entry.timeline.outageStartedAt
-        : lastActivityAt;
+    const outageStartedAt = entry.timeline.outageStartedAt ?? lastActivityAt;
     const event =
       decision === "block"
         ? "outage-block"

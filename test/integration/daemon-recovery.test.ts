@@ -8,6 +8,7 @@ import {
 import { decodeWorkBody, submitWork } from "../../src/features/planning/index.js";
 import { DeliveryContractViolation } from "../../src/features/delivery/index.js";
 import {
+  appendHeartbeat,
   deriveRecoveryWorkId,
   maximumQueueTransitionRecordBytes,
   pollAndClaim,
@@ -26,6 +27,7 @@ import {
   resumeInterruptedRecovery,
 } from "../../src/runtime/delivery-recovery-orchestration.js";
 import type { EnabledRepositoryRuntime } from "../../src/runtime/run-enabled-tick.js";
+import { runEnabledTick } from "../../src/runtime/run-enabled-tick.js";
 
 const signingKey = "recovery-secret";
 const installation = Object.freeze({ id: "recovery-daemon", keyId: "recovery-key" });
@@ -207,6 +209,52 @@ async function claimAndStart(
   return claim;
 }
 
+async function reclaimAndStartRoot(
+  fixture: Awaited<ReturnType<typeof runningRoot>>,
+  leaseId: string,
+  claimedAt: string,
+): Promise<SignedTransition> {
+  const claimed = await pollAndClaim({
+    repository: validV2Contract.repository,
+    github: fixture.github,
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    leaseId,
+    occurredAt: claimedAt,
+    leaseExpiresAt: new Date(Date.parse(claimedAt) + 30 * 60_000).toISOString(),
+  });
+  if (
+    claimed.status !== "claimed" ||
+    claimed.issueNumber !== fixture.issueNumber ||
+    claimed.workId !== validV2Contract.work_id
+  ) throw new Error("root fixture was not reclaimed");
+  const claim = signTransition(claimed.claim, signingKey);
+  const startedAt = new Date(Date.parse(claimedAt) + 1_000).toISOString();
+  await fixture.github.appendTransition(
+    validV2Contract.repository,
+    fixture.issueNumber,
+    JSON.stringify(signTransition({
+      version: 1,
+      installation_id: installation.id,
+      key_id: installation.keyId,
+      issue_number: fixture.issueNumber,
+      work_id: validV2Contract.work_id,
+      from: "claimed",
+      event: "start",
+      to: "running",
+      occurred_at: startedAt,
+      metadata: { lease_id: leaseId, plan_digest: fixture.digest },
+    }, signingKey)),
+  );
+  await fixture.github.setStateLabel(
+    validV2Contract.repository,
+    fixture.issueNumber,
+    "opc:running",
+  );
+  return claim;
+}
+
 function recoveryInput(
   fixture: Awaited<ReturnType<typeof runningRoot>>,
   overrides: Partial<Parameters<typeof recoverWork>[0]> = {},
@@ -239,6 +287,43 @@ function recoveryInput(
     assertMutationAuthority: () => Promise.resolve(),
     assertProjectionAuthority: () => Promise.resolve(),
     ...overrides,
+  };
+}
+
+function enabledRecoveryRuntime(
+  fixture: Awaited<ReturnType<typeof runningRoot>>,
+  now: string,
+): EnabledRepositoryRuntime {
+  return {
+    repository: validV2Contract.repository,
+    isEnabled: () => Promise.resolve(true),
+    github: fixture.github,
+    journal: {
+      loadInstallation: () => Promise.resolve(undefined),
+      saveInstallation: () => Promise.resolve(),
+      loadCursor: () => Promise.resolve(undefined),
+      saveCursor: () => Promise.resolve(),
+    },
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    createLeaseId: () => "recovery-next-tick",
+    delivery: {
+      approvedPolicyDigest: fixture.digest,
+      recoveryPolicyCeiling,
+      now: () => Date.parse(now),
+      runDelivery: () => Promise.reject(new Error("DELIVERY_MUST_NOT_RERUN")),
+      publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
+      revalidate: (_boundary, context) => Promise.resolve({
+        enabled: true,
+        policyDigest: context.approvedPolicyDigest,
+        baseSha: context.contract.base_sha,
+        contractDigest: context.contractDigest,
+        repositoryAllowed: true,
+        leaseActive: true,
+        claim: context.claim,
+      }),
+    },
   };
 }
 
@@ -388,6 +473,85 @@ test("an infrastructure failure requeues the same Work without consuming an atte
     occurredAt: "2026-08-11T23:30:04.000Z",
     leaseExpiresAt: "2026-08-12T00:00:04.000Z",
   })).status).toBe("claimed");
+  expect(await reconcileRepository({
+    repository: validV2Contract.repository,
+    github: fixture.github,
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    occurredAt: "2026-08-12T00:00:04.000Z",
+  })).toMatchObject({ blocked: 1, requeued: 0 });
+  expect((await fixture.github.findWork(
+    validV2Contract.repository,
+    validV2Contract.work_id,
+  ))?.stateLabel).toBe("opc:blocked");
+});
+
+test("an infrastructure outage keeps its first signed start across reclaim, heartbeat, and repeated incidents", async () => {
+  const fixture = await runningRoot();
+  const failure = {
+    category: "INFRASTRUCTURE_FAILURE" as const,
+    code: "WORKSPACE_FAILURE" as const,
+    summary: "runner unavailable",
+    durationMs: 10,
+  };
+  await recoverWork(recoveryInput(fixture, { failure }), fixture.github);
+
+  const secondClaim = await reclaimAndStartRoot(
+    fixture,
+    "infrastructure-reclaim-2",
+    "2026-08-11T12:00:00.000Z",
+  );
+  await appendHeartbeat({
+    repository: validV2Contract.repository,
+    github: fixture.github,
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    issueNumber: fixture.issueNumber,
+    workId: validV2Contract.work_id,
+    digest: fixture.digest,
+    leaseId: "infrastructure-reclaim-2",
+    occurredAt: "2026-08-11T12:05:00.000Z",
+  });
+  await recoverWork(recoveryInput(fixture, {
+    claim: secondClaim,
+    failure,
+    occurredAt: "2026-08-11T12:06:00.000Z",
+    deadlineEpochMs: Date.parse("2026-08-11T12:30:00.000Z"),
+    now: () => Date.parse("2026-08-11T12:06:00.000Z"),
+  }), fixture.github);
+
+  const incidents = await fixture.github.listTransitions(
+    validV2Contract.repository,
+    fixture.issueNumber,
+  );
+  const latestIncident = verifyTransition(
+    JSON.parse(incidents.at(-1)?.record ?? "null") as unknown,
+    { [installation.keyId]: signingKey },
+  );
+  expect(latestIncident).toMatchObject({
+    event: "incident",
+    metadata: { outage_started_at: "2026-08-11T00:00:04.000Z" },
+  });
+
+  await reclaimAndStartRoot(
+    fixture,
+    "infrastructure-reclaim-3",
+    "2026-08-11T23:59:00.000Z",
+  );
+  await appendHeartbeat({
+    repository: validV2Contract.repository,
+    github: fixture.github,
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    issueNumber: fixture.issueNumber,
+    workId: validV2Contract.work_id,
+    digest: fixture.digest,
+    leaseId: "infrastructure-reclaim-3",
+    occurredAt: "2026-08-11T23:59:30.000Z",
+  });
   expect(await reconcileRepository({
     repository: validV2Contract.repository,
     github: fixture.github,
@@ -737,6 +901,87 @@ test("the third Work Failure blocks the root chain without creating a fourth att
   ))?.stateLabel).toBe("opc:blocked");
   expect((await fixture.github.listJournalCandidates(validV2Contract.repository)).issues)
     .toHaveLength(3);
+});
+
+test("the next tick completes root blocking after a crash between attempt-three terminal mutations", async () => {
+  const fixture = await runningRoot();
+  const second = await recoverWork(recoveryInput(fixture), fixture.github);
+  if (second.status !== "requeued") throw new Error("expected attempt two");
+  const secondWorkId = deriveRecoveryWorkId(validV2Contract.work_id, 2);
+  const secondClaim = await claimAndStart(
+    fixture.github,
+    second.issueNumber,
+    secondWorkId,
+    fixture.digest,
+    2,
+  );
+  const third = await recoverWork(recoveryInput(fixture, {
+    issueNumber: second.issueNumber,
+    workId: secondWorkId,
+    attempt: 2,
+    claim: secondClaim,
+    occurredAt: "2026-08-11T00:02:02.000Z",
+  }), fixture.github);
+  if (third.status !== "requeued") throw new Error("expected attempt three");
+  const thirdWorkId = deriveRecoveryWorkId(validV2Contract.work_id, 3);
+  const thirdClaim = await claimAndStart(
+    fixture.github,
+    third.issueNumber,
+    thirdWorkId,
+    fixture.digest,
+    3,
+  );
+  const crashingRepository: QueueRepository = {
+    ...fixture.github,
+    appendTransition: async (repository, issueNumber, record) => {
+      const transition = verifyTransition(JSON.parse(record) as unknown, {
+        [installation.keyId]: signingKey,
+      });
+      if (transition.event === "block" && issueNumber === fixture.issueNumber) {
+        throw new Error("ROOT_BLOCK_APPEND_CRASH");
+      }
+      await fixture.github.appendTransition(repository, issueNumber, record);
+    },
+  };
+  const crash = await recoverWork(recoveryInput(fixture, {
+    issueNumber: third.issueNumber,
+    workId: thirdWorkId,
+    attempt: 3,
+    claim: thirdClaim,
+    occurredAt: "2026-08-11T00:03:02.000Z",
+  }), crashingRepository).catch((caught: unknown) => caught);
+  expect((crash as Error).message).toBe("ROOT_BLOCK_APPEND_CRASH");
+
+  expect(await runEnabledTick({
+    now: new Date("2026-08-11T00:33:03.000Z"),
+    repositories: [enabledRecoveryRuntime(fixture, "2026-08-11T00:33:03.000Z")],
+  })).toMatchObject({ status: "worked" });
+  expect((await fixture.github.findWork(
+    validV2Contract.repository,
+    validV2Contract.work_id,
+  ))?.stateLabel).toBe("opc:blocked");
+  expect((await fixture.github.findWork(
+    validV2Contract.repository,
+    thirdWorkId,
+  ))?.stateLabel).toBe("opc:blocked");
+  const rootBlocks = await fixture.github.listTransitions(
+    validV2Contract.repository,
+    fixture.issueNumber,
+  );
+  const childBlocks = await fixture.github.listTransitions(
+    validV2Contract.repository,
+    third.issueNumber,
+  );
+  expect(rootBlocks.filter(({ record }) =>
+    verifyTransition(JSON.parse(record) as unknown, {
+      [installation.keyId]: signingKey,
+    }).event === "block"
+  )).toHaveLength(1);
+  expect(childBlocks.filter(({ record }) =>
+    verifyTransition(JSON.parse(record) as unknown, {
+      [installation.keyId]: signingKey,
+    }).event === "block"
+  )).toHaveLength(1);
 });
 
 test("an elapsed absolute deadline fails before a recovery transition or child", async () => {

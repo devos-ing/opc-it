@@ -3,6 +3,7 @@ import { canonicalize } from "json-canonicalize";
 import type { Sha256 } from "../../domain/identity.js";
 import type { FailureReport } from "../delivery/index.js";
 import {
+  analyzeLeaseTimeline,
   arbitrateRepositoryJournal,
   deriveRecoveryWorkId,
   parseRecoveryWorkId,
@@ -320,8 +321,9 @@ function assertDeadline(input: RecoveryInput): void {
 async function readAuthority(
   input: RecoveryInput,
   repository: RecoveryRepository,
+  allowElapsedDeadline = false,
 ): Promise<AuthoritySnapshot> {
-  assertDeadline(input);
+  if (!allowElapsedDeadline) assertDeadline(input);
   const batch = await repository.listJournalCandidates(input.repository);
   if (batch.diagnostics.length > 0) {
     throw new DomainError("INCOMPLETE_ISSUE", "Recovery repository contains malformed Work");
@@ -341,11 +343,15 @@ async function readAuthority(
     timelines.set(issue.number, timeline);
     entries.push({ issueNumber: issue.number, timeline });
   }
+  if (!allowElapsedDeadline) assertDeadline(input);
   return { issues, timelines, authority: arbitrateRepositoryJournal(entries) };
 }
 
 function leaseId(timeline: TrustedTimeline): string {
-  const value = timeline.leaseAuthority?.payload.metadata.lease_id;
+  const authority = timeline.leaseAuthority ?? timeline.accepted.findLast(
+    ({ payload }) => payload.event === "claim",
+  );
+  const value = authority?.payload.metadata.lease_id;
   if (typeof value !== "string" || value.length === 0) {
     throw new DomainError("INCOMPLETE_CLAIM_METADATA", "Recovery lease");
   }
@@ -432,8 +438,10 @@ async function transition(
   issueNumber: number,
   event: QueueWorkEvent,
   metadata: Readonly<Record<string, string>>,
+  allowElapsedDeadline = false,
+  requireExactReplay = false,
 ): Promise<void> {
-  const before = await readAuthority(input, repository);
+  const before = await readAuthority(input, repository, allowElapsedDeadline);
   const issue = before.issues.get(issueNumber);
   const current = before.timelines.get(issueNumber)?.current;
   if (issue === undefined) {
@@ -456,7 +464,16 @@ async function transition(
           : undefined;
   if (to === undefined) throw new DomainError("INVALID_TRANSITION", event);
   const transitionMetadata: Readonly<Record<string, string>> = event === "incident"
-    ? Object.freeze({
+    ? Object.freeze((() => {
+        const timeline = before.timelines.get(issueNumber);
+        const priorOutage = timeline === undefined
+          ? undefined
+          : analyzeLeaseTimeline(
+              timeline,
+              issue.digest,
+              new Date(input.occurredAt),
+            ).outageStartedAt;
+        return {
         ...metadata,
         event_id: reconciliationEventId({
           issueNumber: issue.number,
@@ -466,11 +483,12 @@ async function transition(
           event,
           to,
         }),
-        outage_started_at: input.occurredAt,
+        outage_started_at: priorOutage?.toISOString() ?? input.occurredAt,
         proposal_id: `recovery-incident:${issue.workId}:${input.occurredAt}`,
         reconcile_decision: "requeue",
         reconciled_at: input.occurredAt,
-      })
+        };
+      })())
     : metadata;
   if (current?.payload.event === event) {
     const actual = current.payload.metadata;
@@ -485,6 +503,9 @@ async function transition(
     }
     return;
   }
+  if (requireExactReplay) {
+    throw new DomainError("INVALID_TRANSITION", "expired Recovery continuation mismatch");
+  }
   const signed = signTransition({
     version: 1,
     installation_id: input.installation.id,
@@ -498,11 +519,11 @@ async function transition(
     metadata: transitionMetadata,
   }, input.signingKey);
   const record = validateQueueTransitionRecord(JSON.stringify(signed));
-  assertDeadline(input);
+  if (!allowElapsedDeadline) assertDeadline(input);
   await input.assertMutationAuthority();
-  assertDeadline(input);
+  if (!allowElapsedDeadline) assertDeadline(input);
   await repository.appendTransition(input.repository, issue.number, record);
-  const after = await readAuthority(input, repository);
+  const after = await readAuthority(input, repository, allowElapsedDeadline);
   const accepted = after.timelines.get(issue.number)?.current?.payload;
   if (
     accepted === undefined ||
@@ -512,9 +533,9 @@ async function transition(
   ) {
     throw new DomainError("INVALID_TRANSITION", `Recovery transition lost #${String(issue.number)}`);
   }
-  assertDeadline(input);
+  if (!allowElapsedDeadline) assertDeadline(input);
   await input.assertProjectionAuthority();
-  assertDeadline(input);
+  if (!allowElapsedDeadline) assertDeadline(input);
   await repository.setStateLabel(input.repository, issue.number, `opc:${to}`);
 }
 
@@ -550,7 +571,6 @@ export async function recoverWork(
   repository: RecoveryRepository,
 ): Promise<RecoveryOutcome> {
   const input = snapshotRecoveryInput(value);
-  assertDeadline(input);
   const claim = verifyTransition(input.claim, input.verificationKeys);
   const recoveryId = parseRecoveryWorkId(input.workId);
   if (
@@ -569,7 +589,7 @@ export async function recoverWork(
   ) {
     throw new DomainError("INVALID_TRANSITION", "Recovery claim authority mismatch");
   }
-  const initial = await readAuthority(input, repository);
+  const initial = await readAuthority(input, repository, true);
   const currentIssue = initial.issues.get(input.issueNumber);
   const rootIssue = initial.issues.get(input.rootIssueNumber);
   const currentTimeline = initial.timelines.get(input.issueNumber);
@@ -622,27 +642,41 @@ export async function recoverWork(
     root_work_id: input.rootWorkId,
   });
 
+  const effectiveAttemptLimit = input.authorityDelta?.attempts ?? contract.limits.attempts;
+  const exhaustedBlockReplay = currentTimeline.current?.payload.event === "block";
+  if (exhaustedBlockReplay && input.attempt < effectiveAttemptLimit) {
+    throw new DomainError("INVALID_TRANSITION", "premature Recovery block");
+  }
+  if (!exhaustedBlockReplay) assertDeadline(input);
   if (classified.category === "infrastructure") {
+    if (exhaustedBlockReplay) {
+      throw new DomainError("INVALID_TRANSITION", "infrastructure Recovery block");
+    }
     await transition(input, repository, input.issueNumber, "incident", commonMetadata);
     return Object.freeze({ status: "requeued", issueNumber: input.issueNumber });
   }
 
-  await transition(input, repository, input.issueNumber, "work-failure", commonMetadata);
-  const effectiveAttemptLimit = input.authorityDelta?.attempts ?? contract.limits.attempts;
+  if (!exhaustedBlockReplay) {
+    await transition(input, repository, input.issueNumber, "work-failure", commonMetadata);
+  }
   if (input.attempt >= effectiveAttemptLimit) {
-    const latest = await readAuthority(input, repository);
+    const latest = await readAuthority(input, repository, exhaustedBlockReplay);
     const current = latest.timelines.get(input.issueNumber);
     await transition(input, repository, input.issueNumber, "block", {
       ...commonMetadata,
       lease_id: current === undefined ? "" : leaseId(current),
-    });
+    }, exhaustedBlockReplay, exhaustedBlockReplay);
     if (input.rootIssueNumber !== input.issueNumber) {
-      const root = (await readAuthority(input, repository)).timelines.get(input.rootIssueNumber);
+      const root = (await readAuthority(
+        input,
+        repository,
+        exhaustedBlockReplay,
+      )).timelines.get(input.rootIssueNumber);
       if (root?.current?.payload.to === "recovering") {
         await transition(input, repository, input.rootIssueNumber, "block", {
           ...commonMetadata,
           lease_id: leaseId(root),
-        });
+        }, exhaustedBlockReplay);
       }
     }
     return Object.freeze({ status: "blocked" });
