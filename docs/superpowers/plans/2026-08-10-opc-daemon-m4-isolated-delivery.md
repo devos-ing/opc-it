@@ -25,9 +25,9 @@
 
 **Files:** Create sandbox feature files; test `test/contract/sandbox-adapter.test.ts`.
 
-- [ ] Write failing contract tests using temporary sentinel files named as daily Codex, OPC Codex, gh, SSH, Keychain, and personal data. Assert the Target profile can read/write only worktree/temp, cannot connect to `127.0.0.1` or public HTTPS in deny mode, and receives only explicit environment keys.
-- [ ] Run `rtk bun test test/contract/sandbox-adapter.test.ts`; expect missing adapter.
-- [ ] Define the seam and production request:
+- [x] Write failing contract tests using temporary sentinel files named as daily Codex, OPC Codex, gh, SSH, Keychain, and personal data. Assert the Target profile can read/write only worktree/temp, cannot connect to `127.0.0.1` or public HTTPS in deny mode, and receives only explicit environment keys.
+- [x] Run `rtk bun test test/contract/sandbox-adapter.test.ts`; expect missing adapter.
+- [x] Define the seam and production request:
 
 ```ts
 export interface SandboxRunner {
@@ -36,8 +36,10 @@ export interface SandboxRunner {
 ```
 
 Generate role-specific profiles from host-owned templates, reject symlink/traversal paths before rendering, use `extendEnv:false`, and run the same permission probes before each attempt. A failed probe returns `CONTRACT_VIOLATION`, never a warning.
-- [ ] Run the contract on macOS plus `test/integration/process-runner.test.ts`; expect all denial probes pass.
-- [ ] Commit `feat: enforce daemon sandbox roles`.
+- [x] Run the contract on macOS plus `test/integration/process-runner.test.ts`; expect all denial probes pass.
+- [x] Commit `feat: enforce daemon sandbox roles`.
+
+Task 1 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error` because `macos-sandbox-adapter.js` did not exist. The stabilized focused contract and legacy process-runner regression are `11 pass / 1 skip / 0 fail`; deterministic permission tests cover six temporary credential-class sentinels, live loopback denial, public-HTTPS denial, exact non-inherited environment, one decreasing absolute deadline, mandatory pre-attempt probes, symlink/traversal rejection, fail-closed sandbox application, and OS-filtered role executable separation. The one skip is narrowly limited to this already-Seatbelt-confined Codex parent: the harmless preflight `/usr/bin/sandbox-exec -n no-network /usr/bin/true` returns exit `71` with `sandbox_apply: Operation not permitted`; any other preflight failure runs and fails the real contract instead of skipping, and an unsandboxed Mac runs the real sentinel contract automatically. No adapter fallback executes outside `sandbox-exec`. Final full verification is `770 pass / 1 exact parent-Seatbelt skip / 0 fail`; lint, typecheck, build, and diff checks exit `0`. No real credentials, production network, Keychain, GitHub, Codex, Telegram, or persistent host path was used; filesystem writes were confined to cleaned temporary sentinels. Independent Spec review and repaired Standards re-review report `0 findings / 0 findings`.
 
 ### Task 2: Bind Codex to the approved home and absolute deadline
 
