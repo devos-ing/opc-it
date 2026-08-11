@@ -12,6 +12,23 @@ export type {
   SandboxRunner,
   WorkFailureCode,
   WorkFailureReport,
+  DeliveryBundleEntry,
+  DeliveryBundlePort,
+  DeliveryBundleRecord,
+  DeliveryVerifiedBundle,
+  DeliveryChange,
+  DeliveryChangeCollector,
+  DeliveryDependencies,
+  DeliveryGate,
+  DeliveryInput,
+  DeliveryOutcome,
+  DeliveryOperationContext,
+  DeliveryPhase,
+  DeliveryRevalidation,
+  DeliveryWorkspace,
+  DeliveryWorkspacePort,
+  FrozenWorkspace,
+  TargetCommandResolver,
 } from "./ports.js";
 export { DeliveryContractViolation, SandboxContractViolation } from "./ports.js";
 export {
@@ -20,4 +37,7 @@ export {
   snapshotCommandResult,
   snapshotCodexAttemptManifest,
   snapshotCodexRequest,
+  snapshotDeliveryInput,
 } from "./execution.js";
+export { runDelivery } from "./run-delivery.js";
+export { snapshotResultReview, verifyResultReview } from "./verification.js";

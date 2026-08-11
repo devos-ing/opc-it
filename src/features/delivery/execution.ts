@@ -8,15 +8,17 @@ import type {
   CodexRequest,
   CodexRunManifest,
   CommandResult,
+  DeliveryInput,
   ExecutorOutput,
 } from "./ports.js";
 import { DeliveryContractViolation } from "./ports.js";
+import { validateExecutionContract } from "../planning/index.js";
 
 function invalid(name: string): never {
   throw new DeliveryContractViolation(name);
 }
 
-function exactDataRecord(
+export function exactDataRecord(
   value: unknown,
   expectedKeys: readonly string[],
   name: string,
@@ -238,6 +240,122 @@ function requiredStringOrEmpty(value: unknown, name: string, maximumBytes: numbe
     return invalid(name);
   }
   return value;
+}
+
+export function snapshotJsonData(value: unknown, name: string): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) invalid(name);
+    return value;
+  }
+  if (typeof value !== "object" || types.isProxy(value)) invalid(name);
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) invalid(name);
+    const result: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) invalid(name);
+      result.push(snapshotJsonData(descriptor.value, name));
+    }
+    if (Reflect.ownKeys(value).length !== value.length + 1) invalid(name);
+    return result;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) invalid(name);
+  const result: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") invalid(name);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) invalid(name);
+    result[key] = snapshotJsonData(descriptor.value, name);
+  }
+  return result;
+}
+
+export function deepFreezeJsonData<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if ("value" in descriptor) deepFreezeJsonData(descriptor.value);
+  }
+  return Object.isFrozen(value) ? value : Object.freeze(value);
+}
+
+function stringRecord(value: unknown, name: string): Readonly<Record<string, string>> {
+  const snapshot = snapshotJsonData(value, name);
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) invalid(name);
+  const result: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(snapshot)) {
+    if (key.length === 0 || key.includes("\0") || typeof entry !== "string" || entry.includes("\0")) invalid(name);
+    result[key] = entry;
+  }
+  return Object.freeze(result);
+}
+
+export function snapshotDeliveryInput(value: DeliveryInput): DeliveryInput {
+  const input = exactDataRecord(value, [
+    "claim",
+    "verificationKeys",
+    "contract",
+    "approvalDigest",
+    "approvedCodexManifestDigest",
+    "approvedPolicyDigest",
+    "approvedPolicy",
+    "repositoryPath",
+    "worktreeRoot",
+    "bundleDirectory",
+    "attempt",
+    "startedAtEpochMs",
+    "deadlineEpochMs",
+    "codexManifest",
+    "context",
+  ], "delivery input");
+  const approvalDigest = requiredString(input.approvalDigest, "approval digest", 71);
+  const approvedCodexManifestDigest = requiredString(
+    input.approvedCodexManifestDigest,
+    "Codex manifest digest",
+    71,
+  );
+  const approvedPolicyDigest = requiredString(input.approvedPolicyDigest, "policy digest", 71);
+  if (
+    !/^sha256:[0-9a-f]{64}$/u.test(approvalDigest) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(approvedCodexManifestDigest) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(approvedPolicyDigest)
+  ) invalid("delivery digest");
+  if (
+    (input.attempt !== 1 && input.attempt !== 2 && input.attempt !== 3) ||
+    !Number.isSafeInteger(input.startedAtEpochMs) || Number(input.startedAtEpochMs) <= 0 ||
+    !Number.isSafeInteger(input.deadlineEpochMs) || Number(input.deadlineEpochMs) <= 0
+  ) invalid("delivery timing");
+  const contract = validateExecutionContract(snapshotJsonData(input.contract, "delivery contract"));
+  const approvedPolicy = snapshotJsonData(input.approvedPolicy, "approved policy");
+  if (digestCanonical(approvedPolicy) !== approvedPolicyDigest) invalid("policy digest");
+  const manifestValue = snapshotJsonData(input.codexManifest, "Codex attempt manifest") as CodexAttemptManifest;
+  const manifest = snapshotCodexAttemptManifest(manifestValue, approvedCodexManifestDigest);
+  if (
+    manifest.execute.profile !== contract.codex.executor.profile ||
+    manifest.execute.model !== contract.codex.executor.model ||
+    manifest.review.profile !== contract.codex.reviewer.profile ||
+    manifest.review.model !== contract.codex.reviewer.model ||
+    Number(input.deadlineEpochMs) - Number(input.startedAtEpochMs) >
+      contract.limits.timeout_minutes * 60_000 ||
+    input.attempt > contract.limits.attempts
+  ) invalid("delivery authority");
+  return Object.freeze({
+    claim: snapshotJsonData(input.claim, "signed claim") as DeliveryInput["claim"],
+    verificationKeys: stringRecord(input.verificationKeys, "verification keys"),
+    contract,
+    approvalDigest: approvalDigest as DeliveryInput["approvalDigest"],
+    approvedCodexManifestDigest: approvedCodexManifestDigest as DeliveryInput["approvedCodexManifestDigest"],
+    approvedPolicyDigest: approvedPolicyDigest,
+    approvedPolicy,
+    repositoryPath: absolutePath(input.repositoryPath, "repository path"),
+    worktreeRoot: absolutePath(input.worktreeRoot, "worktree root"),
+    bundleDirectory: absolutePath(input.bundleDirectory, "bundle directory"),
+    attempt: input.attempt,
+    startedAtEpochMs: Number(input.startedAtEpochMs),
+    deadlineEpochMs: Number(input.deadlineEpochMs),
+    codexManifest: manifest,
+    context: snapshotJsonData(input.context, "delivery context"),
+  });
 }
 
 export function parseExecutorOutput(text: string): ExecutorOutput {

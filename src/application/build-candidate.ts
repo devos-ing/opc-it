@@ -1,6 +1,8 @@
-import { execa } from "execa";
 import { canonicalize } from "json-canonicalize";
-import { collectChanges } from "../adapters/local/change-collector.js";
+import {
+  collectCandidateDiff,
+  collectChanges,
+} from "../adapters/local/change-collector.js";
 import {
   digestBundleEntries,
   writeBundle,
@@ -44,34 +46,6 @@ export interface BuiltCandidate {
 
 function canonicalBytes(value: unknown): Uint8Array {
   return Buffer.from(canonicalize(value));
-}
-
-async function candidateDiff(
-  workspace: string,
-  baseSha: string,
-  addedPaths: readonly string[],
-): Promise<Uint8Array> {
-  if (addedPaths.length > 0) {
-    await execa("git", ["-C", workspace, "add", "--intent-to-add", "--", ...addedPaths], {
-      reject: true,
-    });
-  }
-  const result = await execa(
-    "git",
-    [
-      "-C",
-      workspace,
-      "diff",
-      "--binary",
-      "--full-index",
-      "--no-ext-diff",
-      "--no-renames",
-      baseSha,
-      "--",
-    ],
-    { reject: true, stripFinalNewline: false },
-  );
-  return Buffer.from(result.stdout);
 }
 
 export async function buildCandidate(input: BuildCandidateInput): Promise<BuiltCandidate> {
@@ -131,7 +105,7 @@ export async function buildCandidate(input: BuildCandidateInput): Promise<BuiltC
     });
   }
 
-  const diff = await candidateDiff(
+  const diff = await collectCandidateDiff(
     input.workspace,
     input.contract.base_sha,
     changes.filter((change) => change.operation === "add").map((change) => change.path),

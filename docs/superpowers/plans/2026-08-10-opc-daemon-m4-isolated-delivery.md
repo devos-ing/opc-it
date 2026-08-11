@@ -57,10 +57,10 @@ Task 2 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error
 
 **Files:** Create `ports.ts`, `run-delivery.ts`, `verification.ts`, `index.ts`; migrate local helpers behind ports; test `test/integration/daemon-delivery.test.ts`.
 
-- [ ] Write a failing happy-path test that starts from a signed Claim, creates a detached worktree at approved base SHA, runs bootstrap/evidence in Target profile, collects only indexed regular files, reviews in a fresh Codex session, and returns `ResultReady` without pushing.
-- [ ] Add negative tests for forbidden path, untracked symlink, evidence failure, extra bundle file, reviewer mismatch, policy drift, base drift, elapsed deadline, and disabled gate before every phase.
-- [ ] Run the focused test; expect `runDelivery` missing.
-- [ ] Implement the public result union:
+- [x] Write a failing happy-path test that starts from a signed Claim, creates a detached worktree at approved base SHA, runs bootstrap/evidence in Target profile, collects only indexed regular files, reviews in a fresh Codex session, and returns `ResultReady` without pushing.
+- [x] Add negative tests for forbidden path, untracked symlink, evidence failure, extra bundle file, reviewer mismatch, policy drift, base drift, elapsed deadline, and disabled gate before every phase.
+- [x] Run the focused test; expect `runDelivery` missing.
+- [x] Implement the public result union:
 
 ```ts
 export type DeliveryOutcome =
@@ -71,7 +71,9 @@ export type DeliveryOutcome =
 ```
 
 `runDelivery` alone sequences revalidation, workspace, bootstrap, Codex, evidence, review, and cleanup. Callers cannot invoke publication from an unverified candidate.
-- [ ] Run focused tests and all existing candidate/evidence/workspace tests; expect 0 failures, then commit `feat: verify daemon delivery candidates`.
+- [x] Run focused tests and all existing candidate/evidence/workspace tests; expect 0 failures, then commit `feat: verify daemon delivery candidates`.
+
+Task 3 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error` because `runDelivery` was not exported. The final focused delivery plus existing change-collector/evidence-bundle/workspace regressions are `49 pass / 0 fail` with `138` expectations. Delivery revalidates the exact signed claim, heartbeat-derived lease authority, approved policy/base/contract/Codex manifest, and one abortable absolute deadline at every phase; creates only the approved detached workspace; runs Target bootstrap/evidence in the deny-network sandbox; recollects and hashes the exact indexed regular-file tree after evidence and after freeze; independently verifies canonical bundle bytes; runs a fresh read-only Codex review; recursively freezes `ResultReady`; and cleans only owned resources within a fixed grace bound. Negative coverage includes forbidden and unsafe post-evidence/freeze paths, untracked symlinks, evidence and review failures, bundle extras/tampering/redirects/partial writes, authority drift, expired deadlines, disabled gates, hostile accessors, workspace mutation, and cleanup failures. Final full verification is `823 pass / 1 exact parent-Seatbelt skip / 0 fail` with `2447` expectations; lint, typecheck, build, and diff checks exit `0`. Independent Spec and Standards re-reviews report `0 findings / 0 findings`. No real Target command, Codex session, network access, publication, push, credential read, or persistent host mutation was used.
 
 ### Task 4: Publish exactly one commit through `gh`
 

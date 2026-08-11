@@ -1,8 +1,9 @@
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { canonicalize } from "json-canonicalize";
 import { DomainError } from "../../domain/errors.js";
 import type { Sha256 } from "../../domain/identity.js";
+import type { DeliveryOperationContext } from "../../features/delivery/index.js";
 import { assertSafeRepositoryPath, sha256Bytes } from "../../security/content.js";
 
 export interface BundleEntry {
@@ -28,6 +29,12 @@ export interface VerifiedBundle extends BundleRecord {
 
 function comparePaths(left: { path: string }, right: { path: string }): number {
   return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+}
+
+function assertOperationActive(context: DeliveryOperationContext | undefined): void {
+  if (context?.signal.aborted) {
+    throw new DomainError("EXECUTION_TIMEOUT", "delivery operation aborted");
+  }
 }
 
 function assertAllowedBundlePath(path: string): void {
@@ -62,13 +69,18 @@ function objectCode(value: unknown): unknown {
   return typeof value === "object" && value !== null && "code" in value ? value.code : undefined;
 }
 
-async function prepareRoot(root: string): Promise<string> {
+async function prepareRoot(
+  root: string,
+  context?: DeliveryOperationContext,
+): Promise<string> {
+  assertOperationActive(context);
   const existing = await lstat(root).catch((error: unknown) => {
     if (objectCode(error) === "ENOENT") return undefined;
     throw error;
   });
   if (existing?.isSymbolicLink()) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
   await mkdir(root, { recursive: true, mode: 0o700 });
+  assertOperationActive(context);
   const resolvedRoot = await realpath(root);
   if (resolvedRoot === resolve("/")) throw new DomainError("UNSAFE_BUNDLE_PATH", root);
   const existingEntries = await readdir(resolvedRoot, { withFileTypes: true });
@@ -87,7 +99,9 @@ async function writeContainedFile(
   path: string,
   bytes: Uint8Array,
   mode: number,
+  context?: DeliveryOperationContext,
 ): Promise<void> {
+  assertOperationActive(context);
   assertAllowedBundlePath(path);
   const target = resolve(root, path);
   assertContained(root, target, path);
@@ -95,7 +109,7 @@ async function writeContainedFile(
   const parent = await realpath(dirname(target));
   assertContained(root, parent, path, true);
   try {
-    await writeFile(target, bytes, { mode, flag: "wx" });
+    await writeFile(target, bytes, { mode, flag: "wx", signal: context?.signal });
   } catch (error) {
     throw new DomainError("UNSAFE_BUNDLE_PATH", `${path}:${String(objectCode(error))}`);
   }
@@ -118,7 +132,9 @@ export async function writeBundle(
   root: string,
   entries: readonly BundleEntry[],
   maximumBytes: number,
+  context?: DeliveryOperationContext,
 ): Promise<BundleRecord> {
+  assertOperationActive(context);
   const ordered = [...entries].sort(comparePaths);
   const paths = ordered.map((entry) => entry.path);
   for (const path of paths) assertAllowedBundlePath(path);
@@ -129,9 +145,15 @@ export async function writeBundle(
   const total = ordered.reduce((sum, entry) => sum + entry.bytes.byteLength, indexBytes.byteLength);
   if (total > maximumBytes) throw new DomainError("EVIDENCE_BUNDLE_TOO_LARGE", String(total));
 
-  const directory = await prepareRoot(root);
-  for (const entry of ordered) await writeContainedFile(directory, entry.path, entry.bytes, 0o600);
-  await writeFile(resolve(directory, "bundle-index.json"), indexBytes, { mode: 0o600, flag: "wx" });
+  const directory = await prepareRoot(root, context);
+  for (const entry of ordered) {
+    await writeContainedFile(directory, entry.path, entry.bytes, 0o600, context);
+  }
+  await writeFile(resolve(directory, "bundle-index.json"), indexBytes, {
+    mode: 0o600,
+    flag: "wx",
+    signal: context?.signal,
+  });
   return { directory, artifactSha256: sha256Bytes(indexBytes), bytes: total };
 }
 
@@ -170,7 +192,12 @@ function parseIndex(value: unknown): BundleIndexEntry[] {
   return entries;
 }
 
-async function readContainedFile(root: string, path: string): Promise<Uint8Array> {
+async function readContainedFile(
+  root: string,
+  path: string,
+  context?: DeliveryOperationContext,
+): Promise<Uint8Array> {
+  assertOperationActive(context);
   assertAllowedBundlePath(path);
   const target = resolve(root, path);
   assertContained(root, target, path);
@@ -178,7 +205,7 @@ async function readContainedFile(root: string, path: string): Promise<Uint8Array
   if (!stats.isFile() || stats.isSymbolicLink()) throw new DomainError("UNSAFE_BUNDLE_PATH", path);
   const resolvedTarget = await realpath(target);
   assertContained(root, resolvedTarget, path);
-  return readFile(resolvedTarget);
+  return readFile(resolvedTarget, { signal: context?.signal });
 }
 
 interface BundleFilesystem {
@@ -186,10 +213,14 @@ interface BundleFilesystem {
   readonly directories: readonly string[];
 }
 
-async function bundleFilesystem(root: string): Promise<BundleFilesystem> {
+async function bundleFilesystem(
+  root: string,
+  context?: DeliveryOperationContext,
+): Promise<BundleFilesystem> {
   const files: string[] = [];
   const directories: string[] = [];
   const visit = async (directory: string, prefix: string): Promise<void> => {
+    assertOperationActive(context);
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -219,8 +250,12 @@ function indexedDirectories(paths: readonly string[]): string[] {
   return [...directories].toSorted();
 }
 
-async function assertExactFilesystem(root: string, index: readonly BundleIndexEntry[]): Promise<void> {
-  const filesystem = await bundleFilesystem(root);
+async function assertExactFilesystem(
+  root: string,
+  index: readonly BundleIndexEntry[],
+  context?: DeliveryOperationContext,
+): Promise<void> {
+  const filesystem = await bundleFilesystem(root, context);
   const expectedFiles = [...index.map((entry) => entry.path), "bundle-index.json"].toSorted();
   const expectedDirectories = indexedDirectories(index.map((entry) => entry.path));
   if (
@@ -238,7 +273,9 @@ export async function verifyBundle(
   root: string,
   expectedArtifactSha256: Sha256,
   maximumBytes: number,
+  context?: DeliveryOperationContext,
 ): Promise<VerifiedBundle> {
+  assertOperationActive(context);
   const rootStats = await lstat(root);
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
     throw new DomainError("UNSAFE_BUNDLE_PATH", root);
@@ -249,7 +286,7 @@ export async function verifyBundle(
   if (!indexStats.isFile() || indexStats.isSymbolicLink()) {
     throw new DomainError("UNSAFE_BUNDLE_PATH", "bundle-index.json");
   }
-  const indexBytes = await readFile(indexPath);
+  const indexBytes = await readFile(indexPath, { signal: context?.signal });
   if (indexBytes.byteLength > maximumBytes) {
     throw new DomainError("EVIDENCE_BUNDLE_TOO_LARGE", String(indexBytes.byteLength));
   }
@@ -264,11 +301,11 @@ export async function verifyBundle(
     throw new DomainError("INVALID_BUNDLE_INDEX", "invalid JSON");
   }
   const index = parseIndex(parsed);
-  await assertExactFilesystem(directory, index);
+  await assertExactFilesystem(directory, index, context);
   const entries: BundleEntry[] = [];
   let total = indexBytes.byteLength;
   for (const item of index) {
-    const entryBytes = await readContainedFile(directory, item.path);
+    const entryBytes = await readContainedFile(directory, item.path, context);
     total += entryBytes.byteLength;
     if (total > maximumBytes) throw new DomainError("EVIDENCE_BUNDLE_TOO_LARGE", String(total));
     if (entryBytes.byteLength !== item.bytes || sha256Bytes(entryBytes) !== item.sha256) {
@@ -277,4 +314,13 @@ export async function verifyBundle(
     entries.push({ path: item.path, bytes: entryBytes });
   }
   return { directory, artifactSha256: actualArtifactSha256, bytes: total, entries };
+}
+
+export async function cleanupBundle(
+  bundle: BundleRecord,
+  context?: DeliveryOperationContext,
+): Promise<void> {
+  assertOperationActive(context);
+  await rm(bundle.directory, { recursive: true, force: true });
+  assertOperationActive(context);
 }

@@ -1,4 +1,7 @@
-import type { ResultReviewContract } from "../../domain/contracts.js";
+import type { ResultManifest, ResultReviewContract } from "../../domain/contracts.js";
+import type { Sha256 } from "../../domain/identity.js";
+import type { ValidatedExecutionContract } from "../planning/index.js";
+import type { SignedTransition } from "../queue/index.js";
 
 export interface CommandResult {
   readonly status: "pass" | "fail" | "timeout" | "output-limit";
@@ -70,7 +73,12 @@ export type WorkFailureCode =
   | "CODEX_EXECUTION_TIMEOUT"
   | "CODEX_OUTPUT_LIMIT"
   | "EXECUTOR_REPORTED_FAILURE"
-  | "REVIEW_REPORTED_FAILURE";
+  | "REVIEW_REPORTED_FAILURE"
+  | "BOOTSTRAP_FAILED"
+  | "EVIDENCE_FAILED"
+  | "PATH_POLICY_FAILED"
+  | "REVIEW_MISMATCH"
+  | "EXECUTION_TIMEOUT";
 
 export interface WorkFailureReport {
   readonly category: "WORK_FAILURE";
@@ -81,7 +89,12 @@ export interface WorkFailureReport {
 
 export interface InfrastructureFailureReport {
   readonly category: "INFRASTRUCTURE_FAILURE";
-  readonly code: "CODEX_SERVICE_UNAVAILABLE";
+  readonly code:
+    | "CODEX_SERVICE_UNAVAILABLE"
+    | "WORKSPACE_FAILURE"
+    | "BUNDLE_FAILURE"
+    | "CLEANUP_FAILURE"
+    | "DELIVERY_INFRASTRUCTURE_FAILURE";
   readonly summary: string;
   readonly durationMs: number;
 }
@@ -105,3 +118,159 @@ export interface CodexEngine {
   execute(request: CodexRequest): Promise<CodexOutcome<ExecutorOutput>>;
   review(request: CodexRequest): Promise<CodexOutcome<ResultReviewContract>>;
 }
+
+export type DeliveryPhase =
+  | "workspace"
+  | "bootstrap"
+  | "execute"
+  | "collect"
+  | "evidence"
+  | "review"
+  | "freeze";
+
+export interface DeliveryOperationContext {
+  readonly deadlineEpochMs: number;
+  readonly signal: AbortSignal;
+  readonly timeoutMilliseconds: number;
+}
+
+export interface DeliveryRevalidation {
+  readonly enabled: boolean;
+  readonly policyDigest: Sha256;
+  readonly baseSha: string;
+  readonly contractDigest: Sha256;
+  readonly repositoryAllowed: boolean;
+  readonly leaseActive: boolean;
+  readonly claim: SignedTransition;
+}
+
+export interface DeliveryGate {
+  revalidate(
+    phase: DeliveryPhase,
+    context: DeliveryOperationContext,
+  ): Promise<DeliveryRevalidation>;
+}
+
+export interface DeliveryWorkspace {
+  readonly repository: string;
+  readonly root: string;
+  readonly path: string;
+  readonly workId: string;
+  readonly baseSha: string;
+}
+
+export interface FrozenWorkspace {
+  readonly path: string;
+  readonly candidateDigest: Sha256;
+}
+
+export interface DeliveryWorkspacePort {
+  create(input: {
+    readonly repository: string;
+    readonly root: string;
+    readonly workId: string;
+    readonly baseSha: string;
+  }, context: DeliveryOperationContext): Promise<DeliveryWorkspace>;
+  freeze(input: {
+    readonly workspace: DeliveryWorkspace;
+    readonly candidateDigest: Sha256;
+  }, context: DeliveryOperationContext): Promise<FrozenWorkspace>;
+  remove(workspace: DeliveryWorkspace, context: DeliveryOperationContext): Promise<void>;
+}
+
+export interface DeliveryChange {
+  readonly path: string;
+  readonly operation: "add" | "modify" | "delete";
+  readonly mode: "100644" | "100755";
+  readonly content: Uint8Array;
+  readonly contentSha256: Sha256;
+}
+
+export interface DeliveryChangeCollector {
+  collect(
+    workspace: string,
+    baseSha: string,
+    context: DeliveryOperationContext,
+  ): Promise<readonly DeliveryChange[]>;
+  diff(
+    workspace: string,
+    baseSha: string,
+    addedPaths: readonly string[],
+    context: DeliveryOperationContext,
+  ): Promise<Uint8Array>;
+}
+
+export interface TargetCommandResolver {
+  resolve(command: string, context: DeliveryOperationContext): Promise<string>;
+}
+
+export interface DeliveryBundleEntry {
+  readonly path: string;
+  readonly bytes: Uint8Array;
+}
+
+export interface DeliveryBundleRecord {
+  readonly directory: string;
+  readonly artifactSha256: Sha256;
+  readonly bytes: number;
+}
+
+export interface DeliveryVerifiedBundle extends DeliveryBundleRecord {
+  readonly entries: readonly DeliveryBundleEntry[];
+}
+
+export interface DeliveryBundlePort {
+  write(
+    root: string,
+    entries: readonly DeliveryBundleEntry[],
+    maximumBytes: number,
+    context: DeliveryOperationContext,
+  ): Promise<DeliveryBundleRecord>;
+  verify(
+    root: string,
+    expectedArtifactSha256: Sha256,
+    maximumBytes: number,
+    context: DeliveryOperationContext,
+  ): Promise<DeliveryVerifiedBundle>;
+  cleanup(bundle: DeliveryBundleRecord, context: DeliveryOperationContext): Promise<void>;
+}
+
+export interface DeliveryInput {
+  readonly claim: SignedTransition;
+  readonly verificationKeys: Readonly<Record<string, string>>;
+  readonly contract: ValidatedExecutionContract;
+  readonly approvalDigest: Sha256;
+  readonly approvedCodexManifestDigest: Sha256;
+  readonly approvedPolicyDigest: Sha256;
+  readonly approvedPolicy: unknown;
+  readonly repositoryPath: string;
+  readonly worktreeRoot: string;
+  readonly bundleDirectory: string;
+  readonly attempt: 1 | 2 | 3;
+  readonly startedAtEpochMs: number;
+  readonly deadlineEpochMs: number;
+  readonly codexManifest: CodexAttemptManifest;
+  readonly context: unknown;
+}
+
+export interface DeliveryDependencies {
+  readonly gate: DeliveryGate;
+  readonly workspace: DeliveryWorkspacePort;
+  readonly sandbox: SandboxRunner;
+  readonly targetCommands: TargetCommandResolver;
+  readonly codex: CodexEngine;
+  readonly changes: DeliveryChangeCollector;
+  readonly bundles: DeliveryBundlePort;
+  readonly now?: () => number;
+}
+
+export type DeliveryOutcome =
+  | {
+      readonly status: "result-ready";
+      readonly manifest: ResultManifest;
+      readonly review: ResultReviewContract;
+      readonly frozenWorktree: string;
+    }
+  | { readonly status: "work-failure"; readonly report: FailureReport }
+  | { readonly status: "infrastructure-failure"; readonly report: FailureReport }
+  | { readonly status: "approval-required"; readonly reason: string };

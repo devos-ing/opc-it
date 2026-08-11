@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { execa } from "execa";
 import { DomainError } from "../../domain/errors.js";
 import type { Sha256 } from "../../domain/identity.js";
+import type { DeliveryOperationContext } from "../../features/delivery/index.js";
 import { assertSafeRepositoryPath, sha256Bytes } from "../../security/content.js";
 
 export interface CollectedChange {
@@ -17,6 +18,23 @@ interface RawChange {
   path: string;
   operation: CollectedChange["operation"];
   mode: string;
+}
+
+function assertOperationActive(context: DeliveryOperationContext | undefined): void {
+  if (context?.signal.aborted) {
+    throw new DomainError("EXECUTION_TIMEOUT", "delivery operation aborted");
+  }
+}
+
+function commandOptions(context: DeliveryOperationContext | undefined) {
+  return context === undefined
+    ? { reject: true as const }
+    : {
+        reject: true as const,
+        cancelSignal: context.signal,
+        timeout: Math.max(1, Math.ceil(context.timeoutMilliseconds)),
+        killSignal: "SIGKILL" as const,
+      };
 }
 
 function assertContained(root: string, candidate: string): void {
@@ -65,7 +83,9 @@ function parseRawChanges(output: string): RawChange[] {
 async function readRegularFile(
   repositoryRoot: string,
   path: string,
+  context?: DeliveryOperationContext,
 ): Promise<{ mode: CollectedChange["mode"]; content: Uint8Array }> {
+  assertOperationActive(context);
   assertSafeRepositoryPath(path);
   const lexicalPath = resolve(repositoryRoot, path);
   assertContained(repositoryRoot, lexicalPath);
@@ -77,26 +97,29 @@ async function readRegularFile(
   assertContained(repositoryRoot, resolvedPath);
   return {
     mode: (stats.mode & 0o111) === 0 ? "100644" : "100755",
-    content: await readFile(resolvedPath),
+    content: await readFile(resolvedPath, { signal: context?.signal }),
   };
 }
 
 export async function collectChanges(
   repository: string,
   baseSha: string,
+  context?: DeliveryOperationContext,
 ): Promise<readonly CollectedChange[]> {
+  assertOperationActive(context);
   if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new DomainError("INVALID_BASE_SHA", baseSha);
   const repositoryRoot = await realpath(repository);
+  assertOperationActive(context);
   const raw = await execa(
     "git",
     ["-C", repositoryRoot, "diff", "--raw", "-z", "--no-renames", baseSha, "--"],
-    { reject: true },
+    commandOptions(context),
   );
   const tracked = parseRawChanges(raw.stdout);
   const untrackedResult = await execa(
     "git",
     ["-C", repositoryRoot, "ls-files", "--others", "--exclude-standard", "-z"],
-    { reject: true },
+    commandOptions(context),
   );
   const untrackedPaths = untrackedResult.stdout.split("\0").filter((path) => path.length > 0);
   const seen = new Set(tracked.map((change) => change.path));
@@ -104,7 +127,7 @@ export async function collectChanges(
   for (const path of untrackedPaths) {
     assertSafeRepositoryPath(path);
     if (seen.has(path)) throw new DomainError("INVALID_GIT_DIFF", `duplicate path:${path}`);
-    const file = await readRegularFile(repositoryRoot, path);
+    const file = await readRegularFile(repositoryRoot, path, context);
     all.push({ path, operation: "add", mode: file.mode });
   }
 
@@ -120,7 +143,7 @@ export async function collectChanges(
       });
       continue;
     }
-    const file = await readRegularFile(repositoryRoot, change.path);
+    const file = await readRegularFile(repositoryRoot, change.path, context);
     const expectedMode = regularMode(change.mode, change.path);
     if (file.mode !== expectedMode) {
       throw new DomainError("UNSUPPORTED_FILE_MODE", `${change.path}:${expectedMode}->${file.mode}`);
@@ -136,4 +159,40 @@ export async function collectChanges(
   return collected.toSorted((left, right) =>
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
+}
+
+export async function collectCandidateDiff(
+  workspace: string,
+  baseSha: string,
+  addedPaths: readonly string[],
+  context?: DeliveryOperationContext,
+): Promise<Uint8Array> {
+  assertOperationActive(context);
+  if (!/^[0-9a-f]{40}$/u.test(baseSha)) {
+    throw new DomainError("INVALID_BASE_SHA", baseSha);
+  }
+  const repositoryRoot = await realpath(workspace);
+  assertOperationActive(context);
+  for (const path of addedPaths) assertSafeRepositoryPath(path);
+  if (addedPaths.length > 0) {
+    await execa("git", ["-C", repositoryRoot, "add", "--intent-to-add", "--", ...addedPaths], {
+      ...commandOptions(context),
+    });
+  }
+  const result = await execa(
+    "git",
+    [
+      "-C",
+      repositoryRoot,
+      "diff",
+      "--binary",
+      "--full-index",
+      "--no-ext-diff",
+      "--no-renames",
+      baseSha,
+      "--",
+    ],
+    { ...commandOptions(context), stripFinalNewline: false },
+  );
+  return Buffer.from(result.stdout);
 }
