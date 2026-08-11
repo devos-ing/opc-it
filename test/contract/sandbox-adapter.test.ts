@@ -351,6 +351,7 @@ test("Target attempts probe every credential class and both denied networks befo
       writable: [await realpath(worktree), await realpath(temporary)],
       network: "deny",
       deadlineEpochMs: 6_000,
+      input: "approved stdin",
     });
 
     expect(result).toMatchObject({ status: "pass", stdout: "explicit" });
@@ -365,6 +366,183 @@ test("Target attempts probe every credential class and both denied networks befo
     expect(requests.map((request) => request.timeoutMs)).toEqual(
       requests.map((_, index) => 4_990 - index * 10),
     );
+    expect(requests.slice(0, -1).every((request) => request.input === undefined)).toBeTrue();
+    expect(requests.at(-1)?.input).toBe("approved stdin");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex positively probes its exact OPC home read-only and denies every non-owned credential", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opc-codex-sandbox-role-"));
+  try {
+    const worktree = join(root, "worktree");
+    const codexHome = join(root, "opc-codex-home");
+    const codexSessions = join(codexHome, "sessions");
+    const schemaRoot = join(root, "schemas");
+    const schemaPath = join(schemaRoot, "executor-output.schema.json");
+    const protectedRoot = join(root, "protected");
+    await Promise.all([
+      mkdir(worktree),
+      mkdir(codexSessions, { recursive: true }),
+      mkdir(schemaRoot),
+      mkdir(protectedRoot),
+    ]);
+    await writeFile(schemaPath, "{}", { mode: 0o600 });
+    const otherProtected = await Promise.all(
+      ["daily-codex", "gh", "ssh", "keychain", "personal"].map(async (name) => {
+        const path = join(protectedRoot, name);
+        await writeFile(path, "sentinel", { mode: 0o600 });
+        return realpath(path);
+      }),
+    );
+    const [dailyCodex, github, ssh, keychain, personalData] = otherProtected;
+    if (
+      dailyCodex === undefined ||
+      github === undefined ||
+      ssh === undefined ||
+      keychain === undefined ||
+      personalData === undefined
+    ) {
+      throw new Error("missing protected fixture");
+    }
+    const canonicalCodexHome = await realpath(codexHome);
+    const canonicalCodexSessions = await realpath(codexSessions);
+    const canonicalSchemaRoot = await realpath(schemaRoot);
+    const canonicalSchemaPath = await realpath(schemaPath);
+    const canonicalWorktree = await realpath(worktree);
+    const requests: CommandRequest[] = [];
+    const sandbox = createMacosSandboxAdapter({
+      protectedPaths: {
+        dailyCodex,
+        opcCodex: canonicalCodexHome,
+        github,
+        ssh,
+        keychain,
+        personalData,
+      },
+      allowedCommands: everyRoleAllows(["/usr/bin/true"]),
+      run: (request) => {
+        requests.push(request);
+        const childCommand = request.args[2];
+        const access = request.args[3];
+        const path = request.args[4];
+        if (childCommand === "/bin/test") {
+          const readableGrant = access === "-r" &&
+            (path === canonicalCodexHome ||
+              path === canonicalSchemaPath ||
+              path === canonicalWorktree);
+          const writableGrant = access === "-w" && path === canonicalWorktree;
+          if (readableGrant || writableGrant) {
+            return Promise.resolve({
+              status: "pass",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              durationMs: 1,
+            });
+          }
+          return Promise.resolve({
+            status: "fail",
+            exitCode: 1,
+            stdout: "",
+            stderr: "Operation not permitted",
+            durationMs: 1,
+          });
+        }
+        if (childCommand === "/usr/bin/nc" || childCommand === "/usr/bin/curl") {
+          return Promise.resolve({
+            status: "fail",
+            exitCode: childCommand === "/usr/bin/curl" ? 6 : 1,
+            stdout: "",
+            stderr: "Operation not permitted",
+            durationMs: 1,
+          });
+        }
+        return Promise.resolve({
+          status: "pass",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+        });
+      },
+    });
+
+    const result = await sandbox.run({
+      role: "codex",
+      command: "/usr/bin/true",
+      args: [],
+      cwd: canonicalWorktree,
+      env: { CODEX_HOME: canonicalCodexHome },
+      readable: [canonicalWorktree, canonicalCodexHome, canonicalSchemaPath],
+      readOnly: [canonicalCodexHome, canonicalSchemaPath],
+      writable: [canonicalWorktree],
+      network: "deny",
+      deadlineEpochMs: Date.now() + 5_000,
+    });
+
+    expect(result).toMatchObject({ status: "pass", exitCode: 0 });
+    expect(
+      requests.filter(
+        (request) =>
+          request.args[2] === "/bin/test" &&
+          request.args[3] === "-r" &&
+          request.args[4] === canonicalCodexHome,
+      ),
+    ).toHaveLength(1);
+    expect(
+      requests.some(
+        (request) =>
+          request.args[2] === "/bin/test" &&
+          request.args[3] === "-w" &&
+          request.args[4] === canonicalCodexHome,
+      ),
+    ).toBeFalse();
+    expect(
+      requests.filter(
+        (request) =>
+          request.args[2] === "/bin/test" && otherProtected.includes(request.args[4] ?? ""),
+      ),
+    ).toHaveLength(10);
+
+    const requestsBeforeMismatch = requests.length;
+    const mismatch = await sandbox
+      .run({
+        role: "codex",
+        command: "/usr/bin/true",
+        args: [],
+        cwd: canonicalWorktree,
+        env: { CODEX_HOME: dailyCodex },
+        readable: [canonicalWorktree, canonicalCodexHome, canonicalSchemaPath],
+        readOnly: [canonicalCodexHome, canonicalSchemaPath],
+        writable: [canonicalWorktree],
+        network: "deny",
+        deadlineEpochMs: Date.now() + 5_000,
+      })
+      .catch((caught: unknown) => caught);
+    expect(mismatch).toMatchObject({ code: "CONTRACT_VIOLATION" });
+    expect(requests).toHaveLength(requestsBeforeMismatch);
+
+    for (const hostileWritable of [canonicalCodexSessions, canonicalSchemaRoot]) {
+      const requestsBeforeWritable = requests.length;
+      const writeError = await sandbox
+        .run({
+          role: "codex",
+          command: "/usr/bin/true",
+          args: [],
+          cwd: canonicalWorktree,
+          env: { CODEX_HOME: canonicalCodexHome },
+          readable: [canonicalWorktree, canonicalCodexHome, canonicalSchemaPath],
+          readOnly: [canonicalCodexHome, canonicalSchemaPath],
+          writable: [canonicalWorktree, hostileWritable],
+          network: "deny",
+          deadlineEpochMs: Date.now() + 5_000,
+        })
+        .catch((caught: unknown) => caught);
+      expect(writeError).toMatchObject({ code: "CONTRACT_VIOLATION" });
+      expect(requests).toHaveLength(requestsBeforeWritable);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -390,6 +568,7 @@ test("the fake adapter records an immutable public request and returns its confi
     writable: ["/private/tmp"],
     network: "deny",
     deadlineEpochMs: 6_000,
+    input: "approved stdin",
   });
   args[0] = "mutated";
   env.OPC_EXPLICIT = "mutated";
@@ -406,6 +585,7 @@ test("the fake adapter records an immutable public request and returns its confi
       writable: ["/private/tmp"],
       network: "deny",
       deadlineEpochMs: 6_000,
+      input: "approved stdin",
     },
   ]);
 });
@@ -414,9 +594,17 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
   const root = await mkdtemp(join(tmpdir(), "opc-sandbox-roles-"));
   try {
     const requests: CommandRequest[] = [];
-    const roleProbe = join(root, "role-protected-sentinel");
-    await writeFile(roleProbe, "sentinel", { mode: 0o600 });
-    const canonicalRoleProbe = await realpath(roleProbe);
+    const worktree = join(root, "worktree");
+    await mkdir(worktree);
+    const roleProbes = await Promise.all(
+      ["daily", "opc", "github", "ssh", "keychain", "personal"].map(async (name) => {
+        const path = join(root, `${name}-protected-sentinel`);
+        await writeFile(path, "sentinel", { mode: 0o600 });
+        return realpath(path);
+      }),
+    );
+    const opcRoleProbe = roleProbes[1];
+    if (opcRoleProbe === undefined) throw new Error("missing OPC role probe");
     const roles = ["controller", "codex", "target", "publisher"] as const;
     const createRoleCommand = async (role: (typeof roles)[number]): Promise<string> => {
         const path = join(root, `${role}-command`);
@@ -430,13 +618,27 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
       publisher: [await createRoleCommand("publisher")],
     };
     const sandbox = createMacosSandboxAdapter({
-      protectedPaths: protectedProbes(Array.from({ length: 6 }, () => canonicalRoleProbe)),
+      protectedPaths: protectedProbes(roleProbes),
       allowedCommands: roleCommands,
       run: (request) => {
         requests.push(request);
         const childCommand = request.args[2];
         if (
-          (childCommand === "/bin/test" && request.args[4]?.includes("sentinel") === true) ||
+          childCommand === "/bin/test" &&
+          request.args[3] === "-r" &&
+          request.args[4] === opcRoleProbe &&
+          request.args[1]?.includes("host-owned role: codex") === true
+        ) {
+          return Promise.resolve({
+            status: "pass",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+          });
+        }
+        if (
+          (childCommand === "/bin/test" && roleProbes.includes(request.args[4] ?? "")) ||
           childCommand === "/usr/bin/nc" ||
           childCommand === "/usr/bin/curl"
         ) {
@@ -457,15 +659,16 @@ test("Controller, Codex, Target, and Publisher use distinct host-owned deny prof
         });
       },
     });
-    const cwd = await realpath(root);
+    const cwd = await realpath(worktree);
     for (const role of roles) {
       await sandbox.run({
         role,
         command: roleCommands[role][0] ?? "",
         args: [],
         cwd,
-        env: {},
+        env: role === "codex" ? { CODEX_HOME: opcRoleProbe } : {},
         readable: [cwd],
+        ...(role === "codex" ? { readOnly: [opcRoleProbe] } : {}),
         writable: [cwd],
         network: "deny",
         deadlineEpochMs: Date.now() + 5_000,

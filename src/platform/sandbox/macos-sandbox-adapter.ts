@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { createServer } from "node:net";
 import { runBounded, type CommandRequest } from "../../adapters/local/process-runner.js";
 import type {
@@ -65,10 +65,16 @@ function requireEnvironment(
   return Object.freeze(exactEnvironment);
 }
 
+function containsPath(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
 async function validateRequest(request: SandboxRequest): Promise<{
   readonly cwd: string;
   readonly command: string;
   readonly readable: readonly string[];
+  readonly readOnly: readonly string[];
   readonly writable: readonly string[];
   readonly env: Readonly<Record<string, string>>;
 }> {
@@ -85,6 +91,9 @@ async function validateRequest(request: SandboxRequest): Promise<{
     cwd,
     command,
     readable: await Promise.all(request.readable.map((path) => requireHostPath(path, "readable path"))),
+    readOnly: await Promise.all(
+      (request.readOnly ?? []).map((path) => requireHostPath(path, "read-only path")),
+    ),
     writable: await Promise.all(request.writable.map((path) => requireHostPath(path, "writable path"))),
     env: requireEnvironment(request.env),
   };
@@ -93,7 +102,7 @@ async function validateRequest(request: SandboxRequest): Promise<{
 export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): SandboxRunner {
   const run = options.run ?? runBounded;
   const now = options.now ?? Date.now;
-  const protectedPaths = Object.values(options.protectedPaths);
+  const protectedPaths = { ...options.protectedPaths };
   const allowedCommands: Record<SandboxRequest["role"], readonly string[]> = {
     controller: [...options.allowedCommands.controller],
     codex: [...options.allowedCommands.codex],
@@ -109,19 +118,63 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
       if (!roleExecutables.includes(paths.command)) {
         throw new SandboxContractViolation("role command boundary");
       }
-      const deniedProbePaths = await Promise.all(
-        protectedPaths.map((path) => requireHostPath(path, "protected probe path")),
-      );
+      const protectedProbePaths = {
+        dailyCodex: await requireHostPath(protectedPaths.dailyCodex, "protected probe path"),
+        opcCodex: await requireHostPath(protectedPaths.opcCodex, "protected probe path"),
+        github: await requireHostPath(protectedPaths.github, "protected probe path"),
+        ssh: await requireHostPath(protectedPaths.ssh, "protected probe path"),
+        keychain: await requireHostPath(protectedPaths.keychain, "protected probe path"),
+        personalData: await requireHostPath(protectedPaths.personalData, "protected probe path"),
+      };
+      const readable = request.role === "codex"
+        ? [...new Set([...paths.readable, ...paths.readOnly, protectedProbePaths.opcCodex])]
+        : [...new Set([...paths.readable, ...paths.readOnly])];
+      if (
+        request.role === "codex" &&
+        (Object.keys(paths.env).length !== 1 ||
+          paths.env.CODEX_HOME !== protectedProbePaths.opcCodex)
+      ) {
+        throw new SandboxContractViolation("Codex home environment boundary");
+      }
+      if (
+        request.role === "codex" &&
+        !paths.readOnly.includes(protectedProbePaths.opcCodex)
+      ) {
+        throw new SandboxContractViolation("Codex home read-only boundary");
+      }
+      if (
+        paths.writable.some((writable) =>
+          paths.readOnly.some(
+            (readOnly) =>
+              containsPath(writable, readOnly) || containsPath(readOnly, writable),
+          ),
+        )
+      ) {
+        throw new SandboxContractViolation("read-only write boundary");
+      }
+      const deniedProbePaths = request.role === "codex"
+        ? [
+            protectedProbePaths.dailyCodex,
+            protectedProbePaths.github,
+            protectedProbePaths.ssh,
+            protectedProbePaths.keychain,
+            protectedProbePaths.personalData,
+          ]
+        : Object.values(protectedProbePaths);
       if (!Number.isSafeInteger(request.deadlineEpochMs) || request.deadlineEpochMs <= 0) {
         throw new SandboxContractViolation("execution deadline");
       }
       const profile = renderSandboxProfile({
         role: request.role,
         executables: [...roleExecutables, ...probeExecutables],
-        readable: paths.readable,
+        readable,
         writable: paths.writable,
       });
-      const invoke = (command: string, args: readonly string[]): Promise<CommandResult> => {
+      const invoke = (
+        command: string,
+        args: readonly string[],
+        input?: string,
+      ): Promise<CommandResult> => {
         const currentEpochMs = now();
         if (!Number.isSafeInteger(currentEpochMs) || currentEpochMs <= 0) {
           throw new SandboxContractViolation("host clock");
@@ -135,9 +188,10 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
           env: paths.env,
           timeoutMs,
           outputLimitBytes,
+          ...(input === undefined ? {} : { input }),
         });
       };
-      for (const path of paths.readable) {
+      for (const path of readable) {
         const result = await invoke("/bin/test", ["-r", path]);
         if (result.status !== "pass" || result.exitCode !== 0) {
           throw new SandboxContractViolation("read permission probe");
@@ -212,7 +266,7 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
       ) {
         throw new SandboxContractViolation("public network permission probe");
       }
-      return invoke(paths.command, request.args);
+      return invoke(paths.command, request.args, request.input);
     },
   };
 }

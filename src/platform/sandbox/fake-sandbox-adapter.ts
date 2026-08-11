@@ -19,6 +19,9 @@ function snapshotRequest(request: SandboxRequest): SandboxRequest {
     args: Object.freeze([...request.args]),
     env: Object.freeze({ ...request.env }),
     readable: Object.freeze([...request.readable]),
+    ...(request.readOnly === undefined
+      ? {}
+      : { readOnly: Object.freeze([...request.readOnly]) }),
     writable: Object.freeze([...request.writable]),
   });
 }

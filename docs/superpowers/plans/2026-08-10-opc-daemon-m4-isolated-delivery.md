@@ -45,11 +45,13 @@ Task 1 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error
 
 **Files:** Create Codex adapters and `src/features/delivery/execution.ts`; test `test/integration/daemon-codex.test.ts`.
 
-- [ ] Write failing tests that set ambient `HOME` and `CODEX_HOME` to hostile paths, then assert the adapter uses only the manifest home/profile/model, passes no GitHub/Telegram values, honors one absolute deadline, and maps service outage to `INFRASTRUCTURE_FAILURE` versus structured executor failure to `WORK_FAILURE`.
-- [ ] Run the focused test; expect missing adapter.
-- [ ] Implement `CodexEngine.execute(request)` and `CodexEngine.review(request)` ports. Production argv must be `['exec', '--profile', request.profile, '--output-schema', request.outputSchemaPath, '-']`; both fields come from the signed host manifest. Pass the prompt on stdin, `CODEX_HOME` from the same manifest, and no inherited environment.
-- [ ] Run focused tests plus existing `test/integration/run-codex.test.ts`; expect 0 failures.
-- [ ] Commit `feat: bind daemon Codex execution`.
+- [x] Write failing tests that set ambient `HOME` and `CODEX_HOME` to hostile paths, then assert the adapter uses only the manifest home/profile/model, passes no GitHub/Telegram values, honors one absolute deadline, and maps service outage to `INFRASTRUCTURE_FAILURE` versus structured executor failure to `WORK_FAILURE`.
+- [x] Run the focused test; expect missing adapter.
+- [x] Implement `CodexEngine.execute(request)` and `CodexEngine.review(request)` ports. Production argv must be `['exec', '--profile', request.profile, '--output-schema', request.outputSchemaPath, '-']`; both fields come from the signed host manifest. Pass the prompt on stdin, `CODEX_HOME` from the same manifest, and no inherited environment.
+- [x] Run focused tests plus existing `test/integration/run-codex.test.ts`; expect 0 failures.
+- [x] Commit `feat: bind daemon Codex execution`.
+
+Task 2 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error` because the Codex execution adapter export was missing. The stabilized focused Codex, Task 1 sandbox, and legacy `run-codex` regressions are `30 pass / 1 exact parent-Seatbelt skip / 0 fail`. The digest-approved canonical attempt manifest binds the isolated OPC `CODEX_HOME`, one absolute deadline shared by execute/review, and both phases' profile/model/output-schema triples; per-call drift, hostile accessors, malformed or contradictory runner results, and unknown failure categories fail closed before authority can be widened. Production uses the exact required argv, sends only the prompt on stdin, and supplies the closed environment `{ CODEX_HOME }`, so ambient `HOME`, GitHub, and Telegram values cannot cross the boundary. The Codex sandbox positively probes canonical read-only access to the approved OPC home and schema, rejects writable ancestor/equal/descendant overlap, and continues denying daily Codex, gh, SSH, Keychain, and personal-data paths; Target continues denying all protected paths. Structured executor/reviewer failures map to `WORK_FAILURE`, while a genuine command/service outage maps to `INFRASTRUCTURE_FAILURE`. Final full verification is `787 pass / 1 exact parent-Seatbelt skip / 0 fail` with `2337` expectations; lint, typecheck, build, and diff checks exit `0`. No real Codex, network, credentials, or persistent host mutation was used. Independent Spec and Standards re-reviews report `0 findings / 0 findings`. Legacy executor parsing remains intentionally unchanged for the Task 3 migration boundary.
 
 ### Task 3: Execute and independently verify a candidate
 
