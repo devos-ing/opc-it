@@ -58,6 +58,8 @@ const rolePolicies = {
 export interface MacosSandboxAdapterOptions {
   readonly run?: (request: CommandRequest) => Promise<CommandResult>;
   readonly now?: () => number;
+  readonly publisherGhPath?: string;
+  readonly publisherGitRemoteHttpsPath?: string;
   readonly protectedPaths: {
     readonly dailyCodex: string;
     readonly opcCodex: string;
@@ -196,6 +198,21 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
         personalData: await requireHostPath(protectedPaths.personalData, "protected probe path"),
       };
       const rolePolicy = rolePolicies[request.role];
+      const publisherGitRemoteHttps = request.role === "publisher" && paths.network !== "deny"
+        ? await requireHostPath(
+            options.publisherGitRemoteHttpsPath ?? "",
+            "publisher git remote HTTPS executable",
+          )
+        : undefined;
+      const publisherGh = publisherGitRemoteHttps === undefined
+        ? undefined
+        : await requireHostPath(
+            options.publisherGhPath ?? "",
+            "publisher gh executable",
+          );
+      const publisherShell = publisherGitRemoteHttps === undefined
+        ? undefined
+        : await requireHostPath("/bin/sh", "publisher credential helper shell");
       const ownedProtectedPath = rolePolicy.ownedProtectedPath === null
         ? undefined
         : protectedProbePaths[rolePolicy.ownedProtectedPath];
@@ -233,7 +250,13 @@ export function createMacosSandboxAdapter(options: MacosSandboxAdapterOptions): 
       }
       const profile = renderSandboxProfile({
         role: request.role,
-        executables: [...roleExecutables, ...probeExecutables],
+        executables: [
+          ...roleExecutables,
+          ...probeExecutables,
+          ...(publisherGitRemoteHttps === undefined ? [] : [publisherGitRemoteHttps]),
+          ...(publisherGh === undefined ? [] : [publisherGh]),
+          ...(publisherShell === undefined ? [] : [publisherShell]),
+        ],
         readable,
         writable: paths.writable,
         network: paths.network,

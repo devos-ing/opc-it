@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalize } from "json-canonicalize";
@@ -101,6 +101,47 @@ it("cleanup requires the opaque ownership token returned after safe creation", a
   await cleanupBundle(owned);
   const removed = await readFile(join(owned.directory, "context.json")).catch((error: unknown) => error);
   expect(errorCode(removed)).toBe("ENOENT");
+});
+
+it("reclaims an exact durable bundle after process-local ownership is lost", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-crashed-bundle-replay-"));
+  const directory = join(temporary, "bundle");
+  const entries = [{ path: "context.json", bytes: bytes("approved") }];
+  const crashedWriter = Bun.spawn([
+    process.execPath,
+    "-e",
+    `import { writeBundle } from ${JSON.stringify(`${process.cwd()}/src/adapters/local/evidence-bundle.ts`)}; await writeBundle(${JSON.stringify(directory)}, [{ path: "context.json", bytes: Buffer.from("approved") }], 10000);`,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  expect(await crashedWriter.exited).toBe(0);
+
+  const replayed = await writeBundle(directory, entries, 10_000);
+
+  expect(replayed.directory).toBe(await realpath(directory));
+  expect(replayed.artifactSha256).toMatch(/^sha256:[0-9a-f]{64}$/);
+  await cleanupBundle(replayed);
+  expect(errorCode(await readFile(directory).catch((error: unknown) => error))).toBe("ENOENT");
+});
+
+it("reclaims only an empty private directory left before the ownership marker", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "opc-early-crash-bundle-"));
+  const directory = join(temporary, "bundle");
+  const crashedWriter = Bun.spawn([
+    process.execPath,
+    "-e",
+    `import { writeBundle } from ${JSON.stringify(`${process.cwd()}/src/adapters/local/evidence-bundle.ts`)}; await writeBundle(${JSON.stringify(directory)}, [{ path: "context.json", bytes: Buffer.from("approved") }], 10000);`,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  expect(await crashedWriter.exited).toBe(0);
+  await rm(directory, { recursive: true, force: false });
+  await mkdir(directory, { mode: 0o700 });
+
+  const replayed = await writeBundle(
+    directory,
+    [{ path: "context.json", bytes: bytes("approved") }],
+    10_000,
+  );
+
+  expect(await readFile(join(replayed.directory, "context.json"), "utf8")).toBe("approved");
+  await cleanupBundle(replayed);
 });
 
 it("bundle creation rejects a caller path outside the host-owned temporary root", async () => {

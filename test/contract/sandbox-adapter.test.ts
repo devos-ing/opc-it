@@ -333,9 +333,17 @@ test("Publisher reads only exact gh config while other protected classes stay de
     const canonicalProtected = await Promise.all(protectedPaths.map((path) => realpath(path)));
     const ghConfig = canonicalProtected[2];
     if (ghConfig === undefined) throw new Error("missing gh config fixture");
+    const publisherGitRemoteHttps = join(root, "git-remote-https");
+    const publisherGh = join(root, "gh");
+    await writeFile(publisherGitRemoteHttps, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await writeFile(publisherGh, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const canonicalPublisherGitRemoteHttps = await realpath(publisherGitRemoteHttps);
+    const canonicalPublisherGh = await realpath(publisherGh);
     const profiles: string[] = [];
     const sandbox = createMacosSandboxAdapter({
       protectedPaths: protectedProbes(canonicalProtected),
+      publisherGhPath: canonicalPublisherGh,
+      publisherGitRemoteHttpsPath: canonicalPublisherGitRemoteHttps,
       allowedCommands: {
         controller: ["/usr/bin/true"],
         codex: ["/usr/bin/true"],
@@ -387,8 +395,30 @@ test("Publisher reads only exact gh config while other protected classes stay de
     expect(profiles.every((profile) =>
       profile.includes('host-owned role: publisher') &&
       profile.includes('(allow network-outbound (remote tcp "github.com:443"))') &&
+      profile.includes(`(literal "${canonicalPublisherGitRemoteHttps}")`) &&
+      profile.includes(`(literal "${canonicalPublisherGh}")`) &&
+      profile.includes('(literal "/bin/sh")') &&
       profile.includes(ghConfig)
     )).toBeTrue();
+    const topLevelShell = await sandbox.run({
+      role: "publisher",
+      command: "/bin/sh",
+      args: ["-c", "exit 0"],
+      cwd: canonicalWorktree,
+      env: {
+        PATH: "/usr/bin:/bin",
+        GH_CONFIG_DIR: ghConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        LC_ALL: "C",
+      },
+      readable: [canonicalWorktree],
+      readOnly: [ghConfig],
+      writable: [canonicalWorktree],
+      network: { mode: "github-https", host: "github.com", port: 443 },
+      deadlineEpochMs: Date.now() + 5_000,
+    }).catch((error: unknown) => error);
+    expect(topLevelShell).toMatchObject({ code: "CONTRACT_VIOLATION" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
