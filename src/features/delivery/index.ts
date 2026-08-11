@@ -47,6 +47,9 @@ export {
 export { runDelivery } from "./run-delivery.js";
 export { snapshotResultReview, verifyResultReview } from "./verification.js";
 export {
+  decodeVerifiedCandidateJournal,
+  encodeVerifiedCandidateJournal,
   snapshotApprovedPublisherOnboarding,
   snapshotVerifiedCandidate,
+  type VerifiedCandidateJournalEnvelope,
 } from "./publication.js";

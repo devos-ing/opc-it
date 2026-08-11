@@ -91,9 +91,9 @@ Task 4 evidence (2026-08-11): the exact first RED was `0 pass / 1 fail / 1 error
 
 **Files:** Create recovery feature files; modify `src/runtime/run-enabled-tick.ts`; test `test/integration/daemon-recovery.test.ts`, `test/acceptance/daemon-delivery-loop.test.ts`.
 
-- [ ] Write failing tests for Work Failure consuming one attempt, infrastructure requeue without consumption, unique `(root,nextAttempt)` Recovery slot, same-scope automatic retry, permission expansion returning awaiting approval, third failure blocked, and successful push Delivered.
-- [ ] Run both tests; expect missing recovery feature/integration.
-- [ ] Migrate the stable fingerprint and budget rules behind:
+- [x] Write failing tests for Work Failure consuming one attempt, infrastructure requeue without consumption, unique `(root,nextAttempt)` Recovery slot, same-scope automatic retry, permission expansion returning awaiting approval, third failure blocked, and successful push Delivered.
+- [x] Run both tests; expect missing recovery feature/integration.
+- [x] Migrate the stable fingerprint and budget rules behind:
 
 ```ts
 export function recoverWork(input: RecoveryInput, repository: RecoveryRepository): Promise<RecoveryOutcome>;
@@ -114,9 +114,13 @@ Recovery creation must use the M2 canonical queue ID
 root `work_id`; repeated root submit must continue to resolve the original root
 Issue after any number of child Recovery Issues exist.
 
-- [ ] Run `rtk bun run lint`, `rtk bun run typecheck`, `rtk bun test`, and `rtk bun run build`; each exits 0. Run the acceptance test twice and assert no duplicate Issue, attempt, commit, or push.
-- [ ] Commit `feat: complete daemon delivery recovery loop`.
+- [x] Run `rtk bun run lint`, `rtk bun run typecheck`, `rtk bun test`, and `rtk bun run build`; each exits 0. Run the acceptance test twice and assert no duplicate Issue, attempt, commit, or push.
+- [x] Commit `feat: complete daemon delivery recovery loop`.
+
+Task 5 evidence (2026-08-11): the exact first Recovery RED was `0 pass / 1 fail / 1 error` because `src/features/recovery/index.js` did not exist, and the exact first delivery-loop RED was `0 pass / 1 fail` with zero delivery/publication calls. Final focused daemon delivery/recovery, claim, runtime, acceptance, and feature-import coverage is `122 pass / 0 fail` with `320` expectations. The acceptance test passes twice at `2 pass / 0 fail` and proves that candidate-to-verify and push-before-terminal crash replay do not duplicate the Issue, attempt, candidate, commit, or push; signed Work-Failure replay creates one canonical Recovery without rerunning delivery. Recovery IDs are bound to `opc-recovery:<sha256(root_work_id)>:<next_attempt>`, children preserve the immutable root contract/digest while adding one closed canonical signed addendum, approved expansion children remain claimable from retained authority, same-scope retries are automatic, permission expansion awaits approval, infrastructure failures requeue the same Work without consuming an attempt, attempt three blocks, successful publication reaches Delivered, and repeated root submission remains idempotent. Every start/run/result/publish/terminal boundary rechecks enabled state, policy, digest, repository authority, lease ownership, the absolute deadline, and exact candidate journal authority; malformed journals, hostile values, and oversized publication comments fail closed. The canonical transition marker plus signed record is byte-bounded at exactly GitHub's `65,536`-byte comment limit and every recovery mutation has an immediate deadline check. Full verification is `851 pass / 1 exact parent-Seatbelt skip / 0 fail` with `2555` expectations; lint, typecheck, build, and diff checks exit `0`. Independent final Spec and Standards re-reviews report `0 findings / 0 findings`. No real GitHub endpoint, credential, network, Codex, Target command, persistent repository, push, or LaunchAgent was accessed; all adapters used injected fakes and cleaned temporary local repositories.
 
 ## M4 completion evidence
 
 Provide test artifacts proving denied credential reads, denied unapproved network, exact contract digest, frozen tree hash, independent review, one commit/push, unique Recovery slots, and cleanup after success/failure/timeout. Keep the production LaunchAgent disabled; real repository activation belongs to M5.
+
+M4 completion evidence (2026-08-11): Tasks 1-5 are complete with immutable v2 contracts, current-user disabled installation and separately approved activation, isolated Codex delivery with independent verification, deterministic publication and crash-safe replay, and bounded canonical Recovery integrated into the enabled daemon tick. The cumulative Task 5 full-suite gate is `851 pass / 1 exact parent-Seatbelt skip / 0 fail`; every real external boundary remained disabled and was exercised only through injected fakes or cleaned local temporary repositories.

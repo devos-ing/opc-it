@@ -1,3 +1,4 @@
+import { canonicalize } from "json-canonicalize";
 import { posix } from "node:path";
 import { types } from "node:util";
 import { digestCanonical } from "../../domain/identity.js";
@@ -16,6 +17,12 @@ import { DeliveryContractViolation } from "./ports.js";
 const githubLoginPattern = /^(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const emailPattern = /^(?=.{3,254}$)[^\s<>@]+@[^\s<>@]+$/u;
+const maximumCandidateJournalBytes = 30 * 1024;
+
+export interface VerifiedCandidateJournalEnvelope {
+  readonly payload: string;
+  readonly digest: string;
+}
 
 function invalid(name: string): never {
   throw new DeliveryContractViolation(name);
@@ -163,10 +170,72 @@ export function snapshotVerifiedCandidate(value: VerifiedCandidate): VerifiedCan
   ) {
     invalid("verified candidate review");
   }
-  return Object.freeze({
+  const snapshot = {
     status: "result-ready",
     manifest,
     review,
     frozenWorktree: absolutePath(root.frozenWorktree, "verified candidate worktree"),
+  } as const;
+  deepFreezeJson(snapshot);
+  return snapshot;
+}
+
+function deepFreezeJson(value: unknown): void {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return;
+  for (const nested of Object.values(value)) deepFreezeJson(nested);
+  Object.freeze(value);
+}
+
+export function encodeVerifiedCandidateJournal(
+  candidateValue: VerifiedCandidate,
+): VerifiedCandidateJournalEnvelope {
+  const candidate = snapshotVerifiedCandidate(candidateValue);
+  const json = canonicalize(candidate);
+  const bytes = Buffer.from(json, "utf8");
+  if (bytes.byteLength === 0 || bytes.byteLength > maximumCandidateJournalBytes) {
+    invalid("verified candidate journal size");
+  }
+  return Object.freeze({
+    payload: bytes.toString("base64url"),
+    digest: digestCanonical(candidate),
   });
+}
+
+export function decodeVerifiedCandidateJournal(
+  envelopeValue: VerifiedCandidateJournalEnvelope,
+): VerifiedCandidate {
+  const envelope = exactDataRecord(
+    envelopeValue,
+    ["payload", "digest"],
+    "verified candidate journal",
+  );
+  if (
+    typeof envelope.payload !== "string" ||
+    typeof envelope.digest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(envelope.digest)
+  ) {
+    invalid("verified candidate journal");
+  }
+  const bytes = Buffer.from(envelope.payload, "base64url");
+  if (
+    bytes.byteLength === 0 ||
+    bytes.byteLength > maximumCandidateJournalBytes ||
+    bytes.toString("base64url") !== envelope.payload
+  ) {
+    invalid("verified candidate journal size");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    invalid("verified candidate journal JSON");
+  }
+  if (
+    canonicalize(parsed) !== bytes.toString("utf8") ||
+    digestCanonical(parsed) !== envelope.digest
+  ) {
+    invalid("verified candidate journal digest");
+  }
+  deepFreezeJson(parsed);
+  return snapshotVerifiedCandidate(parsed as VerifiedCandidate);
 }

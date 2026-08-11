@@ -1,4 +1,5 @@
 import { DomainError } from "../../domain/errors.js";
+import { decodeRecoveryAddendum } from "../../domain/recovery.js";
 import {
   decodeWorkBody,
   type ValidatedExecutionContract,
@@ -30,6 +31,11 @@ import { isCanonicalQueueInstant } from "./timeline-validation.js";
 import { mergeQueueDiagnostics } from "./diagnostics.js";
 
 const terminalStates = new Set(["blocked", "delivered"]);
+const legacyRecoveryMetadataKeys = [
+  "next_attempt",
+  "plan_digest",
+  "root_work_id",
+] as const;
 
 export interface PollAndClaimInput {
   readonly repository: string;
@@ -91,6 +97,23 @@ interface RepositoryJournalSnapshot {
   readonly evaluatedCandidates: ReadonlyMap<number, EvaluatedCandidate>;
 }
 
+function recoveryAddendumIsValid(
+  metadata: Readonly<Record<string, string>>,
+  rootWorkId: string,
+  nextAttempt: number,
+): boolean {
+  const encoded = metadata.recovery_addendum;
+  const digest = metadata.recovery_addendum_digest;
+  if (encoded === undefined && digest === undefined && metadata.event_id === undefined) {
+    const keys = Object.keys(metadata).toSorted();
+    return keys.length === legacyRecoveryMetadataKeys.length &&
+      keys.every((key, index) => key === legacyRecoveryMetadataKeys[index]);
+  }
+  if (encoded === undefined || digest === undefined) return false;
+  const addendum = decodeRecoveryAddendum(encoded, digest);
+  return addendum?.root_work_id === rootWorkId && addendum.next_attempt === nextAttempt;
+}
+
 function requireNonEmpty(name: string, value: string): string {
   if (value.length === 0 || value.includes("\u0000")) {
     throw new TypeError(`INVALID_CLAIM_INPUT: ${name}`);
@@ -107,6 +130,7 @@ function diagnostic(issueNumber?: number): QueueIssueDiagnostic {
 function decodeEligible(
   issue: QueueWorkIssue,
   current: TrustedTransition | undefined,
+  timeline: TrustedTimeline,
 ): EligibleWork | undefined {
   if (current === undefined) {
     throw new DomainError(
@@ -123,7 +147,8 @@ function decodeEligible(
   }
 
   const decoded = decodeWorkBody(issue.body);
-  const recovery = current.payload.event === "retry";
+  const parsedRecoveryId = parseRecoveryWorkId(issue.workId);
+  const recovery = issue.workId !== decoded.contract.work_id && parsedRecoveryId !== undefined;
   if (
     decoded.contract.repository !== issue.repository ||
     decoded.digest !== issue.digest ||
@@ -135,16 +160,23 @@ function decodeEligible(
     );
   }
   if (recovery) {
-    const parsedRecoveryId = parseRecoveryWorkId(issue.workId);
+    const recoveryAuthority = timeline.accepted.findLast(({ payload }) =>
+      payload.event === "retry" || payload.event === "request-approval"
+    );
     if (
-      parsedRecoveryId === undefined ||
-      current.payload.metadata.root_work_id !== decoded.contract.work_id ||
-      current.payload.metadata.next_attempt !==
+      recoveryAuthority === undefined ||
+      recoveryAuthority.payload.metadata.root_work_id !== decoded.contract.work_id ||
+      recoveryAuthority.payload.metadata.next_attempt !==
         String(parsedRecoveryId.nextAttempt) ||
       deriveRecoveryWorkId(
         decoded.contract.work_id,
         parsedRecoveryId.nextAttempt,
-      ) !== issue.workId
+      ) !== issue.workId ||
+      !recoveryAddendumIsValid(
+        recoveryAuthority.payload.metadata,
+        decoded.contract.work_id,
+        parsedRecoveryId.nextAttempt,
+      )
     ) {
       throw new DomainError(
         "INCOMPLETE_ISSUE",
@@ -336,6 +368,7 @@ export async function pollAndClaim(
         issue,
         repositoryJournal.authority.currentByIssue.get(issue.number) ??
           (evaluated === undefined ? view.current : undefined),
+        view,
       );
       const pendingRecovery = repositoryJournal.authority.pendingRecovery;
       if (

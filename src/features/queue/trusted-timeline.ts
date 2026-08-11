@@ -86,18 +86,20 @@ function logicalEventFingerprint(payload: TransitionPayload): string {
 
 function isPendingRecoveryClaim(
   payload: TransitionPayload,
-  recoveryReady: TrustedTransition | undefined,
+  acceptedRecovery: readonly TrustedTransition[],
   pending: PendingRecoveryAuthority,
 ): boolean {
   const parsedRecoveryId = parseRecoveryWorkId(payload.work_id);
+  const recoveryAuthority = acceptedRecovery.findLast(({ payload: candidate }) =>
+    candidate.event === "retry" || candidate.event === "request-approval"
+  );
   return (
-    recoveryReady?.payload.event === "retry" &&
-    recoveryReady.payload.to === "ready" &&
+    recoveryAuthority !== undefined &&
     parsedRecoveryId !== undefined &&
-    recoveryReady.payload.metadata.root_work_id === pending.rootWorkId &&
-    recoveryReady.payload.metadata.next_attempt ===
+    recoveryAuthority.payload.metadata.root_work_id === pending.rootWorkId &&
+    recoveryAuthority.payload.metadata.next_attempt ===
       String(parsedRecoveryId.nextAttempt) &&
-    recoveryReady.payload.metadata.plan_digest === pending.planDigest &&
+    recoveryAuthority.payload.metadata.plan_digest === pending.planDigest &&
     payload.metadata.plan_digest === pending.planDigest &&
     deriveRecoveryWorkId(pending.rootWorkId, parsedRecoveryId.nextAttempt) ===
       payload.work_id
@@ -167,7 +169,7 @@ export function arbitrateRepositoryJournal(
         pendingRecovery !== undefined &&
         !isPendingRecoveryClaim(
           payload,
-          currentByIssue.get(issueNumber),
+          acceptedByIssue.get(issueNumber) ?? [],
           pendingRecovery,
         )
       ) {

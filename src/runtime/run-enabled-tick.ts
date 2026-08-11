@@ -6,8 +6,26 @@ import {
   type LocalJournal,
   type QueueIssueDiagnostic,
   type QueueRepository,
+  type SignedTransition,
 } from "../features/queue/index.js";
+import type { Sha256 } from "../domain/identity.js";
+import type {
+  DeliveryOutcome,
+  DeliveryRevalidation,
+  FailureReport,
+  PublicationOutcome,
+  VerifiedCandidate,
+} from "../features/delivery/index.js";
 import type { EnabledTickResult } from "./delivery-loop.js";
+import {
+  executeClaimedDelivery,
+  resumeInterruptedRecovery,
+  resumePublishedResult,
+} from "./delivery-recovery-orchestration.js";
+import {
+  currentRepositoryEnabled,
+  ownDataProperty,
+} from "./enabled-runtime-boundaries.js";
 
 const claimLeaseMs = 30 * 60_000;
 
@@ -20,6 +38,36 @@ export interface EnabledRepositoryRuntime {
   readonly signingKey: string;
   readonly verificationKeys: Readonly<Record<string, string>>;
   readonly createLeaseId: (now: Date) => string;
+  readonly delivery?: EnabledDeliveryRuntime;
+}
+
+export type DeliveryLoopBoundary = "start" | "run" | "result" | "publish" | "terminal";
+
+export interface DaemonDeliveryContext {
+  readonly repository: string;
+  readonly issueNumber: number;
+  readonly rootIssueNumber: number;
+  readonly workId: string;
+  readonly rootWorkId: string;
+  readonly attempt: 1 | 2 | 3;
+  readonly contract: Extract<Awaited<ReturnType<typeof pollAndClaim>>, { readonly status: "claimed" }>["contract"];
+  readonly contractDigest: Sha256;
+  readonly approvedPolicyDigest: Sha256;
+  readonly claim: SignedTransition;
+  readonly deadlineEpochMs: number;
+  readonly signal: AbortSignal;
+}
+
+export interface EnabledDeliveryRuntime {
+  readonly approvedPolicyDigest: Sha256;
+  readonly now: () => number;
+  readonly runDelivery: (context: DaemonDeliveryContext) => Promise<DeliveryOutcome>;
+  readonly publish: (candidate: VerifiedCandidate, context: DaemonDeliveryContext) => Promise<PublicationOutcome>;
+  readonly revalidate: (
+    boundary: DeliveryLoopBoundary,
+    context: DaemonDeliveryContext,
+  ) => Promise<DeliveryRevalidation>;
+  readonly requiresExpansion?: (report: FailureReport, context: DaemonDeliveryContext) => boolean;
 }
 
 export interface RunEnabledTickInput {
@@ -46,17 +94,6 @@ const repositoryConfigurationKeys = [
   "verificationKeys",
   "createLeaseId",
 ] as const;
-
-function ownDataProperty(value: unknown, key: PropertyKey): unknown {
-  if (typeof value !== "object" || value === null) {
-    throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (descriptor === undefined || !("value" in descriptor)) {
-    throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
-  }
-  return descriptor.value;
-}
 
 function snapshotInstallation(value: unknown): InstallationRecord {
   const id = ownDataProperty(value, "id");
@@ -108,6 +145,47 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
   }
   const installation = snapshotInstallation(values.installation);
   const verificationKeys = snapshotVerificationKeys(values.verificationKeys);
+  const deliveryDescriptor = Object.getOwnPropertyDescriptor(value, "delivery");
+  const deliveryValue: unknown = deliveryDescriptor === undefined
+    ? undefined
+    : "value" in deliveryDescriptor
+      ? deliveryDescriptor.value as unknown
+      : (() => { throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG"); })();
+  let delivery: EnabledDeliveryRuntime | undefined;
+  if (deliveryValue !== undefined) {
+    const approvedPolicyDigest = ownDataProperty(deliveryValue, "approvedPolicyDigest");
+    const runDelivery = ownDataProperty(deliveryValue, "runDelivery");
+    const now = ownDataProperty(deliveryValue, "now");
+    const publish = ownDataProperty(deliveryValue, "publish");
+    const revalidate = ownDataProperty(deliveryValue, "revalidate");
+    const expansionDescriptor = Object.getOwnPropertyDescriptor(deliveryValue, "requiresExpansion");
+    const requiresExpansion: unknown = expansionDescriptor === undefined
+      ? undefined
+      : "value" in expansionDescriptor
+        ? expansionDescriptor.value as unknown
+        : (() => { throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG"); })();
+    if (
+      typeof approvedPolicyDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(approvedPolicyDigest) ||
+      typeof runDelivery !== "function" ||
+      typeof now !== "function" ||
+      typeof publish !== "function" ||
+      typeof revalidate !== "function" ||
+      (requiresExpansion !== undefined && typeof requiresExpansion !== "function")
+    ) {
+      throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
+    }
+    delivery = Object.freeze({
+      approvedPolicyDigest: approvedPolicyDigest as Sha256,
+      runDelivery: runDelivery as EnabledDeliveryRuntime["runDelivery"],
+      now: now as EnabledDeliveryRuntime["now"],
+      publish: publish as EnabledDeliveryRuntime["publish"],
+      revalidate: revalidate as EnabledDeliveryRuntime["revalidate"],
+      ...(requiresExpansion === undefined
+        ? {}
+        : { requiresExpansion: requiresExpansion as NonNullable<EnabledDeliveryRuntime["requiresExpansion"]> }),
+    });
+  }
   if (
     installation.id.length === 0 ||
     installation.id.includes("\u0000") ||
@@ -128,6 +206,7 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
     signingKey: values.signingKey,
     verificationKeys,
     createLeaseId: values.createLeaseId as (now: Date) => string,
+    ...(delivery === undefined ? {} : { delivery }),
   });
 }
 
@@ -190,15 +269,8 @@ export async function runEnabledTick(
     throwIfAborted();
     const repository = configured.repository;
 
-    const enabledPromise: unknown = configured.isEnabled();
-    if (!(enabledPromise instanceof Promise)) {
-      throw new TypeError(`INVALID_REPOSITORY_ENABLED: ${repository}`);
-    }
-    const enabled: unknown = await enabledPromise;
+    const enabled = await currentRepositoryEnabled(configured);
     throwIfAborted();
-    if (typeof enabled !== "boolean") {
-      throw new TypeError(`INVALID_REPOSITORY_ENABLED: ${repository}`);
-    }
     if (!enabled) continue;
     repositoriesChecked += 1;
     const leaseId = configured.createLeaseId(new Date(Date.parse(occurredAt)));
@@ -239,6 +311,30 @@ export async function runEnabledTick(
     throwIfAborted();
     appendDiagnostics(diagnostics, repository, claimed.diagnostics);
     if (claimed.status !== "idle") worked = true;
+    if (claimed.status === "claimed") {
+      await executeClaimedDelivery(
+        configured,
+        claimed,
+        occurredAt,
+        input.signal ?? new AbortController().signal,
+      );
+      throwIfAborted();
+    } else if (claimed.status === "active-claim") {
+      await resumePublishedResult(
+        configured,
+        claimed,
+        occurredAt,
+        input.signal ?? new AbortController().signal,
+      );
+      throwIfAborted();
+    } else if (await resumeInterruptedRecovery(
+      configured,
+      occurredAt,
+      input.signal ?? new AbortController().signal,
+    )) {
+      worked = true;
+      throwIfAborted();
+    }
 
     const nextEtag =
       claimed.etag ?? (claimed.status === "idle" ? cursor?.etag : undefined);

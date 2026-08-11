@@ -23,6 +23,8 @@ export type {
 export {
   isActiveQueueStateLabel,
   QueueTransportError,
+  maximumQueueTransitionRecordBytes,
+  queueTransitionMarker,
   validateQueueIdentifier,
   validateQueueIssueNumber,
   validateQueueRepository,
@@ -43,7 +45,7 @@ export {
   type PollAndClaimInput,
   type PollAndClaimResult,
 } from "./poll-and-claim.js";
-export { deriveRecoveryWorkId } from "./recovery-work-id.js";
+export { deriveRecoveryWorkId, parseRecoveryWorkId } from "./recovery-work-id.js";
 export {
   appendHeartbeat,
   analyzeLeaseTimeline,

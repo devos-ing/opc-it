@@ -6,6 +6,8 @@ import {
 import { requireAbsoluteCommandPath } from "../../adapters/local/command-boundary.js";
 import {
   queueWorkStates,
+  queueTransitionMarker,
+  parseRecoveryWorkId,
   QueueTransportError,
   validateQueueIdentifier,
   validateQueueIssueNumber,
@@ -31,7 +33,6 @@ export interface GhCliGitHubAdapterOptions {
 
 const queueMarkerPattern = /^<!-- opc-queue:v1 (\{[^\r\n]*\}) -->\r?\n/;
 const queueMarkerPrefix = "<!-- opc-queue:";
-const transitionMarker = "<!-- opc-transition:v1 -->\n";
 const maximumPageCount = 100;
 const stateLabelSet: ReadonlySet<string> = new Set(
   queueWorkStates.map((state) => `opc:${state}`),
@@ -581,10 +582,10 @@ export function createGhCliGitHubAdapter(
       parseCommentList,
     );
     return comments.flatMap((comment) =>
-      comment.body.startsWith(transitionMarker)
+      comment.body.startsWith(queueTransitionMarker)
         ? [{
             commentId: comment.id,
-            record: comment.body.slice(transitionMarker.length),
+            record: comment.body.slice(queueTransitionMarker.length),
           }]
         : [],
     );
@@ -607,7 +608,7 @@ export function createGhCliGitHubAdapter(
     );
     return new Set(
       comments.flatMap((comment) =>
-        comment.body.startsWith(transitionMarker)
+        comment.body.startsWith(queueTransitionMarker)
           ? [comment.issueNumber]
           : [],
       ),
@@ -620,12 +621,13 @@ export function createGhCliGitHubAdapter(
       const workId = validateQueueIdentifier("work_id", input.workId);
       const digest = validateQueueIdentifier("digest", input.digest);
       const body = queueBody(workId, digest, input.body);
+      const recovery = parseRecoveryWorkId(workId) !== undefined;
       const response = await execute(
         ["api", `repos/${repository.owner}/${repository.repo}/issues`, "--method", "POST", "--input", "-"],
         JSON.stringify({
           title: `[OPC] ${workId}`,
           body,
-          labels: ["opc:work", "opc:awaiting-approval"],
+          labels: ["opc:work", ...(recovery ? ["opc:recovery"] : []), "opc:awaiting-approval"],
         }),
       );
       const created = parseIssue(parseJson(response.stdout), repository.canonical);
@@ -761,10 +763,10 @@ export function createGhCliGitHubAdapter(
           "--input",
           "-",
         ],
-        JSON.stringify({ body: `${transitionMarker}${record}` }),
+        JSON.stringify({ body: `${queueTransitionMarker}${record}` }),
       );
       const comment = parseComment(parseJson(response.stdout));
-      if (comment.body !== `${transitionMarker}${record}`) {
+      if (comment.body !== `${queueTransitionMarker}${record}`) {
         throw new Error("MALFORMED_GITHUB_RESPONSE: transition echo");
       }
     },

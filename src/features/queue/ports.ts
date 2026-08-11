@@ -132,8 +132,17 @@ export function validateQueueStateLabel(
   }
 }
 
+const githubCommentMaximumBytes = 65_536;
+export const queueTransitionMarker = "<!-- opc-transition:v1 -->\n";
+export const maximumQueueTransitionRecordBytes =
+  githubCommentMaximumBytes - Buffer.byteLength(queueTransitionMarker, "utf8");
+
 export function validateQueueTransitionRecord(record: string): string {
-  if (record.length === 0 || record.length > 1_048_576 || record.includes("\u0000")) {
+  if (
+    record.length === 0 ||
+    Buffer.byteLength(record, "utf8") > maximumQueueTransitionRecordBytes ||
+    record.includes("\u0000")
+  ) {
     throw new TypeError("INVALID_TRANSITION_RECORD");
   }
   return record;
