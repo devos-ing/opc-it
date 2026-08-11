@@ -32,6 +32,21 @@ const reconciliationMetadataKeys = [
   "reconcile_decision",
   "reconciled_at",
 ] as const;
+const recoveryIncidentMetadataKeys = [
+  ...reconciliationMetadataKeys,
+  "attempt",
+  "category",
+  "error_fingerprint",
+  "recovery_failure",
+  "recovery_authority_delta",
+  "recovery_authority_delta_digest",
+  "recovery_policy_ceiling",
+  "recovery_policy_ceiling_digest",
+  "policy_digest",
+  "requires_expansion",
+  "root_issue_number",
+  "root_work_id",
+] as const;
 
 export type LeaseDecision = "keep" | "requeue" | "block";
 
@@ -53,6 +68,7 @@ export interface AppendHeartbeatInput {
   readonly digest: string;
   readonly leaseId: string;
   readonly occurredAt: string;
+  readonly assertMutationAuthority?: () => Promise<void>;
 }
 
 export interface LeaseTimelineAnalysis {
@@ -182,8 +198,12 @@ function reconciliationOutage(
   const reconciledAt = metadata.reconciled_at;
   const eventId = metadata.event_id;
   const proposalId = metadata.proposal_id;
+  const exactReconciliation = hasExactKeys(metadata, reconciliationMetadataKeys);
+  const exactRecoveryIncident =
+    hasExactKeys(metadata, recoveryIncidentMetadataKeys) &&
+    metadata.category === "infrastructure";
   if (
-    !hasExactKeys(metadata, reconciliationMetadataKeys) ||
+    (!exactReconciliation && !exactRecoveryIncident) ||
     outageStartedAt === undefined ||
     reconciledAt === undefined ||
     eventId === undefined ||
@@ -383,6 +403,7 @@ export async function appendHeartbeat(
   };
   const existing = matchingHeartbeat(timeline, claim, heartbeatIdentity);
   if (existing !== undefined) return existing.payload;
+  await input.assertMutationAuthority?.();
   await input.github.appendTransition(
     repository,
     issue.number,

@@ -1,13 +1,10 @@
 import type { Sha256 } from "../domain/identity.js";
 import type {
   DeliveryOutcome,
-  FailureReport,
   PublicationOutcome,
-  VerifiedCandidate,
 } from "../features/delivery/index.js";
 import {
-  decodeVerifiedCandidateJournal,
-  encodeVerifiedCandidateJournal,
+  DeliveryContractViolation,
   snapshotVerifiedCandidate,
 } from "../features/delivery/index.js";
 import { decodeWorkBody } from "../features/planning/index.js";
@@ -19,249 +16,39 @@ import {
   signTransition,
 } from "../features/queue/index.js";
 import {
+  decodeRecoveryAuthorityDelta,
+  decodeRecoveryPolicyCeiling,
   decodeRecoveryFailureReport,
+  encodeRecoveryPolicyCeiling,
   recoverWork,
 } from "../features/recovery/index.js";
 import type {
   DaemonDeliveryContext,
-  DeliveryLoopBoundary,
-  EnabledDeliveryRuntime,
   EnabledRepositoryRuntime,
 } from "./run-enabled-tick.js";
+import { ownDataProperty } from "./enabled-runtime-boundaries.js";
 import {
-  currentRepositoryEnabled,
-  ownDataProperty,
-} from "./enabled-runtime-boundaries.js";
-
-function exactOutcomeStatus(value: unknown): DeliveryOutcome["status"] {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError("INVALID_DELIVERY_OUTCOME");
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(value, "status");
-  if (descriptor === undefined || !("value" in descriptor)) {
-    throw new TypeError("INVALID_DELIVERY_OUTCOME");
-  }
-  const status = descriptor.value as unknown;
-  if (
-    status !== "result-ready" &&
-    status !== "work-failure" &&
-    status !== "infrastructure-failure" &&
-    status !== "approval-required"
-  ) {
-    throw new TypeError("INVALID_DELIVERY_OUTCOME");
-  }
-  return status;
-}
-
-function failureFromOutcome(value: unknown): FailureReport {
-  const report = ownDataProperty(value, "report");
-  const category = ownDataProperty(report, "category");
-  const code = ownDataProperty(report, "code");
-  const summary = ownDataProperty(report, "summary");
-  const durationMs = ownDataProperty(report, "durationMs");
-  if (
-    (category !== "WORK_FAILURE" && category !== "INFRASTRUCTURE_FAILURE") ||
-    typeof code !== "string" ||
-    code.length === 0 ||
-    typeof summary !== "string" ||
-    summary.length === 0 ||
-    !Number.isFinite(durationMs) ||
-    typeof durationMs !== "number" ||
-    durationMs < 0
-  ) {
-    throw new TypeError("INVALID_DELIVERY_OUTCOME");
-  }
-  return Object.freeze({ category, code, summary, durationMs } as FailureReport);
-}
-
-function snapshotPublicationOutcome(value: unknown): PublicationOutcome {
-  const status = ownDataProperty(value, "status");
-  if (status === "published") {
-    const branch = ownDataProperty(value, "branch");
-    const commitSha = ownDataProperty(value, "commitSha");
-    const treeSha = ownDataProperty(value, "treeSha");
-    const reused = ownDataProperty(value, "reused");
-    if (
-      typeof branch !== "string" ||
-      branch.length === 0 ||
-      typeof commitSha !== "string" ||
-      !/^[0-9a-f]{40}$/u.test(commitSha) ||
-      typeof treeSha !== "string" ||
-      !/^[0-9a-f]{40}$/u.test(treeSha) ||
-      typeof reused !== "boolean"
-    ) {
-      throw new TypeError("INVALID_PUBLICATION_OUTCOME");
-    }
-    return Object.freeze({ status, branch, commitSha, treeSha, reused });
-  }
-  if (status === "ambiguous") {
-    const branch = ownDataProperty(value, "branch");
-    const commitSha = ownDataProperty(value, "commitSha");
-    const reason = ownDataProperty(value, "reason");
-    if (
-      typeof branch !== "string" ||
-      branch.length === 0 ||
-      typeof commitSha !== "string" ||
-      !/^[0-9a-f]{40}$/u.test(commitSha) ||
-      reason !== "PUSH_TIMEOUT"
-    ) {
-      throw new TypeError("INVALID_PUBLICATION_OUTCOME");
-    }
-    return Object.freeze({ status, branch, commitSha, reason });
-  }
-  throw new TypeError("INVALID_PUBLICATION_OUTCOME");
-}
-
-function candidateJournalMetadata(
-  candidate: VerifiedCandidate,
-): Readonly<Record<string, string>> {
-  const envelope = encodeVerifiedCandidateJournal(candidate);
-  return Object.freeze({
-    verified_candidate: envelope.payload,
-    verified_candidate_digest: envelope.digest,
-  });
-}
-
-function candidateFromJournal(
-  metadata: Readonly<Record<string, string>>,
-): VerifiedCandidate | undefined {
-  const encoded = metadata.verified_candidate;
-  const digest = metadata.verified_candidate_digest;
-  if (encoded === undefined && digest === undefined) return undefined;
-  if (typeof encoded !== "string" || typeof digest !== "string") {
-    throw new TypeError("INVALID_VERIFIED_CANDIDATE_JOURNAL");
-  }
-  return decodeVerifiedCandidateJournal({ payload: encoded, digest });
-}
-
-async function appendLifecycleTransition(
-  configured: EnabledRepositoryRuntime,
-  context: DaemonDeliveryContext,
-  occurredAt: string,
-  input: {
-    readonly from: "claimed" | "running" | "reviewing" | "result-ready";
-    readonly event: "start" | "candidate" | "verify" | "publish";
-    readonly to: "running" | "reviewing" | "result-ready" | "delivered";
-    readonly metadata?: Readonly<Record<string, string>>;
-  },
-): Promise<void> {
-  const transitions = await configured.github.listTransitions(
-    configured.repository,
-    context.issueNumber,
-  );
-  const timeline = readTrustedTimeline(
-    transitions,
-    configured.verificationKeys,
-    { issueNumber: context.issueNumber, workId: context.workId },
-    context.contractDigest,
-  );
-  if (timeline.current?.payload.event === input.event) return;
-  if (
-    timeline.current?.payload.to !== input.from ||
-    timeline.leaseAuthority?.payload.metadata.lease_id !==
-      context.claim.payload.metadata.lease_id
-  ) {
-    throw new TypeError("DELIVERY_LEASE_AUTHORITY_CHANGED");
-  }
-  const signed = signTransition({
-    version: 1,
-    installation_id: configured.installation.id,
-    key_id: configured.installation.keyId,
-    issue_number: context.issueNumber,
-    work_id: context.workId,
-    from: input.from,
-    event: input.event,
-    to: input.to,
-    occurred_at: occurredAt,
-    metadata: Object.freeze({
-      event_id: `delivery:${context.workId}:${input.event}`,
-      lease_id: context.claim.payload.metadata.lease_id ?? "",
-      plan_digest: context.contractDigest,
-      ...(input.metadata ?? {}),
-    }),
-  }, configured.signingKey);
-  await configured.github.appendTransition(
-    configured.repository,
-    context.issueNumber,
-    JSON.stringify(signed),
-  );
-  const confirmed = readTrustedTimeline(
-    await configured.github.listTransitions(configured.repository, context.issueNumber),
-    configured.verificationKeys,
-    { issueNumber: context.issueNumber, workId: context.workId },
-    context.contractDigest,
-  );
-  if (confirmed.current?.payload.event !== input.event) {
-    throw new TypeError("DELIVERY_TRANSITION_NOT_DURABLE");
-  }
-  await configured.github.setStateLabel(
-    configured.repository,
-    context.issueNumber,
-    `opc:${input.to}`,
-  );
-}
-
-async function recheckDeliveryBoundary(
-  configured: EnabledRepositoryRuntime,
-  delivery: EnabledDeliveryRuntime,
-  boundary: DeliveryLoopBoundary,
-  context: DaemonDeliveryContext,
-): Promise<void> {
-  if (!(await currentRepositoryEnabled(configured))) throw new TypeError("DELIVERY_DISABLED");
-  const pending: unknown = delivery.revalidate(boundary, context);
-  if (!(pending instanceof Promise)) throw new TypeError("INVALID_DELIVERY_REVALIDATION");
-  const result: unknown = await pending;
-  const enabled = ownDataProperty(result, "enabled");
-  const policyDigest = ownDataProperty(result, "policyDigest");
-  const baseSha = ownDataProperty(result, "baseSha");
-  const contractDigest = ownDataProperty(result, "contractDigest");
-  const repositoryAllowed = ownDataProperty(result, "repositoryAllowed");
-  const leaseActive = ownDataProperty(result, "leaseActive");
-  const claim = ownDataProperty(result, "claim");
-  if (
-    enabled !== true ||
-    policyDigest !== context.approvedPolicyDigest ||
-    baseSha !== context.contract.base_sha ||
-    contractDigest !== context.contractDigest ||
-    repositoryAllowed !== true ||
-    leaseActive !== true ||
-    JSON.stringify(claim) !== JSON.stringify(context.claim)
-  ) {
-    throw new TypeError(`DELIVERY_AUTHORITY_CHANGED: ${boundary}`);
-  }
-  const timeline = readTrustedTimeline(
-    await configured.github.listTransitions(configured.repository, context.issueNumber),
-    configured.verificationKeys,
-    { issueNumber: context.issueNumber, workId: context.workId },
-    context.contractDigest,
-  );
-  if (
-    timeline.leaseAuthority?.payload.issue_number !== context.issueNumber ||
-    timeline.leaseAuthority.payload.metadata.lease_id !== context.claim.payload.metadata.lease_id
-  ) {
-    throw new TypeError(`DELIVERY_LEASE_AUTHORITY_CHANGED: ${boundary}`);
-  }
-}
-
-async function finalizePublishedResult(
-  configured: EnabledRepositoryRuntime,
-  delivery: EnabledDeliveryRuntime,
-  context: DaemonDeliveryContext,
-  occurredAt: string,
-  publication: Extract<PublicationOutcome, { readonly status: "published" }>,
-): Promise<void> {
-  await recheckDeliveryBoundary(configured, delivery, "terminal", context);
-  await appendLifecycleTransition(configured, context, occurredAt, {
-    from: "result-ready",
-    event: "publish",
-    to: "delivered",
-    metadata: {
-      branch: publication.branch,
-      commit_sha: publication.commitSha,
-      tree_sha: publication.treeSha,
-    },
-  });
-}
+  candidateFromJournal,
+  candidateJournalMetadata,
+  contractDeadlineEpochMs,
+  exactOutcomeStatus,
+  failureFromOutcome,
+  snapshotPublicationOutcome,
+} from "./delivery-journal-codecs.js";
+import {
+  appendLifecycleTransition,
+  finalizePublishedResult,
+  latestLeaseLifecycleTransition,
+  recheckDeliveryBoundary,
+  recheckDeliveryProjection,
+} from "./delivery-lifecycle-authority.js";
+import { startLeaseHeartbeat } from "./lease-heartbeat.js";
+import { createLeaseMutationCoordinator } from "./lease-mutation-coordinator.js";
+import {
+  assertClaimedRootAuthority,
+  assertRecoveryIssueRooted,
+  coordinatedRecoveryRepository,
+} from "./delivery-recovery-authority.js";
 
 export async function executeClaimedDelivery(
   configured: EnabledRepositoryRuntime,
@@ -284,15 +71,21 @@ export async function executeClaimedDelivery(
     configured.repository,
     claimed.contract.work_id,
   );
-  if (root === undefined || root.digest !== claimed.digest) {
-    throw new TypeError("INVALID_DELIVERY_ROOT");
-  }
-  const leaseDeadline = Date.parse(claimed.claim.metadata.lease_expires_at ?? "");
-  const contractDeadline = Date.parse(occurredAt) + claimed.contract.limits.timeout_minutes * 60_000;
-  const deadlineEpochMs = Math.min(leaseDeadline, contractDeadline);
+  if (root === undefined) throw new TypeError("INVALID_DELIVERY_ROOT");
+  await assertClaimedRootAuthority(configured, claimed, root);
+  const deadlineEpochMs = contractDeadlineEpochMs(
+    claim,
+    claimed.contract.limits.timeout_minutes,
+  );
   if (!Number.isSafeInteger(deadlineEpochMs) || deadlineEpochMs <= Date.parse(occurredAt)) {
     throw new TypeError("INVALID_DELIVERY_DEADLINE");
   }
+  const deliveryAbort = new AbortController();
+  const onParentAbort = (): void => {
+    deliveryAbort.abort(signal.reason);
+  };
+  signal.addEventListener("abort", onParentAbort, { once: true });
+  if (signal.aborted) onParentAbort();
   const context: DaemonDeliveryContext = Object.freeze({
     repository: configured.repository,
     issueNumber: claimed.issueNumber,
@@ -305,108 +98,167 @@ export async function executeClaimedDelivery(
     approvedPolicyDigest: delivery.approvedPolicyDigest,
     claim,
     deadlineEpochMs,
-    signal,
+    signal: deliveryAbort.signal,
   });
-  await recheckDeliveryBoundary(configured, delivery, "start", context);
-  await appendLifecycleTransition(configured, context, occurredAt, {
-    from: "claimed", event: "start", to: "running",
-  });
-  await recheckDeliveryBoundary(configured, delivery, "run", context);
-  const pending: unknown = delivery.runDelivery(context);
-  if (!(pending instanceof Promise)) throw new TypeError("INVALID_DELIVERY_RUNNER");
-  let outcome: DeliveryOutcome;
+  const coordinator = createLeaseMutationCoordinator();
+  let heartbeat: Awaited<ReturnType<typeof startLeaseHeartbeat>> | undefined;
   try {
-    outcome = await pending as DeliveryOutcome;
-  } catch (error) {
-    outcome = {
-      status: "infrastructure-failure",
-      report: {
-        category: "INFRASTRUCTURE_FAILURE",
-        code: "DELIVERY_INFRASTRUCTURE_FAILURE",
-        summary: String(error),
-        durationMs: 0,
-      },
-    };
-  }
-  const status = exactOutcomeStatus(outcome);
-  await recheckDeliveryBoundary(configured, delivery, "result", context);
-  if (outcome.status === "result-ready") {
-    const candidate = snapshotVerifiedCandidate(outcome);
-    await appendLifecycleTransition(configured, context, occurredAt, {
-      from: "running",
-      event: "candidate",
-      to: "reviewing",
-      metadata: candidateJournalMetadata(candidate),
+    heartbeat = await startLeaseHeartbeat({
+      repository: configured.repository,
+      github: configured.github,
+      installation: configured.installation,
+      signingKey: configured.signingKey,
+      verificationKeys: configured.verificationKeys,
+      issueNumber: context.issueNumber,
+      workId: context.workId,
+      contractDigest: context.contractDigest,
+      leaseId: context.claim.payload.metadata.lease_id ?? "",
+      deadlineEpochMs: context.deadlineEpochMs,
+      now: delivery.now,
+      assertAuthority: () => recheckDeliveryBoundary(configured, delivery, "run", context),
+      onFailure: (error) => { deliveryAbort.abort(error); },
+      coordinator,
     });
-    await appendLifecycleTransition(configured, context, occurredAt, {
-      from: "reviewing",
-      event: "verify",
-      to: "result-ready",
-      metadata: candidateJournalMetadata(candidate),
+    await heartbeat.race((async () => {
+    await recheckDeliveryBoundary(configured, delivery, "start", context);
+    await appendLifecycleTransition(configured, delivery, "start", context, occurredAt, coordinator, {
+      from: "claimed", event: "start", to: "running",
     });
-    await recheckDeliveryBoundary(configured, delivery, "publish", context);
-    const publicationPending: unknown = delivery.publish(candidate, context);
-    if (!(publicationPending instanceof Promise)) throw new TypeError("INVALID_PUBLISHER");
-    let publication: PublicationOutcome;
+    let outcome: DeliveryOutcome;
     try {
-      publication = snapshotPublicationOutcome(
-        await (publicationPending as Promise<unknown>),
-      );
-    } catch {
-      publication = {
-        status: "ambiguous",
-        branch: context.contract.target_branch,
-        commitSha: "0".repeat(40),
-        reason: "PUSH_TIMEOUT",
+      const pending: unknown = delivery.runDelivery(context);
+      if (!(pending instanceof Promise)) throw new TypeError("INVALID_DELIVERY_RUNNER");
+      outcome = await pending as DeliveryOutcome;
+    } catch (error) {
+      if (
+        error instanceof DeliveryContractViolation ||
+        error instanceof TypeError
+      ) {
+        throw error;
+      }
+      outcome = {
+        status: "infrastructure-failure",
+        report: {
+          category: "INFRASTRUCTURE_FAILURE",
+          code: "DELIVERY_INFRASTRUCTURE_FAILURE",
+          summary: String(error),
+          durationMs: 0,
+        },
       };
     }
-    if (publication.status === "published") {
-      await finalizePublishedResult(
-        configured,
-        delivery,
-        context,
-        occurredAt,
-        publication,
-      );
-      return;
-    }
-    outcome = {
-      status: "infrastructure-failure",
-      report: {
-        category: "INFRASTRUCTURE_FAILURE",
-        code: "DELIVERY_INFRASTRUCTURE_FAILURE",
-        summary: publication.reason,
-        durationMs: 0,
-      },
-    };
-  }
-  const failure = status === "approval-required"
-    ? {
-        category: "WORK_FAILURE" as const,
-        code: "PATH_POLICY_FAILED" as const,
-        summary: String(ownDataProperty(outcome, "reason")),
-        durationMs: 0,
+      const status = exactOutcomeStatus(outcome);
+      await recheckDeliveryBoundary(configured, delivery, "result", context);
+      if (outcome.status === "result-ready") {
+        const candidate = snapshotVerifiedCandidate(outcome);
+        await appendLifecycleTransition(configured, delivery, "result", context, occurredAt, coordinator, {
+          from: "running",
+          event: "candidate",
+          to: "reviewing",
+          metadata: candidateJournalMetadata(candidate),
+        });
+        await appendLifecycleTransition(configured, delivery, "result", context, occurredAt, coordinator, {
+          from: "reviewing",
+          event: "verify",
+          to: "result-ready",
+          metadata: candidateJournalMetadata(candidate),
+        });
+        await recheckDeliveryBoundary(configured, delivery, "publish", context);
+        let publication: PublicationOutcome;
+        try {
+          const publicationPending: unknown = delivery.publish(candidate, context);
+          if (!(publicationPending instanceof Promise)) {
+            throw new TypeError("INVALID_PUBLISHER");
+          }
+          publication = snapshotPublicationOutcome(
+            await (publicationPending as Promise<unknown>),
+          );
+        } catch (error) {
+          if (
+            error instanceof DeliveryContractViolation ||
+            error instanceof TypeError
+          ) {
+            throw error;
+          }
+          publication = {
+            status: "ambiguous",
+            branch: context.contract.target_branch,
+            commitSha: "0".repeat(40),
+            reason: "PUSH_TIMEOUT",
+          };
+        }
+        if (publication.status === "published") {
+          await finalizePublishedResult(
+            configured,
+            delivery,
+            context,
+            occurredAt,
+            publication,
+            coordinator,
+          );
+          return;
+        }
+        outcome = {
+          status: "infrastructure-failure",
+          report: {
+            category: "INFRASTRUCTURE_FAILURE",
+            code: "DELIVERY_INFRASTRUCTURE_FAILURE",
+            summary: publication.reason,
+            durationMs: 0,
+          },
+        };
       }
-    : failureFromOutcome(outcome);
-  await recoverWork({
-    repository: configured.repository,
-    rootIssueNumber: context.rootIssueNumber,
-    issueNumber: context.issueNumber,
-    rootWorkId: context.rootWorkId,
-    workId: context.workId,
-    contractDigest: context.contractDigest,
-    attempt: context.attempt,
-    claim: context.claim,
-    failure,
-    requiresExpansion: status === "approval-required" ||
-      (delivery.requiresExpansion?.(failure, context) ?? false),
-    occurredAt,
-    deadlineEpochMs: context.deadlineEpochMs,
-    installation: configured.installation,
-    signingKey: configured.signingKey,
-    verificationKeys: configured.verificationKeys,
-    now: delivery.now,
-  }, configured.github);
+      const failure = status === "approval-required"
+        ? {
+            category: "WORK_FAILURE" as const,
+            code: "PATH_POLICY_FAILED" as const,
+            summary: String(ownDataProperty(outcome, "reason")),
+            durationMs: 0,
+        }
+        : failureFromOutcome(outcome);
+      const authorityDelta = delivery.authorityExpansion?.(failure, context);
+      if (status === "approval-required" && authorityDelta === undefined) {
+        throw new DeliveryContractViolation("missing exact Recovery authority delta");
+      }
+      const recoveryPolicyDigest = encodeRecoveryPolicyCeiling(
+        delivery.recoveryPolicyCeiling,
+      ).digest;
+    const assertRecoveryMutation = (): Promise<void> =>
+      recheckDeliveryBoundary(configured, delivery, "result", context);
+    const assertRecoveryProjection = (): Promise<void> =>
+      recheckDeliveryProjection(configured, delivery, "result", context);
+    await recoverWork({
+        repository: configured.repository,
+        rootIssueNumber: context.rootIssueNumber,
+        issueNumber: context.issueNumber,
+        rootWorkId: context.rootWorkId,
+        workId: context.workId,
+        contractDigest: context.contractDigest,
+        attempt: context.attempt,
+        claim: context.claim,
+        failure,
+        requiresExpansion: authorityDelta !== undefined,
+        authorityDelta: authorityDelta ?? null,
+        policyCeiling: delivery.recoveryPolicyCeiling,
+        policyDigest: recoveryPolicyDigest,
+        occurredAt,
+        deadlineEpochMs: context.deadlineEpochMs,
+        installation: configured.installation,
+        signingKey: configured.signingKey,
+        verificationKeys: configured.verificationKeys,
+        now: delivery.now,
+        assertMutationAuthority: assertRecoveryMutation,
+        assertProjectionAuthority: assertRecoveryProjection,
+    }, coordinatedRecoveryRepository(
+      configured.github,
+      coordinator,
+      assertRecoveryMutation,
+      assertRecoveryProjection,
+    ));
+    })());
+  } finally {
+    await heartbeat?.stop();
+    signal.removeEventListener("abort", onParentAbort);
+  }
 }
 
 export async function resumeInterruptedRecovery(
@@ -449,6 +301,18 @@ export async function resumeInterruptedRecovery(
   const rootIssueNumber = Number(metadata.root_issue_number);
   const attempt = Number(metadata.attempt);
   const requiresExpansion = metadata.requires_expansion;
+  const authorityDelta = decodeRecoveryAuthorityDelta(
+    metadata.recovery_authority_delta ?? "",
+    metadata.recovery_authority_delta_digest ?? "",
+  );
+  const policyCeiling = decodeRecoveryPolicyCeiling(
+    metadata.recovery_policy_ceiling ?? "",
+    metadata.recovery_policy_ceiling_digest ?? "",
+  );
+  if (
+    policyCeiling !== undefined &&
+    encodeRecoveryPolicyCeiling(delivery.recoveryPolicyCeiling).digest !== metadata.policy_digest
+  ) throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   const recoveryId = parseRecoveryWorkId(issue.workId);
   if (
     rootWorkId !== decoded.contract.work_id ||
@@ -458,15 +322,20 @@ export async function resumeInterruptedRecovery(
     (attempt === 1
       ? issue.workId !== rootWorkId
       : recoveryId?.nextAttempt !== attempt) ||
-    (requiresExpansion !== "true" && requiresExpansion !== "false")
+    (requiresExpansion !== "true" && requiresExpansion !== "false") ||
+    authorityDelta === undefined ||
+    policyCeiling === undefined ||
+    typeof metadata.policy_digest !== "string" ||
+    (requiresExpansion === "true") !== (authorityDelta !== null)
   ) {
     throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   }
   const root = issues.get(rootIssueNumber) ??
     await configured.github.findWork(configured.repository, rootWorkId);
-  if (root === undefined || root.workId !== rootWorkId || root.digest !== issue.digest) {
+  if (root === undefined || root.workId !== rootWorkId) {
     throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   }
+  await assertRecoveryIssueRooted(configured, issue, root, attempt);
   const claim = signTransition(timeline.leaseAuthority.payload, configured.signingKey);
   const context: DaemonDeliveryContext = Object.freeze({
     repository: configured.repository,
@@ -479,7 +348,10 @@ export async function resumeInterruptedRecovery(
     contractDigest: issue.digest as Sha256,
     approvedPolicyDigest: delivery.approvedPolicyDigest,
     claim,
-    deadlineEpochMs: Date.parse(claim.payload.metadata.lease_expires_at ?? ""),
+    deadlineEpochMs: contractDeadlineEpochMs(
+      claim,
+      decoded.contract.limits.timeout_minutes,
+    ),
     signal,
   });
   await recheckDeliveryBoundary(configured, delivery, "result", context);
@@ -494,12 +366,19 @@ export async function resumeInterruptedRecovery(
     claim,
     failure: decodeRecoveryFailureReport(metadata.recovery_failure ?? ""),
     requiresExpansion: requiresExpansion === "true",
+    authorityDelta,
+    policyCeiling,
+    policyDigest: metadata.policy_digest as Sha256,
     occurredAt,
     deadlineEpochMs: context.deadlineEpochMs,
     installation: configured.installation,
     signingKey: configured.signingKey,
     verificationKeys: configured.verificationKeys,
     now: delivery.now,
+    assertMutationAuthority: () =>
+      recheckDeliveryBoundary(configured, delivery, "result", context),
+    assertProjectionAuthority: () =>
+      recheckDeliveryProjection(configured, delivery, "result", context),
   }, configured.github);
   return true;
 }
@@ -529,7 +408,11 @@ export async function resumePublishedResult(
   ) {
     return;
   }
-  const candidate = candidateFromJournal(timeline.current.payload.metadata);
+  const candidateAuthority = latestLeaseLifecycleTransition(
+    timeline,
+    timeline.leaseAuthority.payload.metadata.lease_id ?? "",
+  );
+  const candidate = candidateFromJournal(candidateAuthority?.payload.metadata ?? {});
   if (candidate === undefined) throw new TypeError("INVALID_DELIVERY_RESUME");
   const decoded = decodeWorkBody(issue.body);
   const root = await configured.github.findWork(configured.repository, decoded.contract.work_id);
@@ -538,8 +421,12 @@ export async function resumePublishedResult(
   if (root === undefined || (attempt !== 1 && attempt !== 2 && attempt !== 3)) {
     throw new TypeError("INVALID_DELIVERY_RESUME");
   }
+  await assertRecoveryIssueRooted(configured, issue, root, attempt);
   const claim = signTransition(timeline.leaseAuthority.payload, configured.signingKey);
-  const leaseDeadline = Date.parse(claim.payload.metadata.lease_expires_at ?? "");
+  const publicationAbort = new AbortController();
+  const onParentAbort = (): void => { publicationAbort.abort(signal.reason); };
+  signal.addEventListener("abort", onParentAbort, { once: true });
+  if (signal.aborted) onParentAbort();
   const context: DaemonDeliveryContext = Object.freeze({
     repository: configured.repository,
     issueNumber: issue.number,
@@ -551,30 +438,59 @@ export async function resumePublishedResult(
     contractDigest: issue.digest as Sha256,
     approvedPolicyDigest: delivery.approvedPolicyDigest,
     claim,
-    deadlineEpochMs: leaseDeadline,
-    signal,
+    deadlineEpochMs: contractDeadlineEpochMs(
+      claim,
+      decoded.contract.limits.timeout_minutes,
+    ),
+    signal: publicationAbort.signal,
   });
-  if (timeline.current.payload.to === "reviewing") {
-    await recheckDeliveryBoundary(configured, delivery, "result", context);
-    await appendLifecycleTransition(configured, context, occurredAt, {
-      from: "reviewing",
-      event: "verify",
-      to: "result-ready",
-      metadata: candidateJournalMetadata(candidate),
+  const coordinator = createLeaseMutationCoordinator();
+  let heartbeat: Awaited<ReturnType<typeof startLeaseHeartbeat>> | undefined;
+  try {
+    heartbeat = await startLeaseHeartbeat({
+      repository: configured.repository,
+      github: configured.github,
+      installation: configured.installation,
+      signingKey: configured.signingKey,
+      verificationKeys: configured.verificationKeys,
+      issueNumber: context.issueNumber,
+      workId: context.workId,
+      contractDigest: context.contractDigest,
+      leaseId: context.claim.payload.metadata.lease_id ?? "",
+      deadlineEpochMs: context.deadlineEpochMs,
+      now: delivery.now,
+      assertAuthority: () => recheckDeliveryBoundary(configured, delivery, "publish", context),
+      onFailure: (error) => { publicationAbort.abort(error); },
+      coordinator,
     });
+    await heartbeat.race((async () => {
+    if (timeline.current?.payload.to === "reviewing") {
+      await recheckDeliveryBoundary(configured, delivery, "result", context);
+      await appendLifecycleTransition(configured, delivery, "result", context, occurredAt, coordinator, {
+        from: "reviewing",
+        event: "verify",
+        to: "result-ready",
+        metadata: candidateJournalMetadata(candidate),
+      });
+    }
+    await recheckDeliveryBoundary(configured, delivery, "publish", context);
+    const publicationPending: unknown = delivery.publish(candidate, context);
+    if (!(publicationPending instanceof Promise)) throw new TypeError("INVALID_PUBLISHER");
+    const publication = snapshotPublicationOutcome(
+      await (publicationPending as Promise<unknown>),
+    );
+    if (publication.status !== "published") return;
+    await finalizePublishedResult(
+      configured,
+      delivery,
+      context,
+      occurredAt,
+      publication,
+      coordinator,
+    );
+    })());
+  } finally {
+    await heartbeat?.stop();
+    signal.removeEventListener("abort", onParentAbort);
   }
-  await recheckDeliveryBoundary(configured, delivery, "publish", context);
-  const publicationPending: unknown = delivery.publish(candidate, context);
-  if (!(publicationPending instanceof Promise)) throw new TypeError("INVALID_PUBLISHER");
-  const publication = snapshotPublicationOutcome(
-    await (publicationPending as Promise<unknown>),
-  );
-  if (publication.status !== "published") return;
-  await finalizePublishedResult(
-    configured,
-    delivery,
-    context,
-    occurredAt,
-    publication,
-  );
 }

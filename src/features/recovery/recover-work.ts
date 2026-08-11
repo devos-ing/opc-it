@@ -7,6 +7,7 @@ import {
   deriveRecoveryWorkId,
   parseRecoveryWorkId,
   readTrustedTimeline,
+  reconciliationEventId,
   signTransition,
   validateQueueTransitionRecord,
   verifyTransition,
@@ -24,8 +25,18 @@ import {
 import { classifyFailure } from "./classify-failure.js";
 import {
   acquireRecoverySlot,
+  decodeRecoveryAddendum,
+  encodeRecoveryPolicyCeiling,
+  encodeRecoveryAuthorityDelta,
   encodeRecoveryAddendum,
+  snapshotRecoveryAuthorityDelta,
+  snapshotRecoveryPolicyCeiling,
   type RecoveryAddendumEnvelope,
+  type RecoveryAuthorityDelta,
+  type RecoveryPolicyCeiling,
+  validateRecoveryAuthorityExpansion,
+  validateRecoveryAuthorityWithinPolicy,
+  validateRecoveryContractChainLink,
 } from "./recovery-slot.js";
 
 export interface RecoveryInput {
@@ -39,12 +50,17 @@ export interface RecoveryInput {
   readonly claim: SignedTransition;
   readonly failure: FailureReport;
   readonly requiresExpansion: boolean;
+  readonly authorityDelta: RecoveryAuthorityDelta | null;
+  readonly policyCeiling: RecoveryPolicyCeiling;
+  readonly policyDigest: Sha256;
   readonly occurredAt: string;
   readonly deadlineEpochMs: number;
   readonly installation: InstallationRecord;
   readonly signingKey: string;
   readonly verificationKeys: Readonly<Record<string, string>>;
   readonly now: () => number;
+  readonly assertMutationAuthority: () => Promise<void>;
+  readonly assertProjectionAuthority: () => Promise<void>;
 }
 
 export type RecoveryOutcome =
@@ -65,12 +81,17 @@ const recoveryInputKeys = [
   "claim",
   "failure",
   "requiresExpansion",
+  "authorityDelta",
+  "policyCeiling",
+  "policyDigest",
   "occurredAt",
   "deadlineEpochMs",
   "installation",
   "signingKey",
   "verificationKeys",
   "now",
+  "assertMutationAuthority",
+  "assertProjectionAuthority",
 ] as const;
 const workFailureCodes = new Set([
   "CODEX_EXECUTION_TIMEOUT",
@@ -175,6 +196,10 @@ function snapshotRecoveryInput(value: unknown): RecoveryInput {
   const root = exactRecord(value, recoveryInputKeys, "envelope");
   const installation = exactRecord(root.installation, ["id", "keyId"], "installation");
   const failure = snapshotFailureReport(root.failure);
+  const authorityDelta = root.authorityDelta === null
+    ? null
+    : snapshotRecoveryAuthorityDelta(root.authorityDelta);
+  const policyCeiling = snapshotRecoveryPolicyCeiling(root.policyCeiling);
   if (
     typeof root.repository !== "string" ||
     typeof root.rootIssueNumber !== "number" ||
@@ -189,11 +214,17 @@ function snapshotRecoveryInput(value: unknown): RecoveryInput {
     !/^sha256:[0-9a-f]{64}$/u.test(root.contractDigest) ||
     (root.attempt !== 1 && root.attempt !== 2 && root.attempt !== 3) ||
     typeof root.requiresExpansion !== "boolean" ||
+    root.requiresExpansion !== (authorityDelta !== null) ||
+    typeof root.policyDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(root.policyDigest) ||
+    encodeRecoveryPolicyCeiling(policyCeiling).digest !== root.policyDigest ||
     typeof root.occurredAt !== "string" ||
     typeof root.deadlineEpochMs !== "number" ||
     typeof root.signingKey !== "string" ||
     root.signingKey.length === 0 ||
     typeof root.now !== "function" ||
+    typeof root.assertMutationAuthority !== "function" ||
+    typeof root.assertProjectionAuthority !== "function" ||
     typeof installation.id !== "string" ||
     installation.id.length === 0 ||
     typeof installation.keyId !== "string" ||
@@ -250,12 +281,17 @@ function snapshotRecoveryInput(value: unknown): RecoveryInput {
     }),
     failure,
     requiresExpansion: root.requiresExpansion,
+    authorityDelta,
+    policyCeiling,
+    policyDigest: root.policyDigest,
     occurredAt: root.occurredAt,
     deadlineEpochMs: root.deadlineEpochMs,
     installation: Object.freeze({ id: installation.id, keyId: installation.keyId }),
     signingKey,
     verificationKeys: Object.freeze(verificationKeys),
     now: root.now as () => number,
+    assertMutationAuthority: root.assertMutationAuthority as () => Promise<void>,
+    assertProjectionAuthority: root.assertProjectionAuthority as () => Promise<void>,
   });
 }
 
@@ -316,6 +352,80 @@ function leaseId(timeline: TrustedTimeline): string {
   return value;
 }
 
+function issueByWorkId(
+  issues: ReadonlyMap<number, QueueWorkIssue>,
+  workId: string,
+): QueueWorkIssue | undefined {
+  const matches = [...issues.values()].filter((issue) => issue.workId === workId);
+  if (matches.length > 1) {
+    throw new DomainError("INVALID_TRANSITION", `duplicate Recovery Work ${workId}`);
+  }
+  return matches[0];
+}
+
+function assertRecoveryContractChain(
+  input: RecoveryInput,
+  snapshot: AuthoritySnapshot,
+  rootIssue: QueueWorkIssue,
+  currentIssue: QueueWorkIssue,
+): ValidatedExecutionContract {
+  const rootDecoded = decodeWorkBody(rootIssue.body);
+  if (
+    rootIssue.repository !== input.repository ||
+    rootIssue.workId !== input.rootWorkId ||
+    rootDecoded.contract.repository !== input.repository ||
+    rootDecoded.contract.work_id !== input.rootWorkId ||
+    rootDecoded.digest !== rootIssue.digest
+  ) {
+    throw new DomainError("INCOMPLETE_ISSUE", "Recovery root contract mismatch");
+  }
+  let parent = rootIssue;
+  let parentContract = rootDecoded.contract;
+  for (let attempt = 2; attempt <= input.attempt; attempt += 1) {
+    const workId = deriveRecoveryWorkId(input.rootWorkId, attempt);
+    const child = issueByWorkId(snapshot.issues, workId);
+    const timeline = child === undefined ? undefined : snapshot.timelines.get(child.number);
+    const authority = timeline?.accepted.findLast(({ payload }) =>
+      payload.event === "retry" || payload.event === "request-approval"
+    );
+    const encoded = authority?.payload.metadata.recovery_addendum;
+    const digest = authority?.payload.metadata.recovery_addendum_digest;
+    const addendum = encoded === undefined || digest === undefined
+      ? undefined
+      : decodeRecoveryAddendum(encoded, digest);
+    if (
+      child === undefined ||
+      authority === undefined ||
+      addendum === undefined ||
+      child.repository !== input.repository ||
+      child.workId !== workId ||
+      addendum.root_work_id !== input.rootWorkId ||
+      addendum.next_attempt !== attempt ||
+      addendum.root_contract_digest !== parent.digest ||
+      addendum.recovery_contract_digest !== child.digest
+    ) {
+      throw new DomainError("INVALID_TRANSITION", "Recovery contract chain mismatch");
+    }
+    const childContract = validateRecoveryContractChainLink(
+      parent,
+      child,
+      addendum,
+      input.rootWorkId,
+      attempt,
+    );
+    parent = child;
+    parentContract = childContract;
+  }
+  if (
+    parent.number !== currentIssue.number ||
+    parent.digest !== input.contractDigest ||
+    canonicalize(parentContract) !== canonicalize(decodeWorkBody(currentIssue.body).contract)
+  ) {
+    throw new DomainError("INVALID_TRANSITION", "Recovery effective contract mismatch");
+  }
+  return parentContract;
+}
+
 async function transition(
   input: RecoveryInput,
   repository: RecoveryRepository,
@@ -328,18 +438,6 @@ async function transition(
   const current = before.timelines.get(issueNumber)?.current;
   if (issue === undefined) {
     throw new DomainError("INCOMPLETE_ISSUE", `Recovery transition #${String(issueNumber)}`);
-  }
-  if (current?.payload.event === event) {
-    const actual = current.payload.metadata;
-    const expectedKeys = Object.keys(metadata).toSorted();
-    const actualKeys = Object.keys(actual).toSorted();
-    if (
-      expectedKeys.length !== actualKeys.length ||
-      expectedKeys.some((key, index) => key !== actualKeys[index] || actual[key] !== metadata[key])
-    ) {
-      throw new DomainError("RECOVERY_ATTEMPT_CONFLICT", issue.workId);
-    }
-    return;
   }
   const initialRecoveryTransition =
     current === undefined && (event === "retry" || event === "request-approval");
@@ -354,9 +452,39 @@ async function transition(
       : event === "request-approval"
         ? "awaiting-approval"
         : event === "block"
-          ? "blocked"
+        ? "blocked"
           : undefined;
   if (to === undefined) throw new DomainError("INVALID_TRANSITION", event);
+  const transitionMetadata: Readonly<Record<string, string>> = event === "incident"
+    ? Object.freeze({
+        ...metadata,
+        event_id: reconciliationEventId({
+          issueNumber: issue.number,
+          workId: issue.workId,
+          leaseId: metadata.lease_id ?? "",
+          from,
+          event,
+          to,
+        }),
+        outage_started_at: input.occurredAt,
+        proposal_id: `recovery-incident:${issue.workId}:${input.occurredAt}`,
+        reconcile_decision: "requeue",
+        reconciled_at: input.occurredAt,
+      })
+    : metadata;
+  if (current?.payload.event === event) {
+    const actual = current.payload.metadata;
+    const expectedKeys = Object.keys(transitionMetadata).toSorted();
+    const actualKeys = Object.keys(actual).toSorted();
+    if (
+      expectedKeys.length !== actualKeys.length ||
+      expectedKeys.some((key, index) =>
+        key !== actualKeys[index] || actual[key] !== transitionMetadata[key])
+    ) {
+      throw new DomainError("RECOVERY_ATTEMPT_CONFLICT", issue.workId);
+    }
+    return;
+  }
   const signed = signTransition({
     version: 1,
     installation_id: input.installation.id,
@@ -367,9 +495,11 @@ async function transition(
     event,
     to,
     occurred_at: input.occurredAt,
-    metadata,
+    metadata: transitionMetadata,
   }, input.signingKey);
   const record = validateQueueTransitionRecord(JSON.stringify(signed));
+  assertDeadline(input);
+  await input.assertMutationAuthority();
   assertDeadline(input);
   await repository.appendTransition(input.repository, issue.number, record);
   const after = await readAuthority(input, repository);
@@ -382,6 +512,8 @@ async function transition(
   ) {
     throw new DomainError("INVALID_TRANSITION", `Recovery transition lost #${String(issue.number)}`);
   }
+  assertDeadline(input);
+  await input.assertProjectionAuthority();
   assertDeadline(input);
   await repository.setStateLabel(input.repository, issue.number, `opc:${to}`);
 }
@@ -406,6 +538,9 @@ function addendumMetadata(
     plan_digest: digest,
     recovery_addendum: encoded.payload,
     recovery_addendum_digest: encoded.digest,
+    recovery_contract_digest: addendum.recovery_contract_digest,
+    policy_digest: addendum.policy_digest,
+    root_contract_digest: addendum.root_contract_digest,
     root_work_id: addendum.root_work_id,
   });
 }
@@ -444,7 +579,6 @@ export async function recoverWork(
     currentTimeline === undefined ||
     currentIssue.workId !== input.workId ||
     rootIssue.workId !== input.rootWorkId ||
-    rootIssue.digest !== input.contractDigest ||
     currentIssue.digest !== input.contractDigest ||
     (initial.authority.leaseAuthority !== undefined &&
       initial.authority.leaseAuthority.payload.issue_number !== input.issueNumber) ||
@@ -452,17 +586,25 @@ export async function recoverWork(
   ) {
     throw new DomainError("INVALID_TRANSITION", "Recovery repository authority mismatch");
   }
-  const decoded = decodeWorkBody(rootIssue.body);
-  const contract: ValidatedExecutionContract = decoded.contract;
+  const contract = assertRecoveryContractChain(input, initial, rootIssue, currentIssue);
   if (
-    decoded.digest !== input.contractDigest ||
     contract.work_id !== input.rootWorkId ||
     contract.repository !== input.repository ||
     input.attempt > contract.limits.attempts
   ) {
     throw new DomainError("INCOMPLETE_ISSUE", "Recovery root contract mismatch");
   }
+  if (input.authorityDelta !== null && input.attempt < 3) {
+    validateRecoveryAuthorityWithinPolicy(input.authorityDelta, input.policyCeiling);
+    validateRecoveryAuthorityExpansion(
+      contract,
+      input.authorityDelta,
+      (input.attempt + 1) as 2 | 3,
+    );
+  }
   const classified = classifyFailure(input.failure, contract.base_sha);
+  const encodedAuthorityDelta = encodeRecoveryAuthorityDelta(input.authorityDelta);
+  const encodedPolicyCeiling = encodeRecoveryPolicyCeiling(input.policyCeiling);
   const commonMetadata = Object.freeze({
     attempt: String(input.attempt),
     category: classified.category,
@@ -470,6 +612,11 @@ export async function recoverWork(
     lease_id: claim.metadata.lease_id,
     plan_digest: input.contractDigest,
     recovery_failure: encodeRecoveryFailureReport(input.failure),
+    recovery_authority_delta: encodedAuthorityDelta.payload,
+    recovery_authority_delta_digest: encodedAuthorityDelta.digest,
+    recovery_policy_ceiling: encodedPolicyCeiling.payload,
+    recovery_policy_ceiling_digest: encodedPolicyCeiling.digest,
+    policy_digest: input.policyDigest,
     requires_expansion: String(input.requiresExpansion),
     root_issue_number: String(input.rootIssueNumber),
     root_work_id: input.rootWorkId,
@@ -481,7 +628,8 @@ export async function recoverWork(
   }
 
   await transition(input, repository, input.issueNumber, "work-failure", commonMetadata);
-  if (input.attempt >= contract.limits.attempts) {
+  const effectiveAttemptLimit = input.authorityDelta?.attempts ?? contract.limits.attempts;
+  if (input.attempt >= effectiveAttemptLimit) {
     const latest = await readAuthority(input, repository);
     const current = latest.timelines.get(input.issueNumber);
     await transition(input, repository, input.issueNumber, "block", {
@@ -505,12 +653,17 @@ export async function recoverWork(
     repository,
     contract,
     contractDigest: input.contractDigest,
+    currentWorkId: input.workId,
     nextAttempt,
     category: classified.category,
     fingerprint: classified.fingerprint,
+    authorityDelta: input.authorityDelta,
+    policyCeiling: input.policyCeiling,
+    policyDigest: input.policyDigest,
     assertDeadline: () => { assertDeadline(input); },
+    assertMutationAuthority: input.assertMutationAuthority,
   });
-  const metadata = addendumMetadata(input, slot.addendum, input.contractDigest);
+  const metadata = addendumMetadata(input, slot.addendum, slot.issue.digest);
   await transition(
     input,
     repository,

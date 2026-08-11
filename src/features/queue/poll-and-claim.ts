@@ -114,6 +114,23 @@ function recoveryAddendumIsValid(
   return addendum?.root_work_id === rootWorkId && addendum.next_attempt === nextAttempt;
 }
 
+function matchesPendingRecovery(
+  work: EligibleWork,
+  timeline: TrustedTimeline,
+  pending: NonNullable<RepositoryJournalAuthority["pendingRecovery"]>,
+): boolean {
+  if (!work.recovery || work.contract.work_id !== pending.rootWorkId) return false;
+  const recoveryAuthority = timeline.accepted.findLast(({ payload }) =>
+    payload.event === "retry" || payload.event === "request-approval"
+  );
+  if (recoveryAuthority === undefined) return false;
+  const metadata = recoveryAuthority.payload.metadata;
+  return (
+    (metadata.root_contract_digest ?? metadata.plan_digest) === pending.planDigest &&
+    (metadata.recovery_contract_digest ?? metadata.plan_digest) === work.digest
+  );
+}
+
 function requireNonEmpty(name: string, value: string): string {
   if (value.length === 0 || value.includes("\u0000")) {
     throw new TypeError(`INVALID_CLAIM_INPUT: ${name}`);
@@ -374,9 +391,7 @@ export async function pollAndClaim(
       if (
         work !== undefined &&
         (pendingRecovery === undefined ||
-          (work.recovery &&
-            work.contract.work_id === pendingRecovery.rootWorkId &&
-            work.digest === pendingRecovery.planDigest))
+          matchesPendingRecovery(work, view, pendingRecovery))
       ) {
         eligible.push(work);
       }

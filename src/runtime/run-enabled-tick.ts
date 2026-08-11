@@ -9,6 +9,11 @@ import {
   type SignedTransition,
 } from "../features/queue/index.js";
 import type { Sha256 } from "../domain/identity.js";
+import {
+  snapshotRecoveryPolicyCeiling,
+  type RecoveryAuthorityDelta,
+  type RecoveryPolicyCeiling,
+} from "../domain/recovery.js";
 import type {
   DeliveryOutcome,
   DeliveryRevalidation,
@@ -60,6 +65,7 @@ export interface DaemonDeliveryContext {
 
 export interface EnabledDeliveryRuntime {
   readonly approvedPolicyDigest: Sha256;
+  readonly recoveryPolicyCeiling: RecoveryPolicyCeiling;
   readonly now: () => number;
   readonly runDelivery: (context: DaemonDeliveryContext) => Promise<DeliveryOutcome>;
   readonly publish: (candidate: VerifiedCandidate, context: DaemonDeliveryContext) => Promise<PublicationOutcome>;
@@ -67,7 +73,10 @@ export interface EnabledDeliveryRuntime {
     boundary: DeliveryLoopBoundary,
     context: DaemonDeliveryContext,
   ) => Promise<DeliveryRevalidation>;
-  readonly requiresExpansion?: (report: FailureReport, context: DaemonDeliveryContext) => boolean;
+  readonly authorityExpansion?: (
+    report: FailureReport,
+    context: DaemonDeliveryContext,
+  ) => RecoveryAuthorityDelta | undefined;
 }
 
 export interface RunEnabledTickInput {
@@ -158,8 +167,11 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
     const now = ownDataProperty(deliveryValue, "now");
     const publish = ownDataProperty(deliveryValue, "publish");
     const revalidate = ownDataProperty(deliveryValue, "revalidate");
-    const expansionDescriptor = Object.getOwnPropertyDescriptor(deliveryValue, "requiresExpansion");
-    const requiresExpansion: unknown = expansionDescriptor === undefined
+    const recoveryPolicyCeiling = snapshotRecoveryPolicyCeiling(
+      ownDataProperty(deliveryValue, "recoveryPolicyCeiling"),
+    );
+    const expansionDescriptor = Object.getOwnPropertyDescriptor(deliveryValue, "authorityExpansion");
+    const authorityExpansion: unknown = expansionDescriptor === undefined
       ? undefined
       : "value" in expansionDescriptor
         ? expansionDescriptor.value as unknown
@@ -171,7 +183,7 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       typeof now !== "function" ||
       typeof publish !== "function" ||
       typeof revalidate !== "function" ||
-      (requiresExpansion !== undefined && typeof requiresExpansion !== "function")
+      (authorityExpansion !== undefined && typeof authorityExpansion !== "function")
     ) {
       throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
     }
@@ -181,9 +193,14 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       now: now as EnabledDeliveryRuntime["now"],
       publish: publish as EnabledDeliveryRuntime["publish"],
       revalidate: revalidate as EnabledDeliveryRuntime["revalidate"],
-      ...(requiresExpansion === undefined
+      recoveryPolicyCeiling,
+      ...(authorityExpansion === undefined
         ? {}
-        : { requiresExpansion: requiresExpansion as NonNullable<EnabledDeliveryRuntime["requiresExpansion"]> }),
+        : {
+            authorityExpansion: authorityExpansion as NonNullable<
+              EnabledDeliveryRuntime["authorityExpansion"]
+            >,
+          }),
     });
   }
   if (

@@ -29,3 +29,18 @@ export const validV2Contract = {
     reviewer: { profile: "opc-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
   },
 };
+
+export const validRecoveryPolicyCeiling = Object.freeze({
+  version: 1 as const,
+  writable_paths: Object.freeze(["src/**", "test/**", "docs/**"]),
+  forbidden_paths: Object.freeze([".github/**"]),
+  network_domains: Object.freeze(["api.example.invalid"]),
+  readable_host_directories: Object.freeze(["/opt/opc/shared"]),
+  writable_host_directories: Object.freeze(["/opt/opc/cache"]),
+  other_capabilities: Object.freeze(["keychain:opc-telegram"]),
+  timeout_minutes: 90,
+  attempts: 3,
+  evidence_bundle_mb: 100,
+  executors: Object.freeze([validV2Contract.codex.executor]),
+  reviewers: Object.freeze([validV2Contract.codex.reviewer]),
+});

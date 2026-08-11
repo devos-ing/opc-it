@@ -93,14 +93,18 @@ function isPendingRecoveryClaim(
   const recoveryAuthority = acceptedRecovery.findLast(({ payload: candidate }) =>
     candidate.event === "retry" || candidate.event === "request-approval"
   );
+  const rootContractDigest = recoveryAuthority?.payload.metadata.root_contract_digest ??
+    recoveryAuthority?.payload.metadata.plan_digest;
+  const recoveryContractDigest = recoveryAuthority?.payload.metadata.recovery_contract_digest ??
+    recoveryAuthority?.payload.metadata.plan_digest;
   return (
     recoveryAuthority !== undefined &&
     parsedRecoveryId !== undefined &&
     recoveryAuthority.payload.metadata.root_work_id === pending.rootWorkId &&
     recoveryAuthority.payload.metadata.next_attempt ===
       String(parsedRecoveryId.nextAttempt) &&
-    recoveryAuthority.payload.metadata.plan_digest === pending.planDigest &&
-    payload.metadata.plan_digest === pending.planDigest &&
+    rootContractDigest === pending.planDigest &&
+    payload.metadata.plan_digest === recoveryContractDigest &&
     deriveRecoveryWorkId(pending.rootWorkId, parsedRecoveryId.nextAttempt) ===
       payload.work_id
   );
@@ -216,7 +220,7 @@ export function arbitrateRepositoryJournal(
     accepted.push(transition);
     acceptedByIssue.set(issueNumber, accepted);
     if (
-      payload.event === "retry" &&
+      (payload.event === "retry" || payload.event === "request-approval") &&
       typeof payload.metadata.root_work_id === "string"
     ) {
       rootWorkIdByIssue.set(issueNumber, payload.metadata.root_work_id);

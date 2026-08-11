@@ -150,7 +150,7 @@ function snapshotQueueWorkIssue(value: unknown): QueueWorkIssue {
   }
 }
 
-function encodeWorkBody(contract: ValidatedExecutionContract, digest: string): string {
+export function encodeWorkBody(contract: ValidatedExecutionContract, digest: string): string {
   const canonicalJson = canonicalize(contract);
   const bytes = Buffer.from(canonicalJson, "utf8");
   if (bytes.byteLength === 0 || bytes.byteLength > maximumContractBytes) {

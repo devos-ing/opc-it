@@ -50,6 +50,7 @@ export {
   appendHeartbeat,
   analyzeLeaseTimeline,
   decideLease,
+  reconciliationEventId,
   type AppendHeartbeatInput,
   type DecideLeaseInput,
   type LeaseDecision,

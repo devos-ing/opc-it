@@ -3,7 +3,10 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { userInfo } from "node:os";
 import { execa } from "execa";
 import { canonicalize } from "json-canonicalize";
-import { createExecutionWorkspace } from "../adapters/local/workspace.js";
+import {
+  createExecutionWorkspace,
+  executionWorkspaceLeaf,
+} from "../adapters/local/workspace.js";
 import { runBounded } from "../adapters/local/process-runner.js";
 import type { ExecutionEnvelope } from "../application/claim-work.js";
 import { assertMilestoneWithinPolicy } from "../domain/policy.js";
@@ -145,10 +148,7 @@ export function executionPaths(runtime: LocalExecutionRuntime, workId: string): 
   promptFile: string;
   outputFile: string;
 } {
-  const leaf = workId.replace(/[^a-zA-Z0-9._-]/g, "-").split("/").at(-1) ?? "";
-  if (!leaf || leaf === "." || leaf === "..") {
-    throw new DomainError("UNSAFE_WORKSPACE_PATH", workId);
-  }
+  const leaf = executionWorkspaceLeaf(workId);
   const worktreeRoot = join(runtime.runnerTemp, "opc-worktrees", runtime.runId);
   const executionRoot = join(runtime.runnerTemp, "opc-execution", runtime.runId);
   return {
