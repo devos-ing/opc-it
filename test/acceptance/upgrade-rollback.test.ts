@@ -270,12 +270,29 @@ describe("checksum-bound reversible upgrades", () => {
     const current = await dependencies([]).current();
     const preview = previewUpgrade({ current, release: release() });
     const path = "/Users/roy/Library/Application Support/OPC/upgrade-receipt.json";
-    const contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "snapshotted", snapshotDigest: digestCanonical("snapshot"), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a" });
+    const contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "snapshotted", snapshotDigest: digestCanonical("snapshot"), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary] });
     const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: () => Promise.resolve(), copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
     const receipt = await requireReplayableUpgradeReceipt(path, preview.digest, fileSystem, 501);
     expect(receipt?.phase).toBe("snapshotted");
     const rejected = await requireReplayableUpgradeReceipt(path, digestCanonical("other"), fileSystem, 501).catch((error: unknown) => error);
     expect((rejected as Error).message).toBe("UPGRADE_REPLAY_DIGEST_NOT_APPROVED");
+  });
+
+  it("automatically rolls back a durable nonterminal receipt without replaying install", async () => {
+    const events: string[] = [];
+    const current = await dependencies(events).current();
+    const preview = previewUpgrade({ current, release: release() });
+    let contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "binary-installed", snapshotDigest: digestCanonical({ snapshot: true }), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary] });
+    const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: (_path, value) => { contents = value; return Promise.resolve(); }, copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
+    const oldRelease = process.env.OPC_UPGRADE_RELEASE; process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
+    try {
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies(events) });
+      const resumed = await service.preview();
+      const result = await service.apply({ preview: resumed, approvedDigest: resumed.digest });
+      expect(result.rolledBack).toBe(true);
+      expect(events).toContain("restore");
+      expect(events).not.toContain("install");
+    } finally { if (oldRelease === undefined) delete process.env.OPC_UPGRADE_RELEASE; else process.env.OPC_UPGRADE_RELEASE = oldRelease; }
   });
 
 });

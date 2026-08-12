@@ -72,6 +72,6 @@ export async function runUpgradeCommand(
   if (input.mode === "preview") return closedPreview(preview);
   if (preview.digest !== input.approvedDigest) throw new Error("UPGRADE_DIGEST_NOT_APPROVED");
   const result = await service.apply({ preview, approvedDigest: input.approvedDigest });
-  if (result.digest !== preview.digest || result.rolledBack) throw new Error("UPGRADE_APPLY_FAILED");
-  return closedPreview(preview, true);
+  if (result.digest !== preview.digest) throw new Error("UPGRADE_APPLY_FAILED");
+  return closedPreview(preview, !result.rolledBack);
 }

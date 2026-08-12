@@ -35,12 +35,22 @@ export interface ProductionUpgradeDependencies {
 export interface PrivateUpgradeReceipt extends UpgradeReceipt {
   readonly authority: UpgradeCurrent;
   readonly snapshotDirectory: string | null;
+  readonly snapshotPaths: readonly string[] | null;
+  readonly snapshotPresent: readonly string[] | null;
 }
 
 const nodeFileSystem: UpgradeHostFileSystem = Object.freeze({
   async read(path: string) { return readFile(path, "utf8"); },
   async stat(path: string) { const entry = await lstat(path); return { file: entry.isFile(), symlink: entry.isSymbolicLink(), uid: entry.uid, mode: entry.mode & 0o777, size: entry.size }; },
-  async write(path: string, contents: string) { await writeFile(path, contents, { encoding: "utf8", mode: 0o600 }); await chmod(path, 0o600); },
+  async write(path: string, contents: string) {
+    try { const before = await lstat(path); if (!before.isFile() || before.isSymbolicLink() || before.uid !== currentUid() || (before.mode & 0o077) !== 0) throw new Error("INVALID_UPGRADE_PRIVATE_WRITE_PATH"); }
+    catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
+    const temporary = `${path}.upgrade-write-${String(process.pid)}-${Date.now().toString(36)}.tmp`;
+    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await chmod(temporary, 0o600); await rename(temporary, path);
+    const after = await lstat(path);
+    if (!after.isFile() || after.isSymbolicLink() || after.uid !== currentUid() || (after.mode & 0o077) !== 0) throw new Error("INVALID_UPGRADE_PRIVATE_WRITE_PATH");
+  },
   copy: copyFile, move: rename, remove: async (path: string) => { await rm(path, { force: true }); }, makeDirectory: async (path: string) => { await mkdir(path, { recursive: true, mode: 0o700 }); },
 });
 
@@ -66,18 +76,31 @@ async function checkedRead(fileSystem: UpgradeHostFileSystem, path: string, uid:
 function validateReceipt(value: unknown): PrivateUpgradeReceipt {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("INVALID_UPGRADE_RECEIPT");
   const source = value as Record<string, unknown>;
-  const expected = ["version", "digest", "phase", "snapshotDigest", "authority", "snapshotDirectory"];
+  const expected = ["version", "digest", "phase", "snapshotDigest", "authority", "snapshotDirectory", "snapshotPaths", "snapshotPresent"];
   if (Reflect.ownKeys(source).length !== expected.length || expected.some((key) => !Object.hasOwn(source, key))) throw new Error("INVALID_UPGRADE_RECEIPT");
-  if (source.version !== 1 || typeof source.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(source.digest) || !["prepared", "snapshotted", "binary-installed", "cli-installed", "installed", "complete", "rolled-back"].includes(String(source.phase)) || !(source.snapshotDigest === null || (typeof source.snapshotDigest === "string" && /^sha256:[a-f0-9]{64}$/.test(source.snapshotDigest))) || !(source.snapshotDirectory === null || typeof source.snapshotDirectory === "string")) throw new Error("INVALID_UPGRADE_RECEIPT");
+  const closedPaths = (candidate: unknown): readonly string[] | null => {
+    if (candidate === null) return null;
+    if (!Array.isArray(candidate) || candidate.some((entry) => typeof entry !== "string" || !entry.startsWith("/Users/") || entry.includes("\0") || entry.includes(".."))) throw new Error("INVALID_UPGRADE_RECEIPT");
+    const values: string[] = [];
+    for (let index = 0; index < candidate.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, String(index));
+      if (descriptor === undefined || !("value" in descriptor) || typeof descriptor.value !== "string") throw new Error("INVALID_UPGRADE_RECEIPT");
+      values.push(descriptor.value);
+    }
+    return Object.freeze(values);
+  };
+  const snapshotPaths = closedPaths(source.snapshotPaths); const snapshotPresent = closedPaths(source.snapshotPresent);
+  if (source.version !== 1 || typeof source.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(source.digest) || !["prepared", "snapshotted", "binary-installed", "cli-installed", "installed", "complete", "rolled-back"].includes(String(source.phase)) || !(source.snapshotDigest === null || (typeof source.snapshotDigest === "string" && /^sha256:[a-f0-9]{64}$/.test(source.snapshotDigest))) || !(source.snapshotDirectory === null || typeof source.snapshotDirectory === "string") || ((snapshotPaths === null) !== (snapshotPresent === null))) throw new Error("INVALID_UPGRADE_RECEIPT");
   const authority = source.authority as UpgradeCurrent;
   // Reuse the public preview validator to prove exact current authority shape without exposing a second parser.
   try { previewUpgrade({ current: authority, release: { version: 1, cli: { bytes: "x", checksum: digestCanonical("x") }, binary: { bytes: "y", checksum: digestCanonical("y") }, migrations: [], permissionDiff: [] } }); } catch { throw new Error("INVALID_UPGRADE_RECEIPT"); }
-  return Object.freeze({ version: 1, digest: source.digest as Sha256, phase: source.phase as PrivateUpgradeReceipt["phase"], snapshotDigest: source.snapshotDigest as Sha256 | null, authority, snapshotDirectory: source.snapshotDirectory });
+  return Object.freeze({ version: 1, digest: source.digest as Sha256, phase: source.phase as PrivateUpgradeReceipt["phase"], snapshotDigest: source.snapshotDigest as Sha256 | null, authority, snapshotDirectory: source.snapshotDirectory, snapshotPaths, snapshotPresent });
 }
 
 export async function loadPrivateUpgradeReceipt(path: string, fileSystem: UpgradeHostFileSystem = nodeFileSystem, uid: number = currentUid()): Promise<PrivateUpgradeReceipt | undefined> {
   try {
     const entry = await fileSystem.stat(path);
+    if (!entry.file && !entry.symlink && entry.size === 0) return undefined;
     if (!entry.file || entry.symlink || entry.uid !== uid || (entry.mode & 0o077) !== 0 || entry.size > 1_048_576) throw new Error("INVALID_UPGRADE_RECEIPT");
     return validateReceipt(parseJson(await fileSystem.read(path), "INVALID_UPGRADE_RECEIPT"));
   } catch (error) {
@@ -96,7 +119,7 @@ export async function requireReplayableUpgradeReceipt(
   const receipt = await loadPrivateUpgradeReceipt(path, fileSystem, uid);
   if (receipt === undefined || receipt.phase === "complete" || receipt.phase === "rolled-back") return receipt;
   if (approvedDigest !== receipt.digest) throw new Error("UPGRADE_REPLAY_DIGEST_NOT_APPROVED");
-  if (receipt.phase !== "prepared" && (receipt.snapshotDigest === null || receipt.snapshotDirectory === null)) {
+  if (receipt.phase !== "prepared" && (receipt.snapshotDigest === null || receipt.snapshotDirectory === null || receipt.snapshotPaths === null || receipt.snapshotPresent === null)) {
     throw new Error("UPGRADE_REPLAY_SNAPSHOT_MISSING");
   }
   return receipt;
@@ -115,12 +138,14 @@ async function nodeCurrent(fileSystem: UpgradeHostFileSystem): Promise<UpgradeCu
 
 function localTransaction(fileSystem: UpgradeHostFileSystem, current: () => Promise<UpgradeCurrent>, injectedLock?: UpgradeDependencies["lock"], injectedMigrate?: UpgradeDependencies["migrate"]): Omit<UpgradeDependencies, "current"> {
   let snapshotDir: string | undefined;
+  let snapshotPaths: readonly string[] | undefined;
+  let snapshotPresent: readonly string[] | undefined;
   let releaseDigest: Sha256 | undefined;
   const saveReceipt = async (value: UpgradeReceipt) => {
     const now = await current();
     if (releaseDigest !== undefined && releaseDigest !== value.digest) throw new Error("UPGRADE_RECEIPT_AUTHORITY_CHANGED");
     releaseDigest = value.digest;
-    await fileSystem.write(receiptPath(now), JSON.stringify({ ...value, authority: now, snapshotDirectory: snapshotDir ?? null }));
+    await fileSystem.write(receiptPath(now), JSON.stringify({ ...value, authority: now, snapshotDirectory: snapshotDir ?? null, snapshotPaths: snapshotPaths ?? null, snapshotPresent: snapshotPresent ?? null }));
   };
   return {
     lock: injectedLock ?? {
@@ -137,6 +162,7 @@ function localTransaction(fileSystem: UpgradeHostFileSystem, current: () => Prom
       const paths = [manifest.authority.paths.binary, manifest.authority.paths.cli, manifest.authority.paths.config, ...sidecars(manifest.authority.paths.state), ...sidecars(manifest.authority.paths.approvals)];
       const present: string[] = [];
       for (const path of paths) { try { await fileSystem.copy(path, `${snapshotDir}/${path.slice(manifest.authority.currentHome.length + 1).replaceAll("/", "__")}`); present.push(path); } catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; } }
+      snapshotPaths = paths; snapshotPresent = present;
       return { digest: digestCanonical({ snapshotDir, paths, present }), value: { snapshotDir, paths, present } };
     },
     install: async (next, manifest) => {
@@ -238,8 +264,35 @@ export function createProductionUpgradeService(injected: ProductionUpgradeDepend
   const fileSystem = injected.fileSystem ?? nodeFileSystem;
   const loadCurrent = injected.current ?? (() => nodeCurrent(fileSystem));
   const transaction = injected.transaction ?? { ...localTransaction(fileSystem, loadCurrent, injected.lock, injected.migrate), ...productionLifecycle(fileSystem, loadCurrent), ...injected.lifecycle };
+  const previewFor = async (): Promise<{ readonly preview: import("../../features/onboarding/index.js").UpgradePreview; readonly receipt: PrivateUpgradeReceipt | undefined }> => {
+    const live = await loadCurrent(); const candidate = await release(fileSystem, live.currentUid);
+    const existing = await loadPrivateUpgradeReceipt(receiptPath(live), fileSystem, live.currentUid);
+    return { preview: previewUpgrade({ current: existing !== undefined && existing.phase !== "complete" && existing.phase !== "rolled-back" ? existing.authority : live, release: candidate }), receipt: existing };
+  };
   return Object.freeze({
-    async preview() { const current = await loadCurrent(); return previewUpgrade({ current, release: await release(fileSystem, current.currentUid) }); },
-    async apply(input: { readonly preview: import("../../features/onboarding/index.js").UpgradePreview; readonly approvedDigest: string }) { return applyUpgrade(input, { current: loadCurrent, ...transaction }); },
+    async preview() { return (await previewFor()).preview; },
+    async apply(input: { readonly preview: import("../../features/onboarding/index.js").UpgradePreview; readonly approvedDigest: string }) {
+      const { preview, receipt } = await previewFor();
+      if (preview.digest !== input.approvedDigest || input.preview.digest !== preview.digest) throw new Error("UPGRADE_DIGEST_NOT_APPROVED");
+      if (receipt?.phase === "complete") return { digest: preview.digest, rolledBack: false };
+      if (receipt?.phase === "rolled-back") return { digest: preview.digest, rolledBack: true };
+      if (receipt !== undefined) {
+        await requireReplayableUpgradeReceipt(receiptPath(await loadCurrent()), input.approvedDigest, fileSystem, receipt.authority.currentUid);
+        const failures: unknown[] = [];
+        const attempt = async (operation: () => Promise<void>) => { try { await operation(); } catch (error) { failures.push(error); } };
+        return transaction.lock.withLock(receipt.authority.paths.config, async () => {
+          await attempt(() => transaction.stopCandidate());
+          await attempt(() => transaction.proveCandidateStopped());
+          await attempt(() => transaction.restore({ snapshotDir: receipt.snapshotDirectory, paths: receipt.snapshotPaths, present: receipt.snapshotPresent }, preview.manifest));
+          await attempt(() => transaction.startPrevious());
+          await attempt(async () => { if (!(await transaction.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
+          if (failures.length > 0) throw new AggregateError(failures, "UPGRADE_REPLAY_ROLLBACK_FAILED");
+          await transaction.saveReceipt({ version: 1, digest: preview.digest, phase: "rolled-back", snapshotDigest: null });
+          await transaction.claimFence(false);
+          return { digest: preview.digest, rolledBack: true };
+        });
+      }
+      return applyUpgrade(input, { current: loadCurrent, ...transaction });
+    },
   });
 }
