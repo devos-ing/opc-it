@@ -11,6 +11,7 @@ import { digestCanonical } from "../../src/domain/identity.js";
 import { runCli } from "../../src/cli/main.js";
 import { createProductionUpgradeService, loadPrivateUpgradeReceipt, requireReplayableUpgradeReceipt } from "../../src/cli/production/upgrade.js";
 import type { UpgradeHostFileSystem } from "../../src/cli/production/upgrade.js";
+import { runProductionEnabledTick } from "../../src/cli/production/daemon.js";
 
 const oldCli = "old-cli-bytes";
 const oldBinary = "old-wrapper-bytes";
@@ -293,6 +294,17 @@ describe("checksum-bound reversible upgrades", () => {
       expect(events).toContain("restore");
       expect(events).not.toContain("install");
     } finally { if (oldRelease === undefined) delete process.env.OPC_UPGRADE_RELEASE; else process.env.OPC_UPGRADE_RELEASE = oldRelease; }
+  });
+
+  it("fences daemon claim intake before the work tick during an upgrade", async () => {
+    let workTicks = 0;
+    const result = await runProductionEnabledTick(new Date("2026-08-12T00:00:00.000Z"), new AbortController().signal, {
+      runApprovalTick: () => Promise.resolve(),
+      runWorkTick: () => { workTicks += 1; return Promise.resolve({ status: "worked", repositoriesChecked: 1 }); },
+      isUpgradeFenced: () => Promise.resolve(true),
+    });
+    expect(result).toEqual({ status: "idle", repositoriesChecked: 0 });
+    expect(workTicks).toBe(0);
   });
 
 });
