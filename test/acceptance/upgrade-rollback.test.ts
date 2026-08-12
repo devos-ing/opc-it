@@ -237,7 +237,9 @@ describe("checksum-bound reversible upgrades", () => {
   it("loads the closed release from a private local file rather than an environment payload", async () => {
     const current = await dependencies([]).current();
     const releasePath = "/Users/roy/Library/Application Support/OPC/releases/release.json";
-    const files = new Map<string, string>([[releasePath, JSON.stringify(release())]]);
+    const largeCli = "x".repeat(4 * 1024 * 1024);
+    const localRelease = { ...release(), cli: { bytes: largeCli, checksum: digestCanonical(largeCli) } };
+    const files = new Map<string, string>([[releasePath, JSON.stringify(localRelease)]]);
     const fileSystem: UpgradeHostFileSystem = {
       read: (path) => Promise.resolve(files.get(path) ?? ""),
       stat: (path) => Promise.resolve({ file: files.has(path), symlink: false, uid: 501, mode: 0o600, size: (files.get(path) ?? "").length }),
@@ -249,7 +251,7 @@ describe("checksum-bound reversible upgrades", () => {
     process.env.OPC_UPGRADE_RELEASE_PATH = releasePath;
     try {
       const preview = await createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies([]) }).preview();
-      expect(preview.manifest.release.cli.checksum).toBe(release().cli.checksum);
+      expect(preview.manifest.release.cli.checksum).toBe(localRelease.cli.checksum);
     } finally {
       if (oldPayload === undefined) delete process.env.OPC_UPGRADE_RELEASE; else process.env.OPC_UPGRADE_RELEASE = oldPayload;
       if (oldPath === undefined) delete process.env.OPC_UPGRADE_RELEASE_PATH; else process.env.OPC_UPGRADE_RELEASE_PATH = oldPath;
