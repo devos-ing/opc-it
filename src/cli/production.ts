@@ -45,6 +45,7 @@ import {
   loadDurableTelegramIdentity,
 } from "./production/telegram-onboarding.js";
 import { createTelegramPairingChannel } from "../platform/approvals/telegram-approval-adapter.js";
+import { createProductionUpgradeService } from "./production/upgrade.js";
 
 export type { ProductionCliAdapterFactories } from "./production/shared.js";
 
@@ -70,6 +71,7 @@ export function createProductionCliFactories(
   const sleep = injected.sleep ?? ((delayMs: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const resolveDaemonConfig = injected.loadDaemonConfig ?? readDaemonConfig;
+  const resolveUpgrade = injected.upgrade ?? createProductionUpgradeService;
   const withApprovalDatabase = async <T>(
     install: ReturnType<typeof previewInstall>,
     authority:
@@ -160,6 +162,7 @@ export function createProductionCliFactories(
     return config;
   };
   const factories: CliFactories = {
+    upgrade: resolveUpgrade,
     onboard: () => ({
       preview: () => Promise.resolve(currentOnboardingStagePreview()),
       async apply(input) {

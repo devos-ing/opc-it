@@ -46,11 +46,13 @@ Task 1 evidence (2026-08-12): initial RED was `0 pass / 1 fail / 1 error` per mi
 
 **Files:** Create upgrade feature/CLI; test `test/acceptance/upgrade-rollback.test.ts`.
 
-- [ ] Write failing tests for preview-only upgrade, checksum mismatch, permission diff, schema migration failure, health timeout, automatic binary/config rollback, and preserved signing key/audit journal.
-- [ ] Run the focused test; expect missing upgrade command.
-- [ ] Implement `previewUpgrade(release)` returning old/new digest, migrations, permission diff, and rollback paths. `applyUpgrade(approvedDigest)` must pause claims, wait for no active Target process, snapshot binary/config/SQLite, install exact checksum, run migrations, restart, require a successful doctor/poll, and restore the snapshot on failure.
-- [ ] Run focused tests and assert no auto-upgrade timer, network fetch, or LaunchAgent mutation occurs during preview.
-- [ ] Commit `feat: add reversible daemon upgrades`.
+- [x] Write failing tests for preview-only upgrade, checksum mismatch, permission diff, schema migration failure, health timeout, automatic binary/config rollback, and preserved signing key/audit journal.
+- [x] Run the focused test; expect missing upgrade command.
+- [x] Implement `previewUpgrade(release)` returning old/new digest, migrations, permission diff, and rollback paths. `applyUpgrade(approvedDigest)` must pause claims, wait for no active Target process, snapshot binary/config/SQLite, install exact checksum, run migrations, restart, require a successful doctor/poll, and restore the snapshot on failure.
+- [x] Run focused tests and assert no auto-upgrade timer, network fetch, or LaunchAgent mutation occurs during preview.
+- [x] Commit `feat: add reversible daemon upgrades`.
+
+Task 2 implementation evidence (2026-08-12): the exact initial focused RED was `0 pass / 1 fail / 1 error` because `src/features/onboarding/upgrade.ts` did not exist. The upgrade preview is a deep-frozen closed local-byte authority binding enabled config/install/activation digests, uid/home, both current artifact digests, both candidate checksums, ordered migration IDs/schema versions, exact permission paths, and snapshot rollback paths for config plus state/approvals SQLite primary, WAL, SHM, and journal files. It excludes lifecycle/process lock SQLite artifacts. Apply is adapter-injected and has no credential, queue, network, timer, or LaunchAgent dependency: lifecycle lock and receipt, claim fence, Target/process quiescence, snapshot, atomic dual-artifact install seam, migrations, candidate-bound doctor/fresh poll, completion/fence clear; migration or health errors restore the snapshot and persist a rollback receipt. The `opc upgrade --preview` route is lazy and its closed output contains digests/paths only—never release bytes. Real host installation remains intentionally unexecuted for Task 4.
 
 ### Task 3: Remove the superseded Actions runtime after parity
 

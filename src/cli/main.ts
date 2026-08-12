@@ -58,6 +58,12 @@ import {
   runDaemonCommand,
   type DaemonCommandFactory,
 } from "./commands/daemon.js";
+import {
+  parseUpgradeArguments,
+  runUpgradeCommand,
+  upgradeOutputCodec,
+  type UpgradeCommandFactory,
+} from "./commands/upgrade.js";
 import type { OutputCodec } from "./commands/output.js";
 
 export interface CliResult {
@@ -74,6 +80,7 @@ export interface CliFactories {
   readonly doctor: DoctorCommandFactory;
   readonly uninstall: UninstallCommandFactory;
   readonly daemon: DaemonCommandFactory;
+  readonly upgrade: UpgradeCommandFactory;
 }
 
 export type CliFactoryOverrides = Partial<CliFactories>;
@@ -117,6 +124,16 @@ const allowedErrorCodes = new Set([
   "UNINSTALL_DIGEST_NOT_APPROVED",
   "UNINSTALL_CONFIG_AUTHORITY_CHANGED",
   "UNINSTALL_IN_PROGRESS",
+  "INVALID_UPGRADE_ARGUMENTS",
+  "INVALID_UPGRADE_RELEASE",
+  "UPGRADE_RELEASE_CHECKSUM_MISMATCH",
+  "INVALID_UPGRADE_PREVIEW",
+  "UPGRADE_DIGEST_NOT_APPROVED",
+  "UPGRADE_AUTHORITY_CHANGED",
+  "UPGRADE_CANDIDATE_HEALTH_FAILED",
+  "UPGRADE_APPLY_FAILED",
+  "UPGRADE_ENABLED_INSTALLATION_REQUIRED",
+  "UPGRADE_PRODUCTION_ADAPTER_REQUIRED",
 ]);
 
 const defaultFactories = createProductionCliFactories();
@@ -252,6 +269,12 @@ const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.fr
     (configPath, factories) => runDaemonCommand(configPath, factories.daemon),
     "daemon",
     daemonOutputCodec as OutputCodec<unknown>,
+  ),
+  upgrade: command(
+    parseUpgradeArguments,
+    (input, factories) => runUpgradeCommand(input, factories.upgrade),
+    "upgrade",
+    upgradeOutputCodec as OutputCodec<unknown>,
   ),
 }));
 
