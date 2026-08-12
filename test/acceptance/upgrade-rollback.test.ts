@@ -9,7 +9,7 @@ import {
 } from "../../src/features/onboarding/index.js";
 import { digestCanonical } from "../../src/domain/identity.js";
 import { runCli } from "../../src/cli/main.js";
-import { createProductionUpgradeService } from "../../src/cli/production/upgrade.js";
+import { createProductionUpgradeService, loadPrivateUpgradeReceipt, requireReplayableUpgradeReceipt } from "../../src/cli/production/upgrade.js";
 import type { UpgradeHostFileSystem } from "../../src/cli/production/upgrade.js";
 
 const oldCli = "old-cli-bytes";
@@ -209,7 +209,10 @@ describe("checksum-bound reversible upgrades", () => {
     const previous = process.env.OPC_UPGRADE_RELEASE;
     process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
     try {
-      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem });
+      const lifecycle = {
+        claimFence: () => Promise.resolve(), awaitTargetZero: () => Promise.resolve(), stopDaemon: () => Promise.resolve(), proveProcessStopped: () => Promise.resolve(), startDaemon: () => Promise.resolve(), doctor: () => Promise.resolve(true), freshPoll: () => Promise.resolve(true), stopCandidate: () => Promise.resolve(), proveCandidateStopped: () => Promise.resolve(), startPrevious: () => Promise.resolve(), oldHealth: () => Promise.resolve(true),
+      };
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, lifecycle, lock: { withLock: async (_path, operation) => operation() }, migrate: () => Promise.resolve() });
       const preview = await service.preview();
       await service.apply({ preview, approvedDigest: preview.digest });
       expect(files.get(current.paths.binary)).toBe(newBinary);
@@ -217,9 +220,62 @@ describe("checksum-bound reversible upgrades", () => {
       expect([...files.keys()]).toContain("/Users/roy/Library/Application Support/OPC/upgrade-receipt.json");
       expect([...files.keys()]).not.toContain(current.paths.lifecycleLock);
       expect([...files.keys()]).not.toContain(current.paths.processLock);
+      const durable = await loadPrivateUpgradeReceipt(
+        "/Users/roy/Library/Application Support/OPC/upgrade-receipt.json",
+        fileSystem,
+        501,
+      );
+      expect(durable?.phase).toBe("complete");
+      expect(durable?.digest).toBe(preview.digest);
     } finally {
       if (previous === undefined) delete process.env.OPC_UPGRADE_RELEASE;
       else process.env.OPC_UPGRADE_RELEASE = previous;
     }
   });
+
+  it("loads the closed release from a private local file rather than an environment payload", async () => {
+    const current = await dependencies([]).current();
+    const releasePath = "/Users/roy/Library/Application Support/OPC/releases/candidate.json";
+    const files = new Map<string, string>([[releasePath, JSON.stringify(release())]]);
+    const fileSystem: UpgradeHostFileSystem = {
+      read: (path) => Promise.resolve(files.get(path) ?? ""),
+      stat: (path) => Promise.resolve({ file: files.has(path), symlink: false, uid: 501, mode: 0o600, size: (files.get(path) ?? "").length }),
+      write: (path, value) => { files.set(path, value); return Promise.resolve(); }, copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve(),
+    };
+    const oldPayload = process.env.OPC_UPGRADE_RELEASE;
+    const oldPath = process.env.OPC_UPGRADE_RELEASE_PATH;
+    delete process.env.OPC_UPGRADE_RELEASE;
+    process.env.OPC_UPGRADE_RELEASE_PATH = releasePath;
+    try {
+      const preview = await createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies([]) }).preview();
+      expect(preview.manifest.release.cli.checksum).toBe(release().cli.checksum);
+    } finally {
+      if (oldPayload === undefined) delete process.env.OPC_UPGRADE_RELEASE; else process.env.OPC_UPGRADE_RELEASE = oldPayload;
+      if (oldPath === undefined) delete process.env.OPC_UPGRADE_RELEASE_PATH; else process.env.OPC_UPGRADE_RELEASE_PATH = oldPath;
+    }
+  });
+
+  it("retains the primary plus every independent rollback failure", async () => {
+    const events: string[] = [];
+    const current = await dependencies(events).current();
+    const preview = previewUpgrade({ current, release: release() });
+    const adapters = dependencies(events, { fail: "migration" });
+    const broken = { ...adapters, stopCandidate: () => Promise.reject(new Error("STOP_FAILED")), restore: () => Promise.reject(new Error("RESTORE_FAILED")), startPrevious: () => Promise.reject(new Error("RESTART_FAILED")), oldHealth: () => Promise.reject(new Error("HEALTH_FAILED")) };
+    const outcome = await applyUpgrade({ preview, approvedDigest: preview.digest }, broken).catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(AggregateError);
+    expect((outcome as AggregateError).errors.map((error) => (error as Error).message)).toEqual(["MIGRATION_FAILED", "STOP_FAILED", "RESTORE_FAILED", "RESTART_FAILED", "HEALTH_FAILED"]);
+  });
+
+  it("admits replay only for the exact durable approval digest", async () => {
+    const current = await dependencies([]).current();
+    const preview = previewUpgrade({ current, release: release() });
+    const path = "/Users/roy/Library/Application Support/OPC/upgrade-receipt.json";
+    const contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "snapshotted", snapshotDigest: digestCanonical("snapshot"), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a" });
+    const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: () => Promise.resolve(), copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
+    const receipt = await requireReplayableUpgradeReceipt(path, preview.digest, fileSystem, 501);
+    expect(receipt?.phase).toBe("snapshotted");
+    const rejected = await requireReplayableUpgradeReceipt(path, digestCanonical("other"), fileSystem, 501).catch((error: unknown) => error);
+    expect((rejected as Error).message).toBe("UPGRADE_REPLAY_DIGEST_NOT_APPROVED");
+  });
+
 });

@@ -66,7 +66,7 @@ export interface UpgradePreview {
 export interface UpgradeReceipt {
   readonly version: 1;
   readonly digest: Sha256;
-  readonly phase: "prepared" | "snapshotted" | "installed" | "complete" | "rolled-back";
+  readonly phase: "prepared" | "snapshotted" | "binary-installed" | "cli-installed" | "installed" | "complete" | "rolled-back";
   readonly snapshotDigest: Sha256 | null;
 }
 
@@ -86,6 +86,8 @@ export interface UpgradeDependencies {
   readonly snapshot: (manifest: UpgradeManifest) => Promise<{ readonly digest: Sha256; readonly value: unknown }>;
   /** Must atomically replace both binary authority paths after validating exact local bytes. */
   readonly install: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
+  readonly installBinary?: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
+  readonly installCli?: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
   readonly migrate: (migrations: readonly UpgradeMigration[]) => Promise<void>;
   readonly startDaemon: () => Promise<void>;
   readonly doctor: (candidateDigest: Sha256) => Promise<boolean>;
@@ -255,7 +257,14 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
       const saved = await dependencies.snapshot(preview.manifest);
       snapshot = saved.value;
       await dependencies.saveReceipt(receipt(preview.digest, "snapshotted", saved.digest));
-      await dependencies.install(preview.manifest.release, preview.manifest);
+      if (dependencies.installBinary !== undefined && dependencies.installCli !== undefined) {
+        await dependencies.installBinary(preview.manifest.release, preview.manifest);
+        await dependencies.saveReceipt(receipt(preview.digest, "binary-installed", saved.digest));
+        await dependencies.installCli(preview.manifest.release, preview.manifest);
+        await dependencies.saveReceipt(receipt(preview.digest, "cli-installed", saved.digest));
+      } else {
+        await dependencies.install(preview.manifest.release, preview.manifest);
+      }
       await dependencies.saveReceipt(receipt(preview.digest, "installed", saved.digest));
       await dependencies.migrate(preview.manifest.release.migrations);
       await dependencies.startDaemon();
@@ -268,15 +277,15 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
     }
     const failures: unknown[] = [primary];
     if (snapshot !== undefined) {
-      try {
-        await dependencies.stopCandidate();
-        await dependencies.proveCandidateStopped();
-        await dependencies.restore(snapshot, preview.manifest);
-        await dependencies.startPrevious();
-        if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED");
-        await dependencies.saveReceipt(receipt(preview.digest, "rolled-back", null));
-      }
-      catch (error) { failures.push(error); }
+      const recover = async (operation: () => Promise<void>) => {
+        try { await operation(); } catch (error) { failures.push(error); }
+      };
+      await recover(() => dependencies.stopCandidate());
+      await recover(() => dependencies.proveCandidateStopped());
+      await recover(() => dependencies.restore(snapshot, preview.manifest));
+      await recover(() => dependencies.startPrevious());
+      await recover(async () => { if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
+      if (failures.length === 1) await recover(() => dependencies.saveReceipt(receipt(preview.digest, "rolled-back", null)));
     } else if (fenced) {
       try { await dependencies.startPrevious(); if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); }
       catch (error) { failures.push(error); }
