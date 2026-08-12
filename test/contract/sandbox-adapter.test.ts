@@ -218,6 +218,20 @@ test("sandbox profiles grant only narrow immutable system runtime paths", () => 
   expect(profile).not.toContain('(subpath "/System")');
   expect(profile).not.toContain("/System/Volumes/Data");
   expect(profile).toContain('(subpath "/System/Library")');
+  expect(profile).toContain('(literal "/")');
+  expect(profile).not.toContain('(subpath "/")');
+  expect(profile).not.toContain("/private/var/select/sh");
+  expect(profile).not.toContain('(literal "/bin/bash")');
+
+  const shellProfile = renderSandboxProfile({
+    role: "target",
+    executables: ["/bin/sh"],
+    readable: ["/private/tmp/opc-worktree"],
+    writable: ["/private/tmp/opc-worktree"],
+    network: "deny",
+  });
+  expect(shellProfile).toContain('(literal "/private/var/select/sh")');
+  expect(shellProfile).toContain('(literal "/bin/bash")');
 });
 
 test("Controller and Target reject non-allowlisted credential environments", async () => {

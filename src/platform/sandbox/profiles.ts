@@ -10,7 +10,7 @@ const systemReadRules = [
   "/bin",
   "/usr/bin",
 ] as const;
-const systemReadLiterals = ["/dev/null", "/dev/random", "/dev/urandom"] as const;
+const systemReadLiterals = ["/", "/dev/null", "/dev/random", "/dev/urandom"] as const;
 
 const roleTemplates = {
   controller: "; host-owned role: controller",
@@ -44,13 +44,22 @@ export function renderSandboxProfile(input: {
   readonly network?: SandboxRequest["network"];
 }): string {
   const executables = [...new Set(input.executables)];
-  const readable = [...new Set([...systemReadRules, ...executables, ...input.readable, ...input.writable])];
+  const shellVariants = executables.includes("/bin/sh")
+    ? ["/private/var/select/sh", "/bin/bash"]
+    : [];
+  const processExecutables = [...new Set([...executables, ...shellVariants])];
+  const readable = [...new Set([
+    ...systemReadRules,
+    ...processExecutables,
+    ...input.readable,
+    ...input.writable,
+  ])];
   return [
     "(version 1)",
     roleTemplates[input.role],
     "(deny default)",
     "(allow process-fork)",
-    executableRules(executables),
+    executableRules(processExecutables),
     "(allow sysctl-read)",
     literalRules("file-read*", systemReadLiterals),
     subpathRules("file-read*", readable),
