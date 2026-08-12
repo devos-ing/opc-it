@@ -176,7 +176,7 @@ describe("checksum-bound reversible upgrades", () => {
     const previous = process.env.OPC_UPGRADE_RELEASE;
     process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
     try {
-      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), transaction: dependencies(events) });
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), transaction: dependencies(events), release: () => Promise.resolve(release()) });
       const preview = await service.preview();
       const result = await service.apply({ preview, approvedDigest: preview.digest });
       expect(result.rolledBack).toBe(false);
@@ -212,7 +212,7 @@ describe("checksum-bound reversible upgrades", () => {
       const lifecycle = {
         claimFence: () => Promise.resolve(), awaitTargetZero: () => Promise.resolve(), stopDaemon: () => Promise.resolve(), proveProcessStopped: () => Promise.resolve(), startDaemon: () => Promise.resolve(), doctor: () => Promise.resolve(true), freshPoll: () => Promise.resolve(true), stopCandidate: () => Promise.resolve(), proveCandidateStopped: () => Promise.resolve(), startPrevious: () => Promise.resolve(), oldHealth: () => Promise.resolve(true),
       };
-      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, lifecycle, lock: { withLock: async (_path, operation) => operation() }, migrate: () => Promise.resolve() });
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, lifecycle, lock: { withLock: async (_path, operation) => operation() }, migrate: () => Promise.resolve(), release: () => Promise.resolve(release()) });
       const preview = await service.preview();
       await service.apply({ preview, approvedDigest: preview.digest });
       expect(files.get(current.paths.binary)).toBe(newBinary);
@@ -235,7 +235,7 @@ describe("checksum-bound reversible upgrades", () => {
 
   it("loads the closed release from a private local file rather than an environment payload", async () => {
     const current = await dependencies([]).current();
-    const releasePath = "/Users/roy/Library/Application Support/OPC/releases/candidate.json";
+    const releasePath = "/Users/roy/Library/Application Support/OPC/releases/release.json";
     const files = new Map<string, string>([[releasePath, JSON.stringify(release())]]);
     const fileSystem: UpgradeHostFileSystem = {
       read: (path) => Promise.resolve(files.get(path) ?? ""),
@@ -270,7 +270,7 @@ describe("checksum-bound reversible upgrades", () => {
     const current = await dependencies([]).current();
     const preview = previewUpgrade({ current, release: release() });
     const path = "/Users/roy/Library/Application Support/OPC/upgrade-receipt.json";
-    const contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "snapshotted", snapshotDigest: digestCanonical("snapshot"), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary] });
+    const contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "snapshotted", snapshotDigest: digestCanonical("snapshot"), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary], snapshotEntries: [{ path: current.paths.binary, digest: current.binaryChecksum, mode: 0o600 }] });
     const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: () => Promise.resolve(), copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
     const receipt = await requireReplayableUpgradeReceipt(path, preview.digest, fileSystem, 501);
     expect(receipt?.phase).toBe("snapshotted");
@@ -282,11 +282,11 @@ describe("checksum-bound reversible upgrades", () => {
     const events: string[] = [];
     const current = await dependencies(events).current();
     const preview = previewUpgrade({ current, release: release() });
-    let contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "binary-installed", snapshotDigest: digestCanonical({ snapshot: true }), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary] });
+    let contents = JSON.stringify({ version: 1, digest: preview.digest, phase: "binary-installed", snapshotDigest: digestCanonical({ snapshot: true }), authority: current, snapshotDirectory: "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: [current.paths.binary], snapshotPresent: [current.paths.binary], snapshotEntries: [{ path: current.paths.binary, digest: current.binaryChecksum, mode: 0o600 }] });
     const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: (_path, value) => { contents = value; return Promise.resolve(); }, copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
     const oldRelease = process.env.OPC_UPGRADE_RELEASE; process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
     try {
-      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies(events) });
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies(events), release: () => Promise.resolve(release()) });
       const resumed = await service.preview();
       const result = await service.apply({ preview: resumed, approvedDigest: resumed.digest });
       expect(result.rolledBack).toBe(true);
