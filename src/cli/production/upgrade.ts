@@ -345,7 +345,7 @@ export function createProductionUpgradeService(injected: ProductionUpgradeDepend
         return transaction.lock.withLock(receipt.authority.paths.config, async () => {
           await attempt(() => transaction.stopCandidate());
           await attempt(() => transaction.proveCandidateStopped());
-          if (failures.length === 0) await attempt(() => transaction.restore({ snapshotDir: receipt.snapshotDirectory, paths: receipt.snapshotPaths, present: receipt.snapshotPresent, entries: receipt.snapshotEntries }, preview.manifest));
+          if (failures.length === 0 && receipt.phase !== "prepared") await attempt(() => transaction.restore({ snapshotDir: receipt.snapshotDirectory, paths: receipt.snapshotPaths, present: receipt.snapshotPresent, entries: receipt.snapshotEntries }, preview.manifest));
           if (failures.length === 0) await attempt(() => transaction.startPrevious());
           if (failures.length === 0) await attempt(async () => { if (!(await transaction.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
           if (failures.length > 0) throw new AggregateError(failures, "UPGRADE_REPLAY_ROLLBACK_FAILED");

@@ -300,6 +300,22 @@ describe("checksum-bound reversible upgrades", () => {
     } finally { if (oldRelease === undefined) delete process.env.OPC_UPGRADE_RELEASE; else process.env.OPC_UPGRADE_RELEASE = oldRelease; }
   });
 
+  it("replays every durable nonterminal phase by exact rollback without a second install", async () => {
+    const phases = ["prepared", "snapshotted", "binary-installed", "cli-installed", "installed"] as const;
+    for (const phase of phases) {
+      const events: string[] = [];
+      const current = await dependencies(events).current();
+      const preview = previewUpgrade({ current, release: release() });
+      let contents = JSON.stringify({ version: 1, digest: preview.digest, phase, snapshotDigest: phase === "prepared" ? null : digestCanonical({ phase }), authority: current, snapshotDirectory: phase === "prepared" ? null : "/Users/roy/Library/Application Support/OPC/upgrade-snapshots/a", snapshotPaths: phase === "prepared" ? null : [current.paths.binary], snapshotPresent: phase === "prepared" ? null : [current.paths.binary], snapshotEntries: phase === "prepared" ? null : [{ path: current.paths.binary, digest: current.binaryChecksum, mode: 0o600 }] });
+      const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: (_path, value) => { contents = value; return Promise.resolve(); }, copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies(events), release: () => Promise.resolve(release()) });
+      const resumed = await service.preview();
+      const result = await service.apply({ preview: resumed, approvedDigest: resumed.digest });
+      expect(result.rolledBack).toBe(true);
+      expect(events).not.toContain("install");
+    }
+  });
+
   it("fences daemon claim intake before the work tick during an upgrade", async () => {
     let workTicks = 0;
     const result = await runProductionEnabledTick(new Date("2026-08-12T00:00:00.000Z"), new AbortController().signal, {
