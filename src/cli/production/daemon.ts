@@ -155,6 +155,7 @@ export interface ProductionDaemonRuntimeInput {
   readonly reloadConfig: (path: string) => Promise<DaemonConfig>;
   readonly revalidateIdentity: () => Promise<void>;
   readonly now: () => Date;
+  readonly isUpgradeFenced?: () => Promise<boolean>;
 }
 
 export interface ProductionDaemonRuntimeDependencies {
@@ -364,6 +365,7 @@ export interface ProductionEnabledTickDependencies {
   readonly runWorkTick: (now: Date, signal: AbortSignal) => Promise<EnabledTickResult>;
   readonly continueAfterApprovalError?: (error: unknown) => boolean;
   readonly nowAfterApproval?: () => Date;
+  readonly isUpgradeFenced?: () => Promise<boolean>;
 }
 
 export async function runProductionEnabledTick(
@@ -377,6 +379,7 @@ export async function runProductionEnabledTick(
     if (dependencies.continueAfterApprovalError?.(error) !== true) throw error;
   }
   if (signal.aborted) throw signal.reason;
+  if (await dependencies.isUpgradeFenced?.() === true) return { status: "idle", repositoriesChecked: 0 };
   return dependencies.runWorkTick(dependencies.nowAfterApproval?.() ?? now, signal);
 }
 
@@ -413,6 +416,20 @@ export interface ProductionDaemonDependencies {
 function requireEnabledConfig(config: DaemonConfig): DaemonConfig & { readonly enabled: true } {
   if (!config.enabled) throw new Error("DAEMON_DISABLED");
   return config;
+}
+
+async function upgradeFenced(config: DaemonConfig & { readonly enabled: true }): Promise<boolean> {
+  const path = `${config.onboarding.manifest.paths.applicationSupport}/upgrade-claim-fence.json`;
+  try {
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== config.install.manifest.currentUid || (entry.mode & 0o077) !== 0) {
+      throw new Error("INVALID_UPGRADE_CLAIM_FENCE");
+    }
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function requireSameAuthority(
@@ -572,6 +589,7 @@ export async function runProductionDaemonRuntime(
         },
         runWorkTick: (workNow, workSignal) =>
           runEnabledTick({ now: workNow, repositories, signal: workSignal }),
+        ...(input.isUpgradeFenced === undefined ? {} : { isUpgradeFenced: input.isUpgradeFenced }),
         continueAfterApprovalError: isApprovalUnavailable,
         nowAfterApproval: input.now,
       }),
@@ -652,5 +670,6 @@ export async function runProductionDaemon(
     reloadConfig: loadConfig,
     revalidateIdentity,
     now,
+    isUpgradeFenced: () => upgradeFenced(config),
   });
 }

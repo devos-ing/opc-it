@@ -247,8 +247,6 @@ function productionLifecycle(fileSystem: UpgradeHostFileSystem, current: () => P
     },
     awaitTargetZero: async () => {
       const value = await current();
-      const lockDatabase = new Database(value.paths.processLock, { create: false, strict: true });
-      try { const lease = await createSqliteProcessLock(lockDatabase).acquire("upgrade:quiescence"); await lease.release(); } finally { lockDatabase.close(); }
       const result = await runBounded({ command: "/usr/bin/pgrep", args: ["-f", value.paths.cli], cwd: value.currentHome, env: { PATH: "/usr/bin:/bin" }, timeoutMs: 5_000, outputLimitBytes: 65_536 });
       if (!(result.status === "fail" && result.exitCode === 1)) throw new Error("UPGRADE_TARGET_NOT_QUIESCENT");
     },
@@ -256,6 +254,8 @@ function productionLifecycle(fileSystem: UpgradeHostFileSystem, current: () => P
     proveProcessStopped: async () => {
       const value = await current(); const result = await runBounded({ command: "/usr/bin/pgrep", args: ["-f", value.paths.cli], cwd: value.currentHome, env: { PATH: "/usr/bin:/bin" }, timeoutMs: 5_000, outputLimitBytes: 65_536 });
       if (!(result.status === "fail" && result.exitCode === 1)) throw new Error("UPGRADE_PROCESS_NOT_STOPPED");
+      const lockDatabase = new Database(value.paths.processLock, { create: false, strict: true });
+      try { const lease = await createSqliteProcessLock(lockDatabase).acquire("upgrade:process-proof"); await lease.release(); } finally { lockDatabase.close(); }
     },
     startDaemon: async () => launchctl(await current(), "bootstrap"),
     doctor: async (digest) => {
