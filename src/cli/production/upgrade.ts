@@ -11,6 +11,12 @@ import { currentUid, defaultDaemonConfigPath, parseJson, readDaemonConfig } from
 
 const releasePathVariable = "OPC_UPGRADE_RELEASE_PATH";
 const maxArtifactBytes = 64 * 1024 * 1024;
+const registeredMigrations = Object.freeze(new Map<string, { readonly from: number; readonly to: number; readonly sql: readonly string[] }>([
+  ["m5-add-index", Object.freeze({ from: 1, to: 2, sql: Object.freeze([
+    "CREATE TABLE IF NOT EXISTS opc_upgrade_migration (id TEXT PRIMARY KEY NOT NULL, schema_version INTEGER NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS opc_upgrade_migration_schema ON opc_upgrade_migration (schema_version)",
+  ]) })],
+]));
 
 export interface UpgradeHostFileSystem {
   read(path: string): Promise<string>;
@@ -211,8 +217,19 @@ function localTransaction(fileSystem: UpgradeHostFileSystem, current: () => Prom
       const authority = await current();
       const database = new Database(authority.paths.state, { create: false, strict: true });
       try {
-        database.run("CREATE TABLE IF NOT EXISTS opc_upgrade_migration (id TEXT PRIMARY KEY NOT NULL, schema_version INTEGER NOT NULL)");
-        for (const migration of migrations) database.query("INSERT OR IGNORE INTO opc_upgrade_migration (id, schema_version) VALUES (?, ?)").run(migration.id, migration.schemaVersion);
+        database.run("BEGIN IMMEDIATE");
+        let schema = 1;
+        for (const migration of migrations) {
+          const registered = registeredMigrations.get(migration.id);
+          if (registered === undefined || registered.to !== migration.schemaVersion || registered.from !== schema) throw new Error("UNREGISTERED_UPGRADE_MIGRATION");
+          for (const statement of registered.sql) database.run(statement);
+          database.query("INSERT OR IGNORE INTO opc_upgrade_migration (id, schema_version) VALUES (?, ?)").run(migration.id, migration.schemaVersion);
+          schema = registered.to;
+        }
+        database.run("COMMIT");
+      } catch (error) {
+        try { database.run("ROLLBACK"); } catch { /* Transaction may not have begun. */ }
+        throw error;
       } finally { database.close(); }
     }), startDaemon: async () => {}, doctor: (digest) => Promise.resolve(digest === releaseDigest), freshPoll: (digest) => Promise.resolve(digest === releaseDigest),
     restore: async (snapshot, manifest) => {
