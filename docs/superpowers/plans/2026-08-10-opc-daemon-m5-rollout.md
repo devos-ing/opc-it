@@ -25,9 +25,9 @@
 
 **Files:** Create the four acceptance tests and `src/features/acceptance/*`.
 
-- [ ] Write failing matrix tests for process death before/after every transition, two installations racing, sleep longer than lease, offline 24 hours, expired gh/Codex/Telegram identity, outbox replay, relabeled terminal Issue, edited signed payload, credential-read probes, denied network, symlink escape, push-before-result crash, and uninstall during an active lease.
-- [ ] Run each new test file separately; expect missing acceptance module.
-- [ ] Implement one interface:
+- [x] Write failing matrix tests for process death before/after every transition, two installations racing, sleep longer than lease, offline 24 hours, expired gh/Codex/Telegram identity, outbox replay, relabeled terminal Issue, edited signed payload, credential-read probes, denied network, symlink escape, push-before-result crash, and uninstall during an active lease.
+- [x] Run each new Task 1 test file separately; each failed with the missing acceptance module. `upgrade-rollback.test.ts` remains owned by Task 2 and was not created early.
+- [x] Implement one interface:
 
 ```ts
 export interface AcceptanceRunner {
@@ -37,8 +37,10 @@ export function signAcceptanceManifest(results: readonly AcceptanceResult[], rel
 ```
 
 Use fake adapters for deterministic crash points and real temporary macOS sandbox probes for filesystem/network cases. A skipped probe is `fail`, not `pass`.
-- [ ] Run the four acceptance files twice; expect identical signed evidence digests and 0 failures.
-- [ ] Commit `test: prove daemon failure and security matrix`.
+- [x] Run the three Task 1 acceptance files plus the native sandbox contract twice; both runs pass with identical signed evidence. The fourth planned acceptance file remains the Task 2 upgrade slice.
+- [x] Commit `test: prove daemon failure and security matrix`.
+
+Task 1 evidence (2026-08-12): initial RED was `0 pass / 1 fail / 1 error` per missing acceptance module. Final focused matrix and native sandbox contract passed twice at `26 pass / 0 fail / 137 expectations`; the final complete suite passed `888 / 888` with `2707` expectations, and lint, typecheck, build, and diff-check all exited `0`. The closed 15-case runner rejects skips, failures, caller-fabricated result arrays, and unbranded runners; manifests bind the exact release bytes. The final built CLI digest was `sha256:52ff032260c549932d69d69803858da7c524f7f894fc191d90fe6b2fc4e75b47`, and two complete executions produced the same signed manifest digest `sha256:38e9f03685781e8648993b3d50ac1509b8f59f42e2ce6fe56f380bca3896ffae`. Spec and Standards reviews reported `0 / 0`, and accountable User Outcome Replay passed after the push-crash case was moved to the production Publisher adapter with a temporary local bare remote. Native structured verification is recorded at `.scratch/deliver-code/m5-task1/verification.json` with workspace fingerprint `sha256:5d20f4b258bee09c43a8cd86a9f8e3f949fb8530712fe48a2d352b4c7c06b14c`. No upgrade, activation, external GitHub call, credential read, or private-repository rollout occurred.
 
 ### Task 2: Add checksum-bound upgrade and rollback
 
