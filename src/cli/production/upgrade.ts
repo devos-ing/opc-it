@@ -74,9 +74,16 @@ async function checkedRead(fileSystem: UpgradeHostFileSystem, path: string, uid:
 
 function validateReceipt(value: unknown): PrivateUpgradeReceipt {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("INVALID_UPGRADE_RECEIPT");
-  const source = value as Record<string, unknown>;
+  if (Object.getPrototypeOf(value) !== Object.prototype) throw new Error("INVALID_UPGRADE_RECEIPT");
+  const unsafe = value as Record<string, unknown>;
   const expected = ["version", "digest", "phase", "snapshotDigest", "authority", "snapshotDirectory", "snapshotPaths", "snapshotPresent", "snapshotEntries"];
-  if (Reflect.ownKeys(source).length !== expected.length || expected.some((key) => !Object.hasOwn(source, key))) throw new Error("INVALID_UPGRADE_RECEIPT");
+  if (Reflect.ownKeys(unsafe).length !== expected.length || expected.some((key) => !Object.hasOwn(unsafe, key))) throw new Error("INVALID_UPGRADE_RECEIPT");
+  const source: Record<string, unknown> = {};
+  for (const key of expected) {
+    const descriptor = Object.getOwnPropertyDescriptor(unsafe, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) throw new Error("INVALID_UPGRADE_RECEIPT");
+    source[key] = descriptor.value;
+  }
   const closedPaths = (candidate: unknown): readonly string[] | null => {
     if (candidate === null) return null;
     if (!Array.isArray(candidate) || candidate.some((entry) => typeof entry !== "string" || !entry.startsWith("/Users/") || entry.includes("\0") || entry.includes(".."))) throw new Error("INVALID_UPGRADE_RECEIPT");
