@@ -88,6 +88,7 @@ export interface UpgradeDependencies {
   readonly install: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
   readonly installBinary?: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
   readonly installCli?: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
+  readonly applyPermissions?: (changes: readonly UpgradePermissionChange[], manifest: UpgradeManifest) => Promise<void>;
   readonly migrate: (migrations: readonly UpgradeMigration[]) => Promise<void>;
   readonly startDaemon: () => Promise<void>;
   readonly doctor: (candidateDigest: Sha256) => Promise<boolean>;
@@ -266,6 +267,9 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
         await dependencies.install(preview.manifest.release, preview.manifest);
       }
       await dependencies.saveReceipt(receipt(preview.digest, "installed", saved.digest));
+      if (dependencies.applyPermissions !== undefined) {
+        await dependencies.applyPermissions(preview.manifest.release.permissionDiff, preview.manifest);
+      }
       await dependencies.migrate(preview.manifest.release.migrations);
       await dependencies.startDaemon();
       if (!(await dependencies.doctor(preview.digest)) || !(await dependencies.freshPoll(preview.digest))) throw new Error("UPGRADE_CANDIDATE_HEALTH_FAILED");
@@ -282,9 +286,15 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
       };
       await recover(() => dependencies.stopCandidate());
       await recover(() => dependencies.proveCandidateStopped());
-      await recover(() => dependencies.restore(snapshot, preview.manifest));
-      await recover(() => dependencies.startPrevious());
-      await recover(async () => { if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
+      if (failures.length === 1) {
+        await recover(() => dependencies.restore(snapshot, preview.manifest));
+      }
+      if (failures.length === 1) {
+        await recover(() => dependencies.startPrevious());
+      }
+      if (failures.length === 1) {
+        await recover(async () => { if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
+      }
       if (failures.length === 1) await recover(() => dependencies.saveReceipt(receipt(preview.digest, "rolled-back", null)));
     } else if (fenced) {
       try { await dependencies.startPrevious(); if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); }

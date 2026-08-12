@@ -26,6 +26,7 @@ export interface UpgradeHostFileSystem {
   move(from: string, to: string): Promise<void>;
   remove(path: string): Promise<void>;
   makeDirectory(path: string): Promise<void>;
+  chmod?(path: string, mode: number): Promise<void>;
 }
 
 export interface ProductionUpgradeDependencies {
@@ -59,6 +60,7 @@ const nodeFileSystem: UpgradeHostFileSystem = Object.freeze({
     if (!after.isFile() || after.isSymbolicLink() || after.uid !== currentUid() || (after.mode & 0o077) !== 0) throw new Error("INVALID_UPGRADE_PRIVATE_WRITE_PATH");
   },
   copy: copyFile, move: rename, remove: async (path: string) => { await rm(path, { force: true }); }, makeDirectory: async (path: string) => { await mkdir(path, { recursive: true, mode: 0o700 }); },
+  chmod,
 });
 
 async function release(fileSystem: UpgradeHostFileSystem, current: UpgradeCurrent): Promise<UpgradeRelease> {
@@ -213,6 +215,20 @@ function localTransaction(fileSystem: UpgradeHostFileSystem, current: () => Prom
       const temporary = `${manifest.authority.paths.cli}.upgrade.tmp`;
       await fileSystem.write(temporary, next.cli.bytes); await fileSystem.move(temporary, manifest.authority.paths.cli);
     },
+    applyPermissions: async (changes, manifest) => {
+      if (fileSystem.chmod === undefined) throw new Error("UPGRADE_PERMISSION_ADAPTER_REQUIRED");
+      const support = `${manifest.authority.currentHome}/Library/Application Support/OPC`;
+      for (const change of changes) {
+        const path = change.path === "binary" ? manifest.authority.paths.binary : `${support}/${change.path}`;
+        if (!path.startsWith(`${manifest.authority.currentHome}/`) || path.includes("..")) throw new Error("INVALID_UPGRADE_PERMISSION_PATH");
+        const before = await fileSystem.stat(path);
+        const expectedBefore = Number.parseInt(change.before, 8);
+        if (!before.file || before.symlink || before.uid !== manifest.authority.currentUid || before.mode !== expectedBefore) throw new Error("UPGRADE_PERMISSION_AUTHORITY_CHANGED");
+        await fileSystem.chmod(path, Number.parseInt(change.after, 8));
+        const after = await fileSystem.stat(path);
+        if (after.mode !== Number.parseInt(change.after, 8)) throw new Error("UPGRADE_PERMISSION_ENFORCEMENT_FAILED");
+      }
+    },
     migrate: injectedMigrate ?? (async (migrations) => {
       const authority = await current();
       const database = new Database(authority.paths.state, { create: false, strict: true });
@@ -250,13 +266,13 @@ function localTransaction(fileSystem: UpgradeHostFileSystem, current: () => Prom
   };
 }
 
-function launchArguments(current: UpgradeCurrent): readonly [string, string] {
-  return [`gui/${String(current.currentUid)}/com.getsuperpower.opc`, `${current.currentHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`];
+function launchArguments(current: UpgradeCurrent): readonly [string, string, string] {
+  return [`gui/${String(current.currentUid)}`, `gui/${String(current.currentUid)}/com.getsuperpower.opc`, `${current.currentHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`];
 }
 
 async function launchctl(current: UpgradeCurrent, action: "bootout" | "bootstrap"): Promise<void> {
-  const [domain, plist] = launchArguments(current);
-  const result = await runBounded({ command: "/bin/launchctl", args: action === "bootout" ? [action, domain] : [action, domain, plist], cwd: current.currentHome, env: { PATH: "/usr/bin:/bin" }, timeoutMs: 10_000, outputLimitBytes: 65_536 });
+  const [domain, service, plist] = launchArguments(current);
+  const result = await runBounded({ command: "/bin/launchctl", args: action === "bootout" ? [action, service] : [action, domain, plist], cwd: current.currentHome, env: { PATH: "/usr/bin:/bin" }, timeoutMs: 10_000, outputLimitBytes: 65_536 });
   if (result.status !== "pass" || result.exitCode !== 0) throw new Error(`UPGRADE_LAUNCH_AGENT_${action.toUpperCase()}_FAILED`);
 }
 
@@ -324,14 +340,14 @@ export function createProductionUpgradeService(injected: ProductionUpgradeDepend
       if (receipt?.phase === "rolled-back") return { digest: preview.digest, rolledBack: true };
       if (receipt !== undefined) {
         await requireReplayableUpgradeReceipt(receiptPath(await loadCurrent()), input.approvedDigest, fileSystem, receipt.authority.currentUid);
-        const failures: unknown[] = [];
-        const attempt = async (operation: () => Promise<void>) => { try { await operation(); } catch (error) { failures.push(error); } };
+          const failures: unknown[] = [];
+          const attempt = async (operation: () => Promise<void>) => { try { await operation(); } catch (error) { failures.push(error); } };
         return transaction.lock.withLock(receipt.authority.paths.config, async () => {
           await attempt(() => transaction.stopCandidate());
           await attempt(() => transaction.proveCandidateStopped());
-          await attempt(() => transaction.restore({ snapshotDir: receipt.snapshotDirectory, paths: receipt.snapshotPaths, present: receipt.snapshotPresent, entries: receipt.snapshotEntries }, preview.manifest));
-          await attempt(() => transaction.startPrevious());
-          await attempt(async () => { if (!(await transaction.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
+          if (failures.length === 0) await attempt(() => transaction.restore({ snapshotDir: receipt.snapshotDirectory, paths: receipt.snapshotPaths, present: receipt.snapshotPresent, entries: receipt.snapshotEntries }, preview.manifest));
+          if (failures.length === 0) await attempt(() => transaction.startPrevious());
+          if (failures.length === 0) await attempt(async () => { if (!(await transaction.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); });
           if (failures.length > 0) throw new AggregateError(failures, "UPGRADE_REPLAY_ROLLBACK_FAILED");
           await transaction.saveReceipt({ version: 1, digest: preview.digest, phase: "rolled-back", snapshotDigest: null });
           await transaction.claimFence(false);

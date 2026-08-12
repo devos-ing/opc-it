@@ -206,6 +206,7 @@ describe("checksum-bound reversible upgrades", () => {
       move: (from, to) => { const value = files.get(from); if (value === undefined) return Promise.reject(new Error("ENOENT")); files.set(to, value); files.delete(from); return Promise.resolve(); },
       remove: (path) => { files.delete(path); return Promise.resolve(); },
       makeDirectory: () => Promise.resolve(),
+      chmod: () => Promise.resolve(),
     };
     const previous = process.env.OPC_UPGRADE_RELEASE;
     process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
@@ -258,7 +259,7 @@ describe("checksum-bound reversible upgrades", () => {
     }
   });
 
-  it("retains the primary plus every independent rollback failure", async () => {
+  it("retains the primary and refuses unsafe restore after candidate stop failure", async () => {
     const events: string[] = [];
     const current = await dependencies(events).current();
     const preview = previewUpgrade({ current, release: release() });
@@ -266,7 +267,8 @@ describe("checksum-bound reversible upgrades", () => {
     const broken = { ...adapters, stopCandidate: () => Promise.reject(new Error("STOP_FAILED")), restore: () => Promise.reject(new Error("RESTORE_FAILED")), startPrevious: () => Promise.reject(new Error("RESTART_FAILED")), oldHealth: () => Promise.reject(new Error("HEALTH_FAILED")) };
     const outcome = await applyUpgrade({ preview, approvedDigest: preview.digest }, broken).catch((error: unknown) => error);
     expect(outcome).toBeInstanceOf(AggregateError);
-    expect((outcome as AggregateError).errors.map((error) => (error as Error).message)).toEqual(["MIGRATION_FAILED", "STOP_FAILED", "RESTORE_FAILED", "RESTART_FAILED", "HEALTH_FAILED"]);
+    expect((outcome as AggregateError).errors.map((error) => (error as Error).message)).toEqual(["MIGRATION_FAILED", "STOP_FAILED"]);
+    expect(events).not.toContain("restore");
   });
 
   it("admits replay only for the exact durable approval digest", async () => {
