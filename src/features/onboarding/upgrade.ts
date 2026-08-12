@@ -67,6 +67,7 @@ export interface UpgradeReceipt {
   readonly version: 1;
   readonly digest: Sha256;
   readonly phase: "prepared" | "snapshotted" | "installed" | "complete" | "rolled-back";
+  readonly snapshotDigest: Sha256 | null;
 }
 
 export interface UpgradeLock {
@@ -82,7 +83,7 @@ export interface UpgradeDependencies {
   readonly stopDaemon: () => Promise<void>;
   readonly proveProcessStopped: () => Promise<void>;
   /** Must include config, state/approvals databases and present SQLite sidecars, never lock files. */
-  readonly snapshot: (manifest: UpgradeManifest) => Promise<unknown>;
+  readonly snapshot: (manifest: UpgradeManifest) => Promise<{ readonly digest: Sha256; readonly value: unknown }>;
   /** Must atomically replace both binary authority paths after validating exact local bytes. */
   readonly install: (release: UpgradeRelease, manifest: UpgradeManifest) => Promise<void>;
   readonly migrate: (migrations: readonly UpgradeMigration[]) => Promise<void>;
@@ -90,6 +91,10 @@ export interface UpgradeDependencies {
   readonly doctor: (candidateDigest: Sha256) => Promise<boolean>;
   readonly freshPoll: (candidateDigest: Sha256) => Promise<boolean>;
   readonly restore: (snapshot: unknown, manifest: UpgradeManifest) => Promise<void>;
+  readonly stopCandidate: () => Promise<void>;
+  readonly proveCandidateStopped: () => Promise<void>;
+  readonly startPrevious: () => Promise<void>;
+  readonly oldHealth: () => Promise<boolean>;
 }
 
 export interface ApplyUpgradeInput {
@@ -156,10 +161,11 @@ function releaseFrom(value: unknown, code: string): UpgradeRelease {
   if (fields.version !== 1) fail(code);
   const sourceMigrations = arrayItems(fields.migrations, code);
   const sourcePermissionDiff = arrayItems(fields.permissionDiff, code);
-  const migrations = sourceMigrations.map((migration, index) => {
+  let previousSchema = 0;
+  const migrations = sourceMigrations.map((migration) => {
     const input = plain(migration, ["id", "schemaVersion"], code);
-    const previous = index === 0 ? undefined : migrations[index - 1];
-    if (typeof input.id !== "string" || !/^[a-z][a-z0-9-]{0,127}$/.test(input.id) || typeof input.schemaVersion !== "number" || !Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1 || (previous !== undefined && input.schemaVersion <= previous.schemaVersion)) fail(code);
+    if (typeof input.id !== "string" || !/^[a-z][a-z0-9-]{0,127}$/.test(input.id) || typeof input.schemaVersion !== "number" || !Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1 || input.schemaVersion <= previousSchema) fail(code);
+    previousSchema = input.schemaVersion;
     return { id: input.id, schemaVersion: input.schemaVersion };
   });
   if (new Set(migrations.map(({ id }) => id)).size !== migrations.length) fail(code);
@@ -225,8 +231,8 @@ function sameCurrent(left: UpgradeCurrent, right: UpgradeCurrent): boolean {
   return digestCanonical(left) === digestCanonical(right);
 }
 
-function receipt(digestValue: Sha256, phase: UpgradeReceipt["phase"]): UpgradeReceipt {
-  return deepFreeze({ version: 1, digest: digestValue, phase });
+function receipt(digestValue: Sha256, phase: UpgradeReceipt["phase"], snapshotDigest: Sha256 | null): UpgradeReceipt {
+  return deepFreeze({ version: 1, digest: digestValue, phase, snapshotDigest });
 }
 
 /** Executes a single approved local transaction. It has no network, timer, credential, queue, or LaunchAgent dependency. */
@@ -241,19 +247,20 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
     let snapshot: unknown;
     let primary: unknown;
     try {
-      await dependencies.saveReceipt(receipt(preview.digest, "prepared"));
+      await dependencies.saveReceipt(receipt(preview.digest, "prepared", null));
       await dependencies.claimFence(true); fenced = true;
       await dependencies.awaitTargetZero();
       await dependencies.stopDaemon();
       await dependencies.proveProcessStopped();
-      snapshot = await dependencies.snapshot(preview.manifest);
-      await dependencies.saveReceipt(receipt(preview.digest, "snapshotted"));
+      const saved = await dependencies.snapshot(preview.manifest);
+      snapshot = saved.value;
+      await dependencies.saveReceipt(receipt(preview.digest, "snapshotted", saved.digest));
       await dependencies.install(preview.manifest.release, preview.manifest);
-      await dependencies.saveReceipt(receipt(preview.digest, "installed"));
+      await dependencies.saveReceipt(receipt(preview.digest, "installed", saved.digest));
       await dependencies.migrate(preview.manifest.release.migrations);
       await dependencies.startDaemon();
       if (!(await dependencies.doctor(preview.digest)) || !(await dependencies.freshPoll(preview.digest))) throw new Error("UPGRADE_CANDIDATE_HEALTH_FAILED");
-      await dependencies.saveReceipt(receipt(preview.digest, "complete"));
+      await dependencies.saveReceipt(receipt(preview.digest, "complete", saved.digest));
       await dependencies.claimFence(false);
       return deepFreeze({ digest: preview.digest, rolledBack: false });
     } catch (error) {
@@ -261,10 +268,20 @@ export async function applyUpgrade(input: ApplyUpgradeInput, dependencies: Upgra
     }
     const failures: unknown[] = [primary];
     if (snapshot !== undefined) {
-      try { await dependencies.restore(snapshot, preview.manifest); await dependencies.saveReceipt(receipt(preview.digest, "rolled-back")); }
+      try {
+        await dependencies.stopCandidate();
+        await dependencies.proveCandidateStopped();
+        await dependencies.restore(snapshot, preview.manifest);
+        await dependencies.startPrevious();
+        if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED");
+        await dependencies.saveReceipt(receipt(preview.digest, "rolled-back", null));
+      }
+      catch (error) { failures.push(error); }
+    } else if (fenced) {
+      try { await dependencies.startPrevious(); if (!(await dependencies.oldHealth())) throw new Error("UPGRADE_OLD_HEALTH_FAILED"); }
       catch (error) { failures.push(error); }
     }
-    if (failures.length === 1 && snapshot !== undefined && fenced) {
+    if (failures.length === 1 && fenced) {
       try { await dependencies.claimFence(false); } catch (error) { failures.push(error); }
     }
     if (failures.length > 1) throw new AggregateError(failures, "UPGRADE_ROLLBACK_FAILED");

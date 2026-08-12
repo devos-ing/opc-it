@@ -9,6 +9,8 @@ import {
 } from "../../src/features/onboarding/index.js";
 import { digestCanonical } from "../../src/domain/identity.js";
 import { runCli } from "../../src/cli/main.js";
+import { createProductionUpgradeService } from "../../src/cli/production/upgrade.js";
+import type { UpgradeHostFileSystem } from "../../src/cli/production/upgrade.js";
 
 const oldCli = "old-cli-bytes";
 const oldBinary = "old-wrapper-bytes";
@@ -53,7 +55,7 @@ function dependencies(events: string[], options: { fail?: "migration" | "health"
     awaitTargetZero: () => { events.push("target:zero"); return Promise.resolve(); },
     stopDaemon: () => { events.push("daemon:stop"); return Promise.resolve(); },
     proveProcessStopped: () => { events.push("process:stopped"); return Promise.resolve(); },
-    snapshot: () => { events.push("snapshot"); return Promise.resolve({ oldCli, oldBinary }); },
+    snapshot: () => { events.push("snapshot"); return Promise.resolve({ digest: digestCanonical({ oldCli, oldBinary }), value: { oldCli, oldBinary } }); },
     install: () => { events.push("install"); return Promise.resolve(); },
     migrate: () => {
       events.push("migrate");
@@ -66,6 +68,10 @@ function dependencies(events: string[], options: { fail?: "migration" | "health"
     },
     freshPoll: () => { events.push("poll"); return Promise.resolve(options.fail !== "health"); },
     restore: () => { events.push("restore"); return Promise.resolve(); },
+    stopCandidate: () => { events.push("candidate:stop"); return Promise.resolve(); },
+    proveCandidateStopped: () => { events.push("candidate:stopped"); return Promise.resolve(); },
+    startPrevious: () => { events.push("previous:start"); return Promise.resolve(); },
+    oldHealth: () => { events.push("previous:health"); return Promise.resolve(true); },
   };
 }
 
@@ -102,7 +108,7 @@ describe("checksum-bound reversible upgrades", () => {
     expect((outcome as Error).message).toBe("MIGRATION_FAILED");
     expect(events).toEqual([
       "receipt:prepared", "fence:true", "target:zero", "daemon:stop", "process:stopped",
-      "snapshot", "receipt:snapshotted", "install", "receipt:installed", "migrate", "restore", "receipt:rolled-back", "fence:false",
+      "snapshot", "receipt:snapshotted", "install", "receipt:installed", "migrate", "candidate:stop", "candidate:stopped", "restore", "previous:start", "previous:health", "receipt:rolled-back", "fence:false",
     ]);
   });
 
@@ -135,6 +141,15 @@ describe("checksum-bound reversible upgrades", () => {
     expect(invoked).toBe(false);
   });
 
+  it("accepts a closed increasing multi-migration sequence", async () => {
+    const current = await dependencies([]).current();
+    const preview = previewUpgrade({
+      current,
+      release: { ...release(), migrations: [{ id: "m5-first", schemaVersion: 1 }, { id: "m5-second", schemaVersion: 2 }] },
+    });
+    expect(preview.manifest.release.migrations.map(({ id }) => id)).toEqual(["m5-first", "m5-second"]);
+  });
+
   it("rolls back an unhealthy candidate and keeps the closed CLI output free of release bytes", async () => {
     const events: string[] = [];
     const current = await dependencies(events).current();
@@ -151,5 +166,60 @@ describe("checksum-bound reversible upgrades", () => {
     expect(cli.message).not.toContain(newCli);
     expect(cli.message).not.toContain(newBinary);
     expect(cli.message).toContain(preview.digest);
+    expect(cli.message).toContain('"before":"0600"');
+    expect(cli.message).toContain('"after":"0600"');
+  });
+
+  it("uses the production apply surface with only injected local transaction seams", async () => {
+    const events: string[] = [];
+    const current = await dependencies(events).current();
+    const previous = process.env.OPC_UPGRADE_RELEASE;
+    process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
+    try {
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), transaction: dependencies(events) });
+      const preview = await service.preview();
+      const result = await service.apply({ preview, approvedDigest: preview.digest });
+      expect(result.rolledBack).toBe(false);
+      expect(events).toContain("install");
+      expect(events).toContain("doctor");
+      expect(events).toContain("poll");
+    } finally {
+      if (previous === undefined) delete process.env.OPC_UPGRADE_RELEASE;
+      else process.env.OPC_UPGRADE_RELEASE = previous;
+    }
+  });
+
+  it("applies exact local release bytes through the default production temp-host adapter", async () => {
+    const current = await dependencies([]).current();
+    const files = new Map<string, string>([
+      [current.paths.binary, oldBinary], [current.paths.cli, oldCli], [current.paths.config, "old-config"],
+      [current.paths.state, "state"], [current.paths.approvals, "approvals"],
+      [`${current.paths.state}-wal`, "state-wal"], [`${current.paths.state}-shm`, "state-shm"], [`${current.paths.state}-journal`, "state-journal"],
+      [`${current.paths.approvals}-wal`, "approvals-wal"], [`${current.paths.approvals}-shm`, "approvals-shm"], [`${current.paths.approvals}-journal`, "approvals-journal"],
+    ]);
+    const fileSystem: UpgradeHostFileSystem = {
+      read: (path) => Promise.resolve(files.get(path) ?? ""),
+      stat: (path) => Promise.resolve({ file: files.has(path), symlink: false, uid: 501, mode: 0o600, size: (files.get(path) ?? "").length }),
+      write: (path, value) => { files.set(path, value); return Promise.resolve(); },
+      copy: (from, to) => { const value = files.get(from); if (value === undefined) return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" })); files.set(to, value); return Promise.resolve(); },
+      move: (from, to) => { const value = files.get(from); if (value === undefined) return Promise.reject(new Error("ENOENT")); files.set(to, value); files.delete(from); return Promise.resolve(); },
+      remove: (path) => { files.delete(path); return Promise.resolve(); },
+      makeDirectory: () => Promise.resolve(),
+    };
+    const previous = process.env.OPC_UPGRADE_RELEASE;
+    process.env.OPC_UPGRADE_RELEASE = JSON.stringify(release());
+    try {
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem });
+      const preview = await service.preview();
+      await service.apply({ preview, approvedDigest: preview.digest });
+      expect(files.get(current.paths.binary)).toBe(newBinary);
+      expect(files.get(current.paths.cli)).toBe(newCli);
+      expect([...files.keys()]).toContain("/Users/roy/Library/Application Support/OPC/upgrade-receipt.json");
+      expect([...files.keys()]).not.toContain(current.paths.lifecycleLock);
+      expect([...files.keys()]).not.toContain(current.paths.processLock);
+    } finally {
+      if (previous === undefined) delete process.env.OPC_UPGRADE_RELEASE;
+      else process.env.OPC_UPGRADE_RELEASE = previous;
+    }
   });
 });

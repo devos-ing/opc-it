@@ -15,11 +15,13 @@ export type UpgradeCommandArguments =
 
 export interface UpgradeCommandResult {
   readonly digest: string;
-  readonly oldDigest: string;
-  readonly cliChecksum: string;
-  readonly binaryChecksum: string;
+  readonly oldConfigDigest: string;
+  readonly oldCliChecksum: string;
+  readonly oldBinaryChecksum: string;
+  readonly newCliChecksum: string;
+  readonly newBinaryChecksum: string;
   readonly migrations: readonly string[];
-  readonly permissionPaths: readonly string[];
+  readonly permissionDiff: readonly { readonly path: string; readonly before: string; readonly after: string }[];
   readonly rollbackPaths: readonly string[];
   readonly applied?: boolean;
 }
@@ -27,14 +29,16 @@ export interface UpgradeCommandResult {
 export const upgradeOutputCodec: OutputCodec<UpgradeCommandResult> = outputCodec(
   objectOutput({
     digest: digestOutput,
-    oldDigest: digestOutput,
-    cliChecksum: digestOutput,
-    binaryChecksum: digestOutput,
+    oldConfigDigest: digestOutput,
+    oldCliChecksum: digestOutput,
+    oldBinaryChecksum: digestOutput,
+    newCliChecksum: digestOutput,
+    newBinaryChecksum: digestOutput,
     migrations: arrayOutput(stringOutput((value) => /^[a-z][a-z0-9-]{0,127}$/.test(value))),
-    permissionPaths: arrayOutput(stringOutput((value) => /^[A-Za-z0-9._/-]{1,512}$/.test(value))),
+    permissionDiff: arrayOutput(objectOutput({ path: stringOutput((value) => /^[A-Za-z0-9._/-]{1,512}$/.test(value)), before: stringOutput((value) => /^[0-7]{4}$/.test(value)), after: stringOutput((value) => /^[0-7]{4}$/.test(value)) })),
     rollbackPaths: arrayOutput(pathOutput),
     applied: booleanOutput,
-  }, ["digest", "oldDigest", "cliChecksum", "binaryChecksum", "migrations", "permissionPaths", "rollbackPaths"]),
+  }, ["digest", "oldConfigDigest", "oldCliChecksum", "oldBinaryChecksum", "newCliChecksum", "newBinaryChecksum", "migrations", "permissionDiff", "rollbackPaths"]),
 );
 
 export function parseUpgradeArguments(argv: readonly string[]): UpgradeCommandArguments {
@@ -47,11 +51,13 @@ function closedPreview(preview: UpgradePreview, applied?: boolean): UpgradeComma
   const manifest = preview.manifest;
   return Object.freeze({
     digest: preview.digest,
-    oldDigest: manifest.authority.configDigest,
-    cliChecksum: manifest.release.cli.checksum,
-    binaryChecksum: manifest.release.binary.checksum,
+    oldConfigDigest: manifest.authority.configDigest,
+    oldCliChecksum: manifest.authority.cliChecksum,
+    oldBinaryChecksum: manifest.authority.binaryChecksum,
+    newCliChecksum: manifest.release.cli.checksum,
+    newBinaryChecksum: manifest.release.binary.checksum,
     migrations: Object.freeze(manifest.release.migrations.map(({ id }) => id)),
-    permissionPaths: Object.freeze(manifest.release.permissionDiff.map(({ path }) => path)),
+    permissionDiff: manifest.release.permissionDiff,
     rollbackPaths: manifest.rollback.paths,
     ...(applied === undefined ? {} : { applied }),
   });
