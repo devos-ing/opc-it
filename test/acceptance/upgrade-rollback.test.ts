@@ -316,6 +316,18 @@ describe("checksum-bound reversible upgrades", () => {
     }
   });
 
+  it("returns terminal receipts exactly idempotently", async () => {
+    for (const [phase, rolledBack] of [["complete", false], ["rolled-back", true]] as const) {
+      const events: string[] = [];
+      const current = await dependencies(events).current(); const preview = previewUpgrade({ current, release: release() });
+      const contents = JSON.stringify({ version: 1, digest: preview.digest, phase, snapshotDigest: null, authority: current, snapshotDirectory: null, snapshotPaths: null, snapshotPresent: null, snapshotEntries: null });
+      const fileSystem: UpgradeHostFileSystem = { read: () => Promise.resolve(contents), stat: () => Promise.resolve({ file: true, symlink: false, uid: 501, mode: 0o600, size: contents.length }), write: () => Promise.resolve(), copy: () => Promise.resolve(), move: () => Promise.resolve(), remove: () => Promise.resolve(), makeDirectory: () => Promise.resolve() };
+      const service = createProductionUpgradeService({ current: () => Promise.resolve(current), fileSystem, transaction: dependencies(events), release: () => Promise.resolve(release()) });
+      const resumed = await service.preview(); const result = await service.apply({ preview: resumed, approvedDigest: resumed.digest });
+      expect(result.rolledBack).toBe(rolledBack); expect(events).toEqual([]);
+    }
+  });
+
   it("fences daemon claim intake before the work tick during an upgrade", async () => {
     let workTicks = 0;
     const result = await runProductionEnabledTick(new Date("2026-08-12T00:00:00.000Z"), new AbortController().signal, {

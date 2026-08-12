@@ -329,7 +329,7 @@ export function createProductionUpgradeService(injected: ProductionUpgradeDepend
   const previewFor = async (): Promise<{ readonly preview: import("../../features/onboarding/index.js").UpgradePreview; readonly receipt: PrivateUpgradeReceipt | undefined }> => {
     const live = await loadCurrent(); const candidate = await loadRelease(live);
     const existing = await loadPrivateUpgradeReceipt(receiptPath(live), fileSystem, live.currentUid);
-    return { preview: previewUpgrade({ current: existing !== undefined && existing.phase !== "complete" && existing.phase !== "rolled-back" ? existing.authority : live, release: candidate }), receipt: existing };
+    return { preview: previewUpgrade({ current: existing?.authority ?? live, release: candidate }), receipt: existing };
   };
   return Object.freeze({
     async preview() { return (await previewFor()).preview; },
