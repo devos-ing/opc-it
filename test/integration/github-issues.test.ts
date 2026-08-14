@@ -153,7 +153,7 @@ it("loads one issue and its latest unedited owner approval", async () => {
   expect(api.isDone()).toBe(true);
 });
 
-it("bounds Recovery root hydration to the strict attempt-3 to attempt-2 to Work chain", async () => {
+it("hydrates the strict attempt-3 to attempt-2 to Work chain", async () => {
   const current = issueFixture({
     number: 9,
     body: recoveryContractBody(8, 3),
@@ -167,15 +167,18 @@ it("bounds Recovery root hydration to the strict attempt-3 to attempt-2 to Work 
   const api = mockIssueAndComments(
     current,
     [],
-    [{ path: "/repos/acme/app/issues/8", body: parent }],
+    [
+      { path: "/repos/acme/app/issues/8", body: parent },
+      { path: "/repos/acme/app/issues/7", body: issueFixture({ number: 7 }) },
+    ],
   );
-  const error = await new GitHubIssues(
+  const record = await new GitHubIssues(
     new Octokit({ auth: "test", request: { fetch: api.fetch } }),
     "acme",
     "app",
     undefined,
-  ).loadWorkIssue(9).catch((value: unknown) => value);
-  expect(error).toMatchObject({ code: "RECOVERY_ROOT_CONTRADICTORY" });
+  ).loadWorkIssue(9);
+  expect(record).toMatchObject({ number: 9, rootIssueNumber: 7, attempt: 3 });
   expect(api.isDone()).toBe(true);
 });
 
@@ -201,6 +204,40 @@ it("rejects a Recovery attempt-2 parented by another Recovery before fetching fu
     "app",
     undefined,
   ).loadWorkIssue(8).catch((value: unknown) => value);
+  expect(error).toMatchObject({ code: "RECOVERY_ROOT_CONTRADICTORY" });
+  expect(api.isDone()).toBe(true);
+});
+
+it("rejects a third Recovery hop before fetching beyond the bounded chain", async () => {
+  const current = issueFixture({
+    number: 9,
+    body: recoveryContractBody(8, 3),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-3" }],
+  });
+  const parent = issueFixture({
+    number: 8,
+    body: recoveryContractBody(7, 2),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-2" }],
+  });
+  const nonWorkParent = issueFixture({
+    number: 7,
+    body: recoveryContractBody(6, 2),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-2" }],
+  });
+  const api = mockIssueAndComments(
+    current,
+    [],
+    [
+      { path: "/repos/acme/app/issues/8", body: parent },
+      { path: "/repos/acme/app/issues/7", body: nonWorkParent },
+    ],
+  );
+  const error = await new GitHubIssues(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    undefined,
+  ).loadWorkIssue(9).catch((value: unknown) => value);
   expect(error).toMatchObject({ code: "RECOVERY_ROOT_CONTRADICTORY" });
   expect(api.isDone()).toBe(true);
 });

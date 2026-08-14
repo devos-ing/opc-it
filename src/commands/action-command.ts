@@ -83,6 +83,14 @@ interface PublicationContext {
   readonly attempt?: 1 | 2 | 3;
 }
 
+function ownDataString(value: unknown, key: string): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor)) return undefined;
+  const raw: unknown = descriptor.value;
+  return typeof raw === "string" ? raw : undefined;
+}
+
 export interface PublicationReplay {
   readonly issueNumber: number;
   readonly metadata: Readonly<Record<string, string>>;
@@ -246,12 +254,14 @@ async function recoverPublicationFromPullRequest(
   const commitBody = commitData.commit as typeof commitData.commit & {
     readonly parents?: readonly { readonly sha?: string | null }[];
   };
-  const parents = Array.isArray(commitData.parents)
-    ? commitData.parents
-    : Array.isArray(commitBody.parents)
-      ? commitBody.parents
+  const commitParents: unknown = commitData.parents;
+  const nestedParents: unknown = commitBody.parents;
+  const parents = Array.isArray(commitParents)
+    ? commitParents
+    : Array.isArray(nestedParents)
+      ? nestedParents
       : undefined;
-  if (parents?.length !== 1 || parents[0]?.sha !== context.baseSha) {
+  if (parents?.length !== 1 || ownDataString(parents[0], "sha") !== context.baseSha) {
     throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation commit parent");
   }
   const marker = parsePublicationMarker(commitBody.message);

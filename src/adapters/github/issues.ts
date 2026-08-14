@@ -128,9 +128,6 @@ export class GitHubIssues {
     visited: ReadonlySet<number>,
     depth = 0,
   ): Promise<number> {
-    if (depth > 0 && contract.attempt === 2) {
-      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
-    }
     if (depth >= 2) {
       throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
     }
