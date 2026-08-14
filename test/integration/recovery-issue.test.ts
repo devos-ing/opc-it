@@ -228,3 +228,28 @@ it("creates one unassigned Recovery and dispatches it exactly once", async () =>
   });
   expect(api.isDone()).toBe(true);
 });
+
+it("fails closed when the bounded Recovery inventory remains full", async () => {
+  const routes = Array.from({ length: 101 }, (_, pageIndex): ApiRoute => ({
+    method: "GET",
+    path: `/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=${String(pageIndex + 1)}`,
+    response: Array.from({ length: 100 }, (_, issueIndex) => ({
+      number: pageIndex * 100 + issueIndex + 100,
+      user: { login: "mallory" },
+      body: recoveryBody(),
+    })),
+  }));
+  const api = createGitHubApi(routes);
+  const port = new GitHubRecovery(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+  );
+
+  expect(
+    await createRecovery(failedAttempt(), port).catch((error: unknown) => error),
+  ).toMatchObject({ code: "RECOVERY_INVENTORY_LIMIT" });
+  expect(api.requests).toHaveLength(101);
+  expect(api.requests.every((request) => request.method === "GET")).toBe(true);
+  expect(api.isDone()).toBe(true);
+});

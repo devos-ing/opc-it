@@ -93,6 +93,12 @@ export class GitHubRecovery implements RecoveryPort, RecoveryControlPort {
         }
       }
       if (issues.length < maximumRecoveryInventoryIssuesPerPage) break;
+      if (page === maximumRecoveryInventoryPages) {
+        throw new DomainError(
+          "RECOVERY_INVENTORY_LIMIT",
+          `${this.owner}/${this.repo}`,
+        );
+      }
     }
     return undefined;
   }
