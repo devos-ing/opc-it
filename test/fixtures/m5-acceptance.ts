@@ -130,8 +130,9 @@ async function verifyTerminalRelabel(): Promise<boolean> {
     ["ready", "claim", "claimed"],
     ["claimed", "start", "running"],
     ["running", "candidate", "reviewing"],
-    ["reviewing", "verify", "result-ready"],
-    ["result-ready", "publish", "delivered"],
+    ["reviewing", "verify", "reviewing"],
+    ["reviewing", "publish", "result-ready"],
+    ["result-ready", "merge", "delivered"],
   ] as const;
   for (const [from, event, to] of chain) {
     await github.appendTransition(repository, submitted.number, JSON.stringify(signTransition({
@@ -364,7 +365,45 @@ async function runDeliveryReplay(): Promise<{
   } as const) satisfies VerifiedCandidate;
   encodeVerifiedCandidateJournal(candidate);
   const canonicalRemote = await realpath(remote);
+  const pullRequests: Array<{
+    readonly number: number;
+    readonly html_url: string;
+    readonly head: { readonly ref: string; readonly sha: string; readonly repo: { readonly full_name: string } };
+    readonly base: { readonly ref: string; readonly repo: { readonly full_name: string } };
+  }> = [];
   const sandbox = createFakeSandboxAdapter(async (request) => {
+    if (request.command === "/opt/homebrew/bin/gh") {
+      if (request.args.includes("POST")) {
+        const field = (name: string): string | undefined => {
+          const token = request.args.find((argument) => argument.startsWith(`${name}=`));
+          return token?.slice(name.length + 1);
+        };
+        const head = field("head");
+        const base = field("base");
+        if (head === undefined || base === undefined) {
+          return { status: "fail", exitCode: 1, stdout: "", stderr: "invalid pull request", durationMs: 1 };
+        }
+        const commitSha = (await execa("git", ["--git-dir", remote, "rev-parse", `refs/heads/${contract.target_branch}`])).stdout;
+        const pullRequest = {
+          number: pullRequests.length + 1,
+          html_url: `https://github.com/${contract.repository}/pull/${String(pullRequests.length + 1)}`,
+          head: { ref: head, sha: commitSha, repo: { full_name: contract.repository } },
+          base: { ref: base, repo: { full_name: contract.repository } },
+        };
+        pullRequests.push(pullRequest);
+        return { status: "pass", exitCode: 0, stdout: JSON.stringify(pullRequest), stderr: "", durationMs: 1 };
+      }
+      if (request.args.some((argument) => argument === `repos/${contract.repository}`)) {
+        return {
+          status: "pass",
+          exitCode: 0,
+          stdout: JSON.stringify({ default_branch: "main" }),
+          stderr: "",
+          durationMs: 1,
+        };
+      }
+      return { status: "pass", exitCode: 0, stdout: JSON.stringify(pullRequests), stderr: "", durationMs: 1 };
+    }
     const args = request.args.map((argument) => argument === `https://github.com/${contract.repository}.git`
       ? canonicalRemote
       : argument);
@@ -452,8 +491,8 @@ async function runDeliveryReplay(): Promise<{
     await runEnabledTick({ now: new Date(now), repositories: [configured] });
     const issue = await github.findWork(repository, submitted.workId);
     return {
-      ok: deliveries === 1 && publications === 2 && commits === 1 && pushes === 1 &&
-        issue?.stateLabel === "opc:delivered",
+      ok: deliveries === 1 && publications === 3 && commits === 1 && pushes === 1 &&
+        issue?.stateLabel === "opc:result-ready",
       evidence: [
         `deliveries:${String(deliveries)}`, `publication-calls:${String(publications)}`,
         `commits:${String(commits)}`, `pushes:${String(pushes)}`, `state:${issue?.stateLabel ?? "missing"}`,
@@ -763,8 +802,9 @@ export async function verifyCrashJournalReplay(mode: "before" | "after"): Promis
   const transitions = [
     ["claimed", "start", "running"],
     ["running", "candidate", "reviewing"],
-    ["reviewing", "verify", "result-ready"],
-    ["result-ready", "publish", "delivered"],
+    ["reviewing", "verify", "reviewing"],
+    ["reviewing", "publish", "result-ready"],
+    ["result-ready", "merge", "delivered"],
   ] as const;
   const evidence: string[] = [
     `${mode}:awaiting-approval:approve:ready:one-signed-transition`,
@@ -792,14 +832,14 @@ export async function verifyCrashJournalReplay(mode: "before" | "after"): Promis
     } as const;
     const occurredAt = new Date(Date.parse("2026-08-12T03:00:03.000Z") + index * 1000).toISOString();
     const first = await appendLifecycleTransition(
-      crashConfigured, delivery, event === "publish" ? "terminal" : event === "start" ? "start" : "result",
+      crashConfigured, delivery, event === "publish" || event === "merge" ? "terminal" : event === "start" ? "start" : "result",
       context, occurredAt, createLeaseMutationCoordinator(), input,
     ).catch((error: unknown) => error);
     if (!(first instanceof Error) || !first.message.includes(`M5_CRASH_${mode === "before" ? "BEFORE" : "AFTER"}_APPEND`)) {
       throw new Error("M5_CRASH_NOT_INJECTED");
     }
     await appendLifecycleTransition(
-      configured, delivery, event === "publish" ? "terminal" : event === "start" ? "start" : "result",
+      configured, delivery, event === "publish" || event === "merge" ? "terminal" : event === "start" ? "start" : "result",
       context, occurredAt, createLeaseMutationCoordinator(), input,
     );
     const timeline = readTrustedTimeline(

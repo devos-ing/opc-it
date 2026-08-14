@@ -112,6 +112,24 @@ it("accepts local execution commands only with their bounded inputs", () => {
       artifactSha256: `sha256:${"a".repeat(64)}`,
     }),
   ).toMatchObject({ command: "prepare-review", artifactSha256: `sha256:${"a".repeat(64)}` });
+  expect(
+    parseActionInputs({
+      command: "publish",
+      repository: "acme/app",
+      issueNumber: "7",
+      payloadB64: "abc",
+      inputFile: "/tmp/reviewed",
+      reviewFile: "/tmp/reviewed/opc-result-review.json",
+      artifactSha256: `sha256:${"a".repeat(64)}`,
+      workspace: "/tmp/target-source",
+    }),
+  ).toMatchObject({
+    command: "publish",
+    issueNumber: 7,
+    inputFile: "/tmp/reviewed",
+    reviewFile: "/tmp/reviewed/opc-result-review.json",
+    workspace: "/tmp/target-source",
+  });
 });
 
 it.each([
@@ -124,6 +142,7 @@ it.each([
   [{ command: "prepare-execution", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
   [{ command: "execution-deadline", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
   [{ command: "complete-run", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
+  [{ command: "publish", repository: "acme/app" }, "INVALID_EXECUTION_INPUT"],
   [
     {
       command: "prepare-execution",

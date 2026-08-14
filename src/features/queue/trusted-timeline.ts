@@ -10,7 +10,7 @@ import {
 } from "./transition-record.js";
 import { isCanonicalQueueInstant } from "./timeline-validation.js";
 
-const terminalStates = new Set(["blocked", "delivered"]);
+const terminalStates = new Set(["blocked", "delivered", "needs-decision"]);
 const claimMetadataKeys = [
   "claimed_at",
   "lease_expires_at",

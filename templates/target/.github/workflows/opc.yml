@@ -17,9 +17,10 @@ jobs:
   opc:
     if: vars.OPC_ENABLED == 'true'
     permissions:
-      contents: read
+      contents: write
       issues: write
       actions: write
+      pull-requests: write
     uses: "{{control_owner}}/OPC/.github/workflows/reusable-opc.yml@{{control_workflow_sha}}"
     with:
       event_name: ${{ github.event_name }}

@@ -1,6 +1,6 @@
 # OPC 当前用户 Daemon 设计
 
-状态：已批准设计，待实施计划
+状态：已批准设计；M5 Task 2 的本地 self-upgrade 范围已由 2026-08-14 scheduled-delivery rescope superseded
 日期：2026-08-10
 实现语言：Bun + TypeScript
 
@@ -12,7 +12,7 @@ OPC v2 改为在用户当前登录的 macOS 账户下运行一个 Bun/TypeScript
 
 - 不再创建 `opc-runner` macOS 用户。
 - 不再注册或依赖 GitHub Actions self-hosted runner。
-- 不再使用 GitHub Actions cron 作为主要调度器。
+- 不再使用 GitHub Actions self-hosted runner 作为本机执行器；生产 scheduled-delivery 由仓库自身的 native cron 触发已批准的 GitHub Actions reusable control workflow，当前用户 daemon 不负责 dispatch。
 - 不再写入 `/etc/codex` 或安装机器级 Codex requirements。
 - 不安装系统级 LaunchDaemon，不要求 sudo，不在未登录状态运行。
 - 不复用日常 `~/.codex`；OPC 使用独立 `CODEX_HOME`。
@@ -27,6 +27,10 @@ OPC v2 改为在用户当前登录的 macOS 账户下运行一个 Bun/TypeScript
 - 默认安静；用户只处理计划批准、权限扩大、阻塞和最终结果。
 
 本文是新架构的权威设计。旧设计、ADR、runbook 和模板中与本节冲突的内容必须在实施时迁移或标记为 superseded，不能同时作为生产约束。
+
+### 1.1 M5 Task 2 rescope
+
+The former local OPC runtime self-upgrade proposal is superseded by the approved [scheduled delivery rescope design](2026-08-14-opc-scheduled-delivery-rescope-design.md) and [implementation plan](../plans/2026-08-14-opc-scheduled-delivery-rescope.md). Task 2 retains scheduled approved-work delivery through the immutable GitHub Actions control workflow, isolated execution, verification, one publisher commit/branch/pull request, and human merge. Native cron is the production trigger; repository operators/workflows with `issues:write` are the trusted queue writers, and immutable bot publication comments are reconciled against exact PR identity. Local binary or CLI replacement, daemon replacement, upgrade-health fencing, upgrade receipts, SQLite migration shims, filesystem snapshots, rollback transactions, and automatic runtime restoration are not supported behavior.
 
 ## 2. 用户目标
 
@@ -58,17 +62,17 @@ grill -> plan -> submit awaiting-approval Issue -> approve digest
 - Telegram 计划批准、权限确认和结果通知。
 - OS 强制的进程与文件访问隔离。
 - 有界自动恢复、lease、heartbeat、幂等和崩溃重放。
-- 本机 CLI：onboard、daemon、status、pause、resume、doctor、upgrade、uninstall。
+- 本机 CLI：onboard、daemon、status、pause、resume、doctor、uninstall。
 
 ### 3.2 v2 不包含
 
 - 新 macOS 用户或要求用户授予管理员权限。
 - 开机未登录运行。
 - 公网 webhook、本机入站端口或 SSH 控制面。
-- GitHub Actions Runner、gh-aw、Temporal 或其他外部调度平台。
+- GitHub Actions self-hosted Runner as a separate local daemon architecture、gh-aw、Temporal 或其他外部 execution platform；the approved target is the repository's immutable GitHub Actions reusable control workflow.
 - 自动获得 Full Disk Access、Accessibility 或其他 macOS 隐私权限。
 - 自动扩大网络、目录、仓库、模型或执行预算。
-- 无确认自动升级 daemon。
+- 本地运行时 self-upgrade、upgrade-health 和 upgrade-rollback 流程。
 - 多租户、跨 GitHub owner 或公共仓库执行。
 
 ## 4. 总体架构
@@ -83,7 +87,7 @@ flowchart TD
     D --> CW["隔离 Codex Worker"]
     CW --> TW["隔离 Target Command Worker"]
     CW --> RV["独立 Result Reviewer"]
-    RV --> PB["Publisher：commit + gh push"]
+    RV --> PB["Publisher：commit + gh push + PR"]
     PB --> GH
     RV --> RC["Recovery Issue"]
     RC --> GH
@@ -97,7 +101,7 @@ GitHub Issue 是跨重启、跨版本和跨机器可审计的权威记录。它�
 - plan digest 和批准证据；
 - claim、heartbeat、state transition；
 - attempt、failure category、error fingerprint；
-- Result Manifest、Result Review 和 commit URL；
+- Result Manifest、Result Review、commit URL 和 Delivery PR identity；
 - Recovery Issue 与 root Work 的链路。
 
 SQLite 不是任务状态的权威来源，只保存可重建或本机专属的数据：
@@ -199,7 +203,8 @@ Transition signing：
 
 - 首次身份配置时生成随机 256-bit installation signing key，并与 Telegram bot token 分开存入 OPC 专属 Keychain 条目。
 - GitHub transition payload 使用版本化 canonical JSON 和 HMAC-SHA-256；key ID 和 installation ID 可以公开，secret 不得离开 Keychain。
-- daemon 重启和升级必须复用同一 signing key。
+- 以上 HMAC 语义适用于注入的本地 runtime seam；生产 scheduled-delivery 由 repository native cron 触发 immutable Actions workflow，不请求或暴露该 key。仓库 operators/workflows 以 `issues:write` 作为 queue writer authority；reconciliation 只接受未编辑的 immutable `github-actions[bot]` publication comment，并校验 exact repository、branch、commit、PR URL/number 和 base/head identity。
+- daemon 重启必须复用同一 signing key；本地运行时 self-upgrade 不属于 v2 行为。
 - signing key 缺失、不可读或与已有 journal 不匹配时停止领取，进入 `USER_ACTION_REQUIRED`；不得信任未签名标签来继续执行。
 - key rotation 是显式迁移：旧 key 在所有 active lease 结束前只用于验证，新 key 只签新 transition，并把 rotation record 写入 GitHub。
 - uninstall 默认保留 signing key，除非用户明确选择永久移除；移除后现有 journal 只能作为审计记录，重新启用必须创建新 installation identity。
@@ -499,7 +504,7 @@ CLI 通过 onboarding、status 和 lifecycle feature 的 interface 工作；CLI 
 - `opc pause`：停止新转换，允许安全 cleanup。
 - `opc resume`：重新验证 permission manifest 后恢复。
 - `opc doctor`：只读验证 gh、Codex、Telegram、sandbox、SQLite 和仓库访问。
-- `opc upgrade`：展示 checksum、迁移和权限 diff，批准后升级。
+- 本地运行时 self-upgrade 不属于 v2 CLI；任何旧的 `opc upgrade`、upgrade-health 或 upgrade-rollback 文档均已 superseded。
 - `opc uninstall`：停止 LaunchAgent，分别确认删除程序、状态、日志和 Keychain 条目。
 
 ### 11.2 LaunchAgent

@@ -34,7 +34,7 @@ test("process death before and after every lifecycle boundary restarts with one 
     runner.run("process-death-after-transition"),
   ]);
   expect(results.every(({ status }) => status === "pass")).toBe(true);
-  expect(results.map(({ evidence }) => evidence.length)).toEqual([6, 6]);
+  expect(results.map(({ evidence }) => evidence.length)).toEqual([7, 7]);
 });
 
 test("unknown case IDs fail closed before an adapter can run", async () => {

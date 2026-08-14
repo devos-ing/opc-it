@@ -28,6 +28,7 @@ export interface ActionInputs {
   readonly issueNumber?: number;
   readonly payloadB64?: string;
   readonly inputFile?: string;
+  readonly reviewFile?: string;
   readonly codexVersion?: string;
   readonly permissionProfile?: "opc-executor" | "opc-reviewer";
   readonly artifactSha256?: Sha256;
@@ -69,6 +70,7 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     "finalize-execution",
     "prepare-review",
     "decide-result",
+    "publish",
     "complete-run",
   ];
   const payloadB64 = raw.payloadB64;
@@ -92,7 +94,8 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
   if (
     (raw.command === "finalize-execution" ||
       raw.command === "prepare-review" ||
-      raw.command === "decide-result") &&
+      raw.command === "decide-result" ||
+      raw.command === "publish") &&
     !inputFile
   ) {
     throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires input-file`);
@@ -102,10 +105,18 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
   }
   const artifactSha256 = raw.artifactSha256;
   if (
-    (raw.command === "prepare-review" || raw.command === "decide-result") &&
+    (raw.command === "prepare-review" || raw.command === "decide-result" || raw.command === "publish") &&
     (!artifactSha256 || !/^sha256:[0-9a-f]{64}$/.test(artifactSha256))
   ) {
     throw new DomainError("INVALID_EXECUTION_INPUT", `${raw.command} requires artifact digest`);
+  }
+  if (
+    raw.command === "publish" &&
+    (!raw.reviewFile || !raw.workspace ||
+      !/^\/[A-Za-z0-9_./+-]+$/.test(raw.reviewFile) ||
+      !/^\/[A-Za-z0-9_./+-]+$/.test(raw.workspace))
+  ) {
+    throw new DomainError("INVALID_EXECUTION_INPUT", "publish requires reviewed input, review, and workspace");
   }
   const codexVersion = raw.codexVersion;
   const permissionProfile = raw.permissionProfile;
@@ -162,6 +173,7 @@ export function parseActionInputs(raw: Readonly<Record<string, string>>): Action
     ...(issueNumber === undefined ? {} : { issueNumber }),
     ...(payloadB64 ? { payloadB64 } : {}),
     ...(inputFile ? { inputFile } : {}),
+    ...(raw.reviewFile ? { reviewFile: raw.reviewFile } : {}),
     ...(codexVersion ? { codexVersion } : {}),
     ...(permissionProfile === "opc-executor" || permissionProfile === "opc-reviewer"
       ? { permissionProfile }

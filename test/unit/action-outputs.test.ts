@@ -62,7 +62,7 @@ it("exports only the trusted production completion outcome", () => {
   expect(
     toActionOutputs({
       command: "complete-run",
-      completion: { outcome: "verified", state: "result-ready" },
+      completion: { outcome: "verified", state: "reviewing" },
     }),
   ).toEqual({ outcome: "verified" });
 });

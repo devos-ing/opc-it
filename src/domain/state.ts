@@ -21,6 +21,7 @@ export const workEvents = [
   "start",
   "candidate",
   "verify",
+  "publish",
   "merge",
   "close-unmerged",
   "work-failure",
@@ -47,13 +48,15 @@ const transitions: TransitionMap = {
     "outage-block": "blocked",
   },
   reviewing: {
-    verify: "result-ready",
+    verify: "reviewing",
+    publish: "result-ready",
+    drift: "needs-reapproval",
     "work-failure": "recovering",
     incident: "ready",
     "outage-block": "blocked",
   },
   recovering: { retry: "ready", block: "blocked" },
-  "result-ready": { merge: "delivered", "close-unmerged": "needs-decision" },
+  "result-ready": { merge: "delivered", "close-unmerged": "needs-decision", drift: "needs-reapproval" },
   "needs-reapproval": { approve: "ready" },
 };
 

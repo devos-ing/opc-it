@@ -73,7 +73,7 @@ class MemoryCompletionPort implements RunCompletionPort {
 
 const evidenceUrl = "https://github.com/acme/app/actions/runs/123";
 
-it("persists the complete success path through result-ready", async () => {
+it("keeps the complete success path in reviewing until publication", async () => {
   const port = new MemoryCompletionPort("claimed");
 
   expect(
@@ -81,7 +81,7 @@ it("persists the complete success path through result-ready", async () => {
       { runId: "123", issue: await port.loadWorkIssue(7), envelope, observed: { kind: "verified" }, evidenceUrl },
       port,
     ),
-  ).toEqual({ outcome: "verified", state: "result-ready" });
+  ).toEqual({ outcome: "verified", state: "reviewing" });
   expect(port.transitions.map((command) => command.event)).toEqual([
     "start",
     "candidate",

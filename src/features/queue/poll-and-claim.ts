@@ -30,7 +30,7 @@ import {
 import { isCanonicalQueueInstant } from "./timeline-validation.js";
 import { mergeQueueDiagnostics } from "./diagnostics.js";
 
-const terminalStates = new Set(["blocked", "delivered"]);
+const terminalStates = new Set(["blocked", "delivered", "needs-decision"]);
 const legacyRecoveryMetadataKeys = [
   "next_attempt",
   "plan_digest",

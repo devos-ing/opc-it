@@ -322,6 +322,13 @@ describe("runCli", () => {
     });
   });
 
+  it("does not expose local self-upgrade", async () => {
+    expect(await runCli(["upgrade"])).toEqual({
+      exitCode: 2,
+      message: '{"ok":false,"error":"UNKNOWN_COMMAND"}',
+    });
+  });
+
   it("rejects incomplete queue-plan input before GitHub authentication", async () => {
     expect(await runCli(["queue-plan"])).toEqual({
       exitCode: 2,
@@ -345,7 +352,7 @@ describe("runCli", () => {
 
     expect({ exitCode: result.exitCode, finalState: output.finalState }).toEqual({
       exitCode: 0,
-      finalState: "result-ready",
+      finalState: "reviewing",
     });
   });
 

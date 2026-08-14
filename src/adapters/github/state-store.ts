@@ -17,6 +17,9 @@ import {
   type WorkState,
 } from "../../domain/state.js";
 import { parseRepositoryPolicyYaml } from "../../domain/validation.js";
+import { digestCanonical } from "../../domain/identity.js";
+import { parseIssueContractYaml } from "../../domain/validation.js";
+import { extractContractBlock } from "./issue-parser.js";
 import {
   GitHubIssues,
   attemptFromLabels,
@@ -86,6 +89,10 @@ export class GitHubStateStore implements ClaimPort {
   }
 
   private async loadTrustedState(issueNumber: number): Promise<WorkState | undefined> {
+    return stateAfterTransition((await this.loadTrustedTransitionRecords(issueNumber)).at(-1));
+  }
+
+  private async loadTrustedTransitionRecords(issueNumber: number): Promise<readonly TransitionRecord[]> {
     const comments = await this.octokit.paginate(
       this.octokit.rest.issues.listComments,
       {
@@ -95,7 +102,7 @@ export class GitHubStateStore implements ClaimPort {
         per_page: 100,
       },
     );
-    return stateAfterTransition(trustedTransitionRecords(comments).at(-1));
+    return trustedTransitionRecords(comments);
   }
 
   async loadIssueState(issueNumber: number): Promise<{
@@ -112,6 +119,44 @@ export class GitHubStateStore implements ClaimPort {
       state: (await this.loadTrustedState(issueNumber)) ?? workStateFromLabels(labels),
       attempt: attemptFromLabels(labels),
     };
+  }
+
+  async loadPublicationContext(issueNumber: number): Promise<{
+    readonly workId: string;
+    readonly contractDigest: string;
+    readonly approvalDigest: string;
+    readonly baseSha: string;
+    readonly targetBranch: string;
+    readonly targetRepository: string;
+    readonly baseRepository: string;
+    readonly baseRef: string;
+    readonly rootIssueNumber: number;
+  }> {
+    const issue = await this.loadWorkIssue(issueNumber);
+    const rootIssue = issue.rootIssueNumber === issue.number
+      ? issue
+      : await this.loadWorkIssue(issue.rootIssueNumber);
+    const parsed = parseIssueContractYaml(extractContractBlock(rootIssue.body));
+    if (parsed.kind !== "Work") {
+      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", parsed.root_work_id);
+    }
+    const repository = `${this.owner}/${this.repo}`;
+    const { data: repositoryInfo } = await this.octokit.rest.repos.get({
+      owner: this.owner,
+      repo: this.repo,
+    });
+    const contractDigest = digestCanonical(parsed);
+    return Object.freeze({
+      workId: parsed.work_id,
+      contractDigest,
+      approvalDigest: contractDigest,
+      baseSha: parsed.base_sha,
+      targetBranch: `opc/${parsed.work_id}`,
+      targetRepository: repository,
+      baseRepository: repository,
+      baseRef: repositoryInfo.default_branch,
+      rootIssueNumber: rootIssue.number,
+    });
   }
 
   async ownsRun(issueNumber: number, runId: string): Promise<boolean> {
@@ -220,8 +265,26 @@ export class GitHubStateStore implements ClaimPort {
     });
     const labels = issueLabels(issue.labels);
     const labelState = workStateFromLabels(labels);
-    const previous = (await this.loadTrustedState(command.issueNumber)) ?? labelState;
+    const records = await this.loadTrustedTransitionRecords(command.issueNumber);
+    const latest = records.at(-1);
+    const previous = stateAfterTransition(latest) ?? labelState;
+    const metadataMatches = latest !== undefined &&
+      latest.expected === command.expected &&
+      latest.event === command.event &&
+      Object.keys(latest.metadata).length === Object.keys(command.metadata).length &&
+      Object.entries(command.metadata).every(([key, value]) => latest.metadata[key] === value);
     if (previous !== command.expected) {
+      if (metadataMatches) {
+        const desiredLabel = labelForWorkState(previous);
+        if (labelState !== previous) {
+          await this.octokit.rest.issues.setLabels({
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: command.issueNumber,
+            labels: [...labels.filter((label) => !isWorkStateLabel(label)), desiredLabel],
+          });
+        }
+      }
       return { previous, current: previous, changed: false };
     }
     const current = transition(previous, command.event);

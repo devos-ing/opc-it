@@ -166,6 +166,7 @@ jobs:
         with:
           name: opc-candidate-${{ github.run_id }}
           path: ${{ steps.finalize.outputs['bundle-directory'] }}
+          include-hidden-files: false
           if-no-files-found: error
           retention-days: 30
 
@@ -253,6 +254,7 @@ jobs:
           path: |
             ${{ runner.temp }}/opc-review-input
             ${{ runner.temp }}/opc-result-review.json
+          include-hidden-files: false
           if-no-files-found: error
           retention-days: 30
 
@@ -274,3 +276,39 @@ jobs:
           payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
           github-token: ${{ github.token }}
           enabled: ${{ vars.OPC_ENABLED }}
+
+  publish:
+    needs: [dispatch-and-claim, execute, review, conclude]
+    if: needs.review.result == 'success' && needs.conclude.result == 'success' && vars.OPC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Download exact reviewed candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: opc-reviewed-${{ github.run_id }}
+          path: ${{ runner.temp }}/opc-reviewed
+      - name: Checkout approved base without persistent credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.dispatch-and-claim.outputs.base_sha }}
+          path: target-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Publish reviewed candidate
+        uses: "{{control_owner}}/OPC@{{control_action_sha}}"
+        with:
+          command: publish
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.dispatch-and-claim.outputs.issue_number }}
+          payload-b64: ${{ needs.dispatch-and-claim.outputs.envelope_b64 }}
+          input-file: ${{ runner.temp }}/opc-reviewed/opc-review-input
+          review-file: ${{ runner.temp }}/opc-reviewed/opc-result-review.json
+          artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
+          workspace: ${{ github.workspace }}/target-source
+          github-token: ${{ github.token }}

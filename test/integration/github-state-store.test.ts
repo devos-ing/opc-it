@@ -244,6 +244,43 @@ it("loads trusted transition state instead of a mutable state label", async () =
   expect(await store.loadIssueState(7)).toEqual({ state: "claimed", attempt: 1 });
 });
 
+it("loads publication context through the production Work/Recovery parser and binds repositories, refs, and approval", async () => {
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
+  const issue = {
+    number: 7,
+    user: { login: "roy" },
+    body: "# Work\n\n```yaml opc-contract\n" + JSON.stringify(contract) + "\n```\n",
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-1" }],
+    created_at: "2026-08-08T00:00:00Z",
+  };
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues/7", issue],
+      ["GET /repos/acme/app/issues/7/comments?per_page=100", []],
+      ["GET /repos/acme/app", { default_branch: "main", owner: { login: "acme" } }],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+  const context = await store.loadPublicationContext(7);
+  expect(context).toMatchObject({
+    workId: contract.work_id,
+    contractDigest: digestCanonical(contract),
+    approvalDigest: digestCanonical(contract),
+    baseSha: contract.base_sha,
+    targetBranch: `opc/${contract.work_id}`,
+    targetRepository: "acme/app",
+    baseRepository: "acme/app",
+    baseRef: "main",
+    rootIssueNumber: 7,
+  });
+});
+
 it("repairs a mutable relabel while applying the trusted next transition", async () => {
   const relabeledIssue = {
     number: 7,
@@ -290,6 +327,62 @@ it("repairs a mutable relabel while applying the trusted next transition", async
   ).toEqual({ previous: "claimed", current: "ready", changed: true });
 });
 
+it("repairs the label projection after a trusted comment succeeds but label update fails", async () => {
+  const issue = { number: 7, labels: [{ name: "opc:ready" }, { name: "opc:attempt-1" }] };
+  const comments: Record<string, unknown>[] = [];
+  let labelWrites = 0;
+  const fetch = (async (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init?: Parameters<typeof globalThis.fetch>[1],
+  ): Promise<Response> => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.endsWith("/issues/7")) {
+      return new Response(JSON.stringify(issue), { headers: { "content-type": "application/json" } });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) {
+      return new Response(JSON.stringify(comments), { headers: { "content-type": "application/json" } });
+    }
+    if (request.method === "POST" && url.pathname.endsWith("/issues/7/comments")) {
+      comments.push({
+        user: { login: "github-actions[bot]" },
+        body: (await request.json() as { readonly body: string }).body,
+        created_at: "2026-08-14T00:00:00Z",
+        updated_at: "2026-08-14T00:00:00Z",
+      });
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }
+    if (request.method === "PUT" && url.pathname.endsWith("/issues/7/labels")) {
+      labelWrites += 1;
+      if (labelWrites === 1) return new Response("label failed", { status: 500 });
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }
+    return new Response("unexpected", { status: 404 });
+  }) as unknown as typeof globalThis.fetch;
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+  const command = {
+    issueNumber: 7,
+    expected: "ready" as const,
+    event: "claim" as const,
+    metadata: { run_id: "run-1" },
+  };
+  const first = await store.transition(command).catch((caught: unknown) => caught);
+  expect(first).toBeDefined();
+  expect(await store.transition(command)).toEqual({
+    previous: "claimed",
+    current: "claimed",
+    changed: false,
+  });
+  expect(comments).toHaveLength(1);
+  expect(labelWrites).toBe(2);
+});
+
 it("does not revive a trusted terminal state after an external ready relabel", async () => {
   const relabeledIssue = {
     number: 7,
@@ -326,6 +419,12 @@ it("does not revive a trusted terminal state after an external ready relabel", a
             body: transitionBody("reviewing", "verify"),
             created_at: "2026-08-08T00:05:00Z",
             updated_at: "2026-08-08T00:05:00Z",
+          },
+          {
+            user: { login: "github-actions[bot]" },
+            body: transitionBody("reviewing", "publish"),
+            created_at: "2026-08-08T00:06:00Z",
+            updated_at: "2026-08-08T00:06:00Z",
           },
         ],
       ],

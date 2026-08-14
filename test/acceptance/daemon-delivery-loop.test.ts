@@ -320,6 +320,7 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
   let commits = 0;
   let pushes = 0;
   let terminalChecks = 0;
+  let pullRequestStatus: "open" | "merged" | "closed" = "open";
   let runtimeNow = Date.parse("2026-08-11T01:00:02.000Z");
   const candidate = deepFreeze({
     status: "result-ready",
@@ -388,8 +389,12 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
           commitSha: "b".repeat(40),
           treeSha: "c".repeat(40),
           reused: publicationCalls > 1,
+          pullRequestNumber: 1,
+          pullRequestUrl: "https://github.com/roy/private-app/pull/1",
+          pullRequestReused: publicationCalls > 1,
         });
       },
+      reconcilePublication: () => Promise.resolve(pullRequestStatus),
       revalidate: (boundary, context) => {
         if (boundary === "terminal") {
           terminalChecks += 1;
@@ -433,9 +438,17 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
 
   expect({ deliveries, publicationCalls, commits, pushes }).toEqual({
     deliveries: 1,
-    publicationCalls: 2,
+    publicationCalls: 3,
     commits: 1,
     pushes: 1,
+  });
+  expect((await github.findWork(validV2Contract.repository, validV2Contract.work_id))?.stateLabel)
+    .toBe("opc:result-ready");
+  pullRequestStatus = "merged";
+  runtimeNow = Date.parse("2026-08-11T01:00:06.000Z");
+  await runEnabledTick({
+    now: new Date("2026-08-11T01:00:06.000Z"),
+    repositories: [repository],
   });
   expect((await github.findWork(validV2Contract.repository, validV2Contract.work_id))?.stateLabel)
     .toBe("opc:delivered");

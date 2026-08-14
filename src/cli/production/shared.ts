@@ -39,7 +39,6 @@ import {
 } from "../../platform/macos/lifecycle-config-lock.js";
 import type { OperationalSnapshot } from "./inspection.js";
 import type { ProductionDaemonRuntime } from "./daemon.js";
-import type { UpgradeCommandFactory } from "../commands/upgrade.js";
 import { preserveAtomicWriteFailure } from "./atomic-file.js";
 import {
   validateTelegramPairingStagePreview,
@@ -64,8 +63,6 @@ const approvedIdentityVariable = "OPC_APPROVED_GITHUB_IDENTITY";
 const approvedRepositoriesVariable = "OPC_APPROVED_REPOSITORIES";
 
 export interface ProductionCliAdapterFactories {
-  /** Test/local-only upgrade executor; no default host upgrade is activated by construction. */
-  readonly upgrade?: UpgradeCommandFactory;
   readonly githubIdentity?: (preview: OnboardingPreview) => GitHubIdentity;
   readonly codexIdentity?: (preview: OnboardingPreview) => CodexIdentity;
   readonly credentials?: (preview: OnboardingPreview) => CredentialStore;

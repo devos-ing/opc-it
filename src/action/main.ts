@@ -64,6 +64,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
     const issueNumber = runtime.getInput("issue-number");
     const payloadB64 = runtime.getInput("payload-b64");
     const inputFile = runtime.getInput("input-file");
+    const reviewFile = runtime.getInput("review-file");
     const codexVersion = runtime.getInput("codex-version");
     const permissionProfile = runtime.getInput("permission-profile");
     const artifactSha256 = runtime.getInput("artifact-sha256");
@@ -82,6 +83,7 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
       ...(issueNumber ? { issueNumber } : {}),
       ...(payloadB64 ? { payloadB64 } : {}),
       ...(inputFile ? { inputFile } : {}),
+      ...(reviewFile ? { reviewFile } : {}),
       ...(codexVersion ? { codexVersion } : {}),
       ...(permissionProfile ? { permissionProfile } : {}),
       ...(artifactSha256 ? { artifactSha256 } : {}),
@@ -363,6 +365,9 @@ export async function main(runtime: ActionRuntime = githubActionsRuntime): Promi
         runId,
         controlOwner,
         callerWorkflowRef: runtime.getWorkflowRef(),
+        runnerTemp,
+        actionPath: runtime.getActionPath?.() ?? "",
+        ...(token ? { githubToken: token } : {}),
       });
       result = controlResult;
       outputs = toActionOutputs(controlResult);

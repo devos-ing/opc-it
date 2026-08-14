@@ -10,7 +10,6 @@ import type {
   VerifiedCandidate,
 } from "../../src/features/delivery/index.js";
 import { digestCanonical } from "../../src/domain/identity.js";
-import { validateExecutionContract } from "../../src/features/planning/index.js";
 import { createPublisherAdapter } from "../../src/platform/git/publisher-adapter.js";
 import { createFakeSandboxAdapter } from "../../src/platform/sandbox/fake-sandbox-adapter.js";
 
@@ -32,6 +31,21 @@ interface Fixture {
   readonly candidate: VerifiedCandidate;
   readonly sandbox: ReturnType<typeof createFakeSandboxAdapter>;
   readonly publisher: ReturnType<typeof createPublisherAdapter>;
+  readonly pullRequests: Array<{
+    readonly number: number;
+    readonly html_url: string;
+    readonly title?: string;
+    readonly body?: string;
+    readonly head: {
+      readonly ref: string;
+      readonly sha: string;
+      readonly repo: { readonly full_name: string };
+    };
+    readonly base: {
+      readonly ref: string;
+      readonly repo: { readonly full_name: string };
+    };
+  }>;
   cleanup(): Promise<void>;
 }
 
@@ -44,6 +58,11 @@ async function publicationFixture(options: {
   readonly hook?: RunnerHook;
   readonly deadlineEpochMs?: number;
   readonly now?: () => number;
+  readonly revalidate?: () => Promise<void>;
+  readonly targetBranch?: string;
+  readonly paginatedPullRequests?: boolean;
+  readonly sourceWorkUrl?: string;
+  readonly attemptRecoveryChain?: string;
 } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "opc-daemon-publication-"));
   const repository = join(root, "repository");
@@ -93,28 +112,18 @@ async function publicationFixture(options: {
     },
     frozenWorktree: await realpath(repository),
   });
-  const contract = validateExecutionContract({
-    version: 2,
+  const contract = {
     work_id: "opc-work-1",
     repository: "acme/app",
     base_sha: baseSha,
-    target_branch: "opc/opc-work-1",
-    milestone: "M4",
-    goal: "Publish the verified result",
+    target_branch: options.targetBranch ?? "opc/opc-work-1",
     acceptance: [{ id: "criterion-1", statement: "result is published", evidence: "tests" }],
-    paths: { writable: ["result.txt"], forbidden: [] },
-    commands: { bootstrap: "true", test: "true", evidence: [{ id: "tests", run: "true" }] },
-    limits: { timeout_minutes: 5, attempts: 1 },
-    capabilities: {
-      network: { mode: "deny", allow_domains: [] },
-      host_directories: { readable: [], writable: [] },
-      other: [],
-    },
-    codex: {
-      executor: { profile: "opc-executor", model: "gpt-5", effort: "high" },
-      reviewer: { profile: "opc-reviewer", model: "gpt-5", effort: "high" },
-    },
-  });
+    source_work_url: options.sourceWorkUrl ?? "https://github.com/acme/app/issues/1",
+    acceptance_summary: "criterion-1:satisfied",
+    evidence_summary: "tests:pass:0",
+    attempt_recovery_chain: options.attemptRecoveryChain ?? "attempt-1",
+    material_risks: "none",
+  };
   const onboardingManifest = deepFreeze({
     version: 1 as const,
     githubLogin: "approved-user",
@@ -127,7 +136,56 @@ async function publicationFixture(options: {
     digest: digestCanonical(onboardingManifest),
   });
   const canonicalRemote = await realpath(remote);
+  const pullRequests: Fixture["pullRequests"] = [];
   const sandbox = createFakeSandboxAdapter(async (request) => {
+    if (request.command === "/opt/homebrew/bin/gh") {
+      const executeGh = async (): Promise<CommandResult> => {
+        const isCreate = request.args.includes("POST");
+        if (isCreate) {
+          const field = (name: string): string | undefined => {
+            const token = request.args.find((argument) => argument.startsWith(`${name}=`));
+            return token?.slice(name.length + 1);
+          };
+          const title = field("title");
+          const body = field("body");
+          const head = field("head");
+          const base = field("base");
+          if (title === undefined || body === undefined || head === undefined || base === undefined) {
+            return { status: "fail", exitCode: 1, stdout: "", stderr: "invalid create", durationMs: 1 };
+          }
+          const fixtureCommitSha = (await execa("git", ["--git-dir", remote, "rev-parse", "refs/heads/opc/opc-work-1"])).stdout;
+          const pullRequest = {
+            number: pullRequests.length + 1,
+            html_url: `https://github.com/acme/app/pull/${String(pullRequests.length + 1)}`,
+            title,
+            body,
+            head: { ref: head, sha: fixtureCommitSha, repo: { full_name: "acme/app" } },
+            base: { ref: base, repo: { full_name: "acme/app" } },
+          };
+          pullRequests.push(pullRequest);
+          return { status: "pass", exitCode: 0, stdout: JSON.stringify(pullRequest), stderr: "", durationMs: 1 };
+        }
+        if (request.args.some((argument) => argument === "repos/acme/app")) {
+          return {
+            status: "pass",
+            exitCode: 0,
+            stdout: JSON.stringify({ default_branch: "main" }),
+            stderr: "",
+            durationMs: 1,
+          };
+        }
+        return {
+          status: "pass",
+          exitCode: 0,
+          stdout: options.paginatedPullRequests
+            ? JSON.stringify([pullRequests.slice(0, 100), pullRequests.slice(100)])
+            : JSON.stringify(pullRequests),
+          stderr: "",
+          durationMs: 1,
+        };
+      };
+      return (await options.hook?.(request, executeGh)) ?? executeGh();
+    }
     const execute = async (): Promise<CommandResult> => {
       const args = request.args.map((argument) =>
         argument === githubRemote ? canonicalRemote : argument
@@ -158,6 +216,7 @@ async function publicationFixture(options: {
     ghPath: "/opt/homebrew/bin/gh",
     deadlineEpochMs: options.deadlineEpochMs ?? Date.now() + 30_000,
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
   });
   return {
     root,
@@ -167,6 +226,7 @@ async function publicationFixture(options: {
     candidate,
     sandbox,
     publisher,
+    pullRequests,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }
@@ -175,7 +235,23 @@ test("publishes one commit with the approved identity and exact candidate tree",
   const fixture = await publicationFixture();
   try {
     const published = await fixture.publisher.publish(fixture.candidate);
-    expect(published).toMatchObject({ status: "published", branch: "opc/opc-work-1", reused: false });
+    expect(published).toMatchObject({
+      status: "published",
+      branch: "opc/opc-work-1",
+      reused: false,
+      pullRequestNumber: 1,
+      pullRequestUrl: "https://github.com/acme/app/pull/1",
+      pullRequestReused: false,
+    });
+    expect(fixture.pullRequests[0]).toMatchObject({
+      title: "chore(opc): deliver opc-work-1",
+    });
+    expect(fixture.pullRequests[0]?.body).toContain("Source-Work: https://github.com/acme/app/issues/1");
+    expect(fixture.pullRequests[0]?.body).toContain("Acceptance: criterion-1:satisfied");
+    expect(fixture.pullRequests[0]?.body).toContain("Evidence: tests:pass:0");
+    expect(fixture.pullRequests[0]?.body).toContain("Attempt-Recovery: attempt-1");
+    expect(fixture.pullRequests[0]?.body).toContain("Material-Risks: none");
+    expect(fixture.pullRequests[0]?.body).toContain("Human merge required.");
     if (published.status !== "published") throw new Error("expected published result");
     const commitSha = (await execa("git", [
       "--git-dir", fixture.remote, "rev-parse", "refs/heads/opc/opc-work-1",
@@ -194,14 +270,23 @@ test("publishes one commit with the approved identity and exact candidate tree",
     expect(message).toContain(`Approval-Digest: ${fixture.candidate.manifest.approval_digest}`);
 
     const replayed = await fixture.publisher.publish(fixture.candidate);
-    expect(replayed).toEqual({ ...published, reused: true });
+    expect(replayed).toEqual({
+      ...published,
+      reused: true,
+      pullRequestReused: true,
+    });
     expect(fixture.sandbox.requests.filter(({ args }) => args.includes("push")).length).toBe(1);
     expect(fixture.sandbox.requests.filter(({ args }) => args.includes("commit-tree")).length).toBe(1);
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST")).length).toBe(1);
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST")).every(({ args }) =>
+      args.includes("--raw-field") && !args.includes("--field"))).toBeTrue();
     expect((await execa("git", ["-C", fixture.repository, "config", "--local", "user.name"])).stdout)
       .toBe("Approved Publisher");
     expect((await execa("git", ["-C", fixture.repository, "config", "--local", "user.email"])).stdout)
       .toBe("approved@example.invalid");
-    expect(fixture.sandbox.requests.every((request) =>
+    expect(fixture.sandbox.requests.filter(({ command }) => command === "/usr/bin/git").every((request) =>
       request.role === "publisher" &&
       request.args.includes("core.hooksPath=/dev/null") &&
       request.args.includes("credential.helper=!/opt/homebrew/bin/gh auth git-credential") &&
@@ -209,6 +294,107 @@ test("publishes one commit with the approved identity and exact candidate tree",
       request.readOnly[0] === request.env.GH_CONFIG_DIR &&
       request.network !== "deny"
     )).toBeTrue();
+    expect(fixture.sandbox.requests.filter(({ command }) => command === "/opt/homebrew/bin/gh").every((request) =>
+      request.role === "publisher" &&
+      request.readOnly?.length === 1 &&
+      request.readOnly[0] === request.env.GH_CONFIG_DIR &&
+      request.network !== "deny"
+    )).toBeTrue();
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("publishes a recovery PR body with the root Work URL and deterministic attempt chain", async () => {
+  const fixture = await publicationFixture({
+    sourceWorkUrl: "https://github.com/acme/app/issues/7",
+    attemptRecoveryChain: "root:7;current:8;attempt:2",
+  });
+  try {
+    await fixture.publisher.publish(fixture.candidate);
+    expect(fixture.pullRequests[0]?.body).toContain("Source-Work: https://github.com/acme/app/issues/7");
+    expect(fixture.pullRequests[0]?.body).toContain("Attempt-Recovery: root:7;current:8;attempt:2");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("rejects a non-canonical target branch before any side effect", async () => {
+  const error = await publicationFixture({ targetBranch: "opc/../unsafe" }).catch(
+    (reason: unknown) => reason,
+  );
+  expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
+});
+
+test("final publication revalidation blocks drift before push and before PR", async () => {
+  let firstCalls = 0;
+  const beforeCommit = await publicationFixture({
+    revalidate: () => {
+      firstCalls += 1;
+      return Promise.reject(new Error("BASE_DRIFT"));
+    },
+  });
+  try {
+    await beforeCommit.publisher.publish(beforeCommit.candidate).catch(() => undefined);
+    expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("commit-tree"))).toBeTrue();
+    expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("push"))).toBeFalse();
+    expect(beforeCommit.pullRequests).toHaveLength(0);
+    expect(firstCalls).toBeGreaterThan(0);
+  } finally {
+    await beforeCommit.cleanup();
+  }
+
+  let calls = 0;
+  const afterPush = await publicationFixture({
+    revalidate: () => {
+      calls += 1;
+      return calls >= 2 ? Promise.reject(new Error("BASE_DRIFT")) : Promise.resolve();
+    },
+  });
+  try {
+    await afterPush.publisher.publish(afterPush.candidate).catch(() => undefined);
+    expect(afterPush.sandbox.requests.some(({ args }) => args.includes("push"))).toBeTrue();
+    expect(afterPush.sandbox.requests.some(({ command, args }) => command === "/opt/homebrew/bin/gh" && args.includes("POST"))).toBeFalse();
+    expect(afterPush.pullRequests).toHaveLength(0);
+  } finally {
+    await afterPush.cleanup();
+  }
+});
+
+test("requires exact head repository identity when reconciling a pull request", async () => {
+  const fixture = await publicationFixture();
+  fixture.pullRequests.push({
+    number: 7,
+    html_url: "https://github.com/acme/app/pull/7",
+    head: { ref: "opc/opc-work-1", sha: "d".repeat(40), repo: { full_name: "evil/app" } },
+    base: { ref: "main", repo: { full_name: "acme/app" } },
+  });
+  try {
+    const error = await fixture.publisher.publish(fixture.candidate).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST")).length).toBe(0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reconciles more than one paginated pull-request page", async () => {
+  const fixture = await publicationFixture({ paginatedPullRequests: true });
+  for (let number = 0; number < 101; number += 1) {
+    fixture.pullRequests.push({
+      number: number + 10,
+      html_url: `https://github.com/acme/app/pull/${String(number + 10)}`,
+      head: { ref: `other/${String(number)}`, sha: "d".repeat(40), repo: { full_name: "acme/app" } },
+      base: { ref: "main", repo: { full_name: "acme/app" } },
+    });
+  }
+  try {
+    const published = await fixture.publisher.publish(fixture.candidate);
+    expect(published).toMatchObject({ status: "published", pullRequestNumber: 102 });
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("GET") && args.includes("--paginate"))
+      .length).toBeGreaterThan(0);
   } finally {
     await fixture.cleanup();
   }
@@ -235,6 +421,140 @@ test("returns ambiguity when a timed-out push cannot be observed remotely", asyn
       "--git-dir", fixture.remote, "rev-parse", "refs/heads/opc/opc-work-1",
     ]).then(() => false, () => true);
     expect(remoteBranchMissing).toBeTrue();
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reconciles a pull-request create that succeeded before its runner timed out", async () => {
+  let timedOut = false;
+  const fixture = await publicationFixture({
+    async hook(request, execute) {
+      if (!timedOut && request.command === "/opt/homebrew/bin/gh" && request.args.includes("POST")) {
+        timedOut = true;
+        const result = await execute();
+        expect(result.status).toBe("pass");
+        return { status: "timeout", exitCode: null, stdout: "", stderr: "", durationMs: 1 };
+      }
+      return undefined;
+    },
+  });
+  try {
+    const published = await fixture.publisher.publish(fixture.candidate);
+    expect(published).toMatchObject({
+      status: "published",
+      reused: false,
+      pullRequestNumber: 1,
+      pullRequestReused: true,
+    });
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST")).length).toBe(1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reconciles a nonzero pull-request create after the server accepted it", async () => {
+  let failed = false;
+  const fixture = await publicationFixture({
+    async hook(request, execute) {
+      if (!failed && request.command === "/opt/homebrew/bin/gh" && request.args.includes("POST")) {
+        failed = true;
+        await execute();
+        return { status: "fail", exitCode: 1, stdout: "", stderr: "conflict", durationMs: 1 };
+      }
+      return undefined;
+    },
+  });
+  try {
+    const published = await fixture.publisher.publish(fixture.candidate);
+    expect(published).toMatchObject({
+      status: "published",
+      pullRequestNumber: 1,
+      pullRequestReused: true,
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reconciles a malformed pull-request confirmation after the server accepted it", async () => {
+  let malformed = false;
+  const fixture = await publicationFixture({
+    async hook(request, execute) {
+      if (!malformed && request.command === "/opt/homebrew/bin/gh" && request.args.includes("POST")) {
+        malformed = true;
+        await execute();
+        return { status: "pass", exitCode: 0, stdout: "{}", stderr: "", durationMs: 1 };
+      }
+      return undefined;
+    },
+  });
+  try {
+    const published = await fixture.publisher.publish(fixture.candidate);
+    expect(published).toMatchObject({
+      status: "published",
+      pullRequestNumber: 1,
+      pullRequestReused: true,
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("returns explicit ambiguity when pull-request create and reconciliation both time out", async () => {
+  let create = true;
+  let created = false;
+  const fixture = await publicationFixture({
+    hook(request) {
+      if (request.command === "/opt/homebrew/bin/gh" && request.args.includes("POST") && create) {
+        create = false;
+        created = true;
+        return { status: "timeout", exitCode: null, stdout: "", stderr: "", durationMs: 1 };
+      }
+      if (created && request.command === "/opt/homebrew/bin/gh" && request.args.includes("GET") && request.args.includes("--paginate")) {
+        return { status: "timeout", exitCode: null, stdout: "", stderr: "", durationMs: 1 };
+      }
+      return undefined;
+    },
+  });
+  try {
+    expect(await fixture.publisher.publish(fixture.candidate)).toMatchObject({
+      status: "ambiguous",
+      reason: "PULL_REQUEST_CREATE_TIMEOUT",
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("rejects a conflicting pull request for the published branch", async () => {
+  const fixture = await publicationFixture();
+  fixture.pullRequests.push({
+    number: 7,
+    html_url: "https://github.com/acme/app/pull/7",
+    head: { ref: "opc/opc-work-1", sha: "d".repeat(40), repo: { full_name: "acme/app" } },
+    base: { ref: "main", repo: { full_name: "acme/app" } },
+  });
+  try {
+    const error = await fixture.publisher.publish(fixture.candidate).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
+    expect(fixture.sandbox.requests.filter(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST")).length).toBe(0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("rejects duplicate pull requests for the published branch", async () => {
+  const fixture = await publicationFixture();
+  try {
+    await fixture.publisher.publish(fixture.candidate);
+    const published = fixture.pullRequests[0];
+    if (published === undefined) throw new Error("expected pull request");
+    fixture.pullRequests.push({ ...published, number: 2, html_url: "https://github.com/acme/app/pull/2" });
+    const error = await fixture.publisher.publish(fixture.candidate).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
   } finally {
     await fixture.cleanup();
   }
@@ -348,6 +668,7 @@ test("rejects a worktree changed after independent review before pushing", async
     const error = await fixture.publisher.publish(fixture.candidate).catch((reason: unknown) => reason);
     expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
     expect(fixture.sandbox.requests.some(({ args }) => args.includes("push"))).toBeFalse();
+    expect(fixture.sandbox.requests.some(({ command }) => command === "/opt/homebrew/bin/gh")).toBeFalse();
   } finally {
     await fixture.cleanup();
   }

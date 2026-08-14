@@ -37,8 +37,12 @@ test("models the v2 planning, delivery, and recovery transitions", () => {
   expect(transitionQueueWork("ready", "claim")).toBe("claimed");
   expect(transitionQueueWork("claimed", "start")).toBe("running");
   expect(transitionQueueWork("running", "candidate")).toBe("reviewing");
-  expect(transitionQueueWork("reviewing", "verify")).toBe("result-ready");
-  expect(transitionQueueWork("result-ready", "publish")).toBe("delivered");
+  expect(transitionQueueWork("reviewing", "verify")).toBe("reviewing");
+  expect(transitionQueueWork("reviewing", "publish")).toBe("result-ready");
+  expect(transitionQueueWork("result-ready", "merge")).toBe("delivered");
+  expect(transitionQueueWork("result-ready", "close-unmerged")).toBe("needs-decision");
+  expect(transitionQueueWork("result-ready", "drift")).toBe("needs-reapproval");
+  expect(transitionQueueWork("reviewing", "drift")).toBe("needs-reapproval");
   expect(transitionQueueWork("recovering", "retry")).toBe("ready");
   expect(transitionQueueWork("recovering", "request-approval")).toBe(
     "awaiting-approval",
@@ -436,7 +440,6 @@ test("types transition states and events with the queue v2 vocabulary", () => {
   };
   const legacyEvent: TransitionPayload = {
     ...payload,
-    // @ts-expect-error queue records do not use the legacy Actions event model
     event: "merge",
   };
 

@@ -77,6 +77,7 @@ const inactiveStateLabels: ReadonlySet<QueueStateLabel> = new Set([
   "opc:grilling",
   "opc:awaiting-approval",
   "opc:ready",
+  "opc:needs-decision",
   "opc:delivered",
   "opc:blocked",
 ]);

@@ -155,7 +155,6 @@ export interface ProductionDaemonRuntimeInput {
   readonly reloadConfig: (path: string) => Promise<DaemonConfig>;
   readonly revalidateIdentity: () => Promise<void>;
   readonly now: () => Date;
-  readonly isUpgradeFenced?: () => Promise<boolean>;
 }
 
 export interface ProductionDaemonRuntimeDependencies {
@@ -365,7 +364,6 @@ export interface ProductionEnabledTickDependencies {
   readonly runWorkTick: (now: Date, signal: AbortSignal) => Promise<EnabledTickResult>;
   readonly continueAfterApprovalError?: (error: unknown) => boolean;
   readonly nowAfterApproval?: () => Date;
-  readonly isUpgradeFenced?: () => Promise<boolean>;
 }
 
 export async function runProductionEnabledTick(
@@ -379,7 +377,6 @@ export async function runProductionEnabledTick(
     if (dependencies.continueAfterApprovalError?.(error) !== true) throw error;
   }
   if (signal.aborted) throw signal.reason;
-  if (await dependencies.isUpgradeFenced?.() === true) return { status: "idle", repositoriesChecked: 0 };
   return dependencies.runWorkTick(dependencies.nowAfterApproval?.() ?? now, signal);
 }
 
@@ -418,20 +415,6 @@ function requireEnabledConfig(config: DaemonConfig): DaemonConfig & { readonly e
   return config;
 }
 
-async function upgradeFenced(config: DaemonConfig & { readonly enabled: true }): Promise<boolean> {
-  const path = `${config.onboarding.manifest.paths.applicationSupport}/upgrade-claim-fence.json`;
-  try {
-    const entry = await lstat(path);
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== config.install.manifest.currentUid || (entry.mode & 0o077) !== 0) {
-      throw new Error("INVALID_UPGRADE_CLAIM_FENCE");
-    }
-    return true;
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
 function requireSameAuthority(
   expected: DaemonConfig & { readonly enabled: true },
   current: DaemonConfig,
@@ -449,20 +432,22 @@ function requireSameAuthority(
 async function requireLiveIdentity(
   onboarding: OnboardingPreview,
   github: GitHubIdentity,
-  codex: CodexIdentity,
+  codex?: CodexIdentity,
 ): Promise<void> {
-  const [githubAccount, codexAccount, ...repositories] = await Promise.all([
+  const [githubAccount, ...repositories] = await Promise.all([
     github.inspect(),
-    codex.inspect(onboarding.manifest.paths.codexHome),
     ...onboarding.manifest.repositories.map((repository) =>
       github.inspectRepository(repository),
     ),
   ]);
+  const codexAccount = codex === undefined
+    ? undefined
+    : await codex.inspect(onboarding.manifest.paths.codexHome);
   if (
     githubAccount.host !== "github.com" ||
     githubAccount.login.toLowerCase() !== onboarding.manifest.githubLogin ||
-    !codexAccount.authenticated ||
-    codexAccount.home !== onboarding.manifest.paths.codexHome ||
+    (codexAccount !== undefined && (!codexAccount.authenticated ||
+      codexAccount.home !== onboarding.manifest.paths.codexHome)) ||
     repositories.some(
       (repository) =>
         !repository.private ||
@@ -587,9 +572,11 @@ export async function runProductionDaemonRuntime(
             daemonSignal.removeEventListener("abort", onDaemonAbort);
           }
         },
-        runWorkTick: (workNow, workSignal) =>
-          runEnabledTick({ now: workNow, repositories, signal: workSignal }),
-        ...(input.isUpgradeFenced === undefined ? {} : { isUpgradeFenced: input.isUpgradeFenced }),
+        runWorkTick: (_workNow, workSignal) => runEnabledTick({
+          now: _workNow,
+          repositories,
+          signal: workSignal,
+        }),
         continueAfterApprovalError: isApprovalUnavailable,
         nowAfterApproval: input.now,
       }),
@@ -635,8 +622,7 @@ export async function runProductionDaemon(
   const resolveCredentials = dependencies.credentials ?? credentials;
   const liveGitHubIdentity = resolveGitHubIdentity(onboarding);
   const liveCodexIdentity = resolveCodexIdentity(onboarding);
-  const revalidateIdentity = () =>
-    requireLiveIdentity(onboarding, liveGitHubIdentity, liveCodexIdentity);
+  const revalidateIdentity = () => requireLiveIdentity(onboarding, liveGitHubIdentity, liveCodexIdentity);
   await revalidateIdentity();
   const credentialStore = resolveCredentials(onboarding);
   const transitionKey = await credentialStore.read("transition-key");
@@ -670,6 +656,5 @@ export async function runProductionDaemon(
     reloadConfig: loadConfig,
     revalidateIdentity,
     now,
-    isUpgradeFenced: () => upgradeFenced(config),
   });
 }

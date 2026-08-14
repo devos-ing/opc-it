@@ -160,12 +160,13 @@ export async function appendLifecycleTransition(
   coordinator: LeaseMutationCoordinator,
   input: {
     readonly from: "claimed" | "running" | "reviewing" | "result-ready";
-    readonly event: "start" | "candidate" | "verify" | "publish";
-    readonly to: "running" | "reviewing" | "result-ready" | "delivered";
+    readonly event: "start" | "candidate" | "verify" | "publish" | "merge" | "close-unmerged";
+    readonly to: "running" | "reviewing" | "result-ready" | "delivered" | "needs-decision";
     readonly metadata?: Readonly<Record<string, string>>;
   },
 ): Promise<void> {
-  const append = input.to === "delivered"
+  const terminal = input.to === "delivered" || input.to === "needs-decision";
+  const append = terminal
     ? coordinator.closeHeartbeatAndRun
     : coordinator.run;
   await append(async () => {
@@ -219,8 +220,8 @@ export async function appendLifecycleTransition(
     }
   });
   await coordinator.run(async () => {
-    if (input.to === "delivered") {
-      await recheckDeliveryProjection(configured, delivery, boundary, context);
+    if (terminal) {
+      await recheckRecoveryTerminalAuthority(configured, delivery, boundary, context);
     } else {
       await recheckDeliveryBoundary(configured, delivery, boundary, context);
     }
@@ -241,14 +242,25 @@ export async function finalizePublishedResult(
   coordinator: LeaseMutationCoordinator,
 ): Promise<void> {
   await recheckDeliveryBoundary(configured, delivery, "terminal", context);
+  const expectedUrl = `https://github.com/${context.repository}/pull/${String(publication.pullRequestNumber)}`;
+  if (
+    publication.branch !== context.contract.target_branch ||
+    publication.pullRequestUrl !== expectedUrl
+  ) {
+    throw new DeliveryContractViolation("publication context mismatch");
+  }
   await appendLifecycleTransition(configured, delivery, "terminal", context, occurredAt, coordinator, {
-    from: "result-ready",
+    from: "reviewing",
     event: "publish",
-    to: "delivered",
+    to: "result-ready",
     metadata: {
       branch: publication.branch,
       commit_sha: publication.commitSha,
       tree_sha: publication.treeSha,
+      reused: String(publication.reused),
+      pull_request_number: String(publication.pullRequestNumber),
+      pull_request_url: publication.pullRequestUrl,
+      pull_request_reused: String(publication.pullRequestReused),
     },
   });
 }

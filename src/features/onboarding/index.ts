@@ -49,21 +49,3 @@ export {
   type ActivatedLaunchAgent,
   type DaemonConfig,
 } from "./activate.js";
-export {
-  applyUpgrade,
-  previewUpgrade,
-  validateUpgradePreview,
-  validateUpgradeRelease,
-  type ApplyUpgradeInput,
-  type UpgradeArtifact,
-  type UpgradeCurrent,
-  type UpgradeDependencies,
-  type UpgradeLock,
-  type UpgradeManifest,
-  type UpgradeMigration,
-  type UpgradePaths,
-  type UpgradePermissionChange,
-  type UpgradePreview,
-  type UpgradeReceipt,
-  type UpgradeRelease,
-} from "./upgrade.js";

@@ -25,12 +25,27 @@ const publicationMarker = "OPC-Verified-Result: v1";
 
 export interface PublisherAdapterOptions {
   readonly sandbox: SandboxRunner;
-  readonly contract: ValidatedExecutionContract;
+  readonly contract: ValidatedExecutionContract | PublisherContract;
   readonly onboarding: ApprovedPublisherOnboarding;
   readonly gitPath: string;
   readonly ghPath: string;
   readonly deadlineEpochMs: number;
+  readonly githubToken?: string;
+  readonly revalidate?: () => Promise<void>;
   readonly now?: () => number;
+}
+
+export interface PublisherContract {
+  readonly work_id: string;
+  readonly repository: string;
+  readonly base_sha: string;
+  readonly target_branch: string;
+  readonly acceptance: readonly { readonly id: string }[];
+  readonly source_work_url?: string;
+  readonly acceptance_summary?: string;
+  readonly evidence_summary?: string;
+  readonly attempt_recovery_chain?: string;
+  readonly material_risks?: string;
 }
 
 interface GitLocations {
@@ -41,6 +56,62 @@ interface GitLocations {
 
 function contractViolation(name: string): never {
   throw new DeliveryContractViolation(name);
+}
+
+function publicationContract(value: unknown): PublisherContract | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.work_id !== "string" ||
+    typeof candidate.repository !== "string" ||
+    typeof candidate.base_sha !== "string" ||
+    typeof candidate.target_branch !== "string" ||
+    !Array.isArray(candidate.acceptance)
+  ) return undefined;
+  if (
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(candidate.repository) ||
+    !/^[0-9a-f]{40}$/u.test(candidate.base_sha) ||
+    candidate.work_id.length === 0 ||
+    candidate.acceptance.length === 0 ||
+    !candidate.acceptance.every((entry) =>
+      typeof entry === "object" && entry !== null && !Array.isArray(entry) &&
+      typeof (entry as Record<string, unknown>).id === "string" &&
+      ((entry as Record<string, unknown>).id as string).length > 0
+    )
+  ) return undefined;
+  requireCanonicalTargetBranch(candidate.target_branch);
+  const optionalText = (key: string): string | null | undefined => {
+    const raw = candidate[key];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.length > 16_384 || raw.includes("\0") || /[\r\n]/u.test(raw)) {
+      return null;
+    }
+    return raw;
+  };
+  const sourceWorkUrl = optionalText("source_work_url");
+  const acceptanceSummary = optionalText("acceptance_summary");
+  const evidenceSummary = optionalText("evidence_summary");
+  const attemptRecoveryChain = optionalText("attempt_recovery_chain");
+  const materialRisks = optionalText("material_risks");
+  if ([sourceWorkUrl, acceptanceSummary, evidenceSummary, attemptRecoveryChain, materialRisks]
+    .some((value) => value === null)) return undefined;
+  const sourceWorkUrlValue = typeof sourceWorkUrl === "string" ? sourceWorkUrl : undefined;
+  const acceptanceSummaryValue = typeof acceptanceSummary === "string" ? acceptanceSummary : undefined;
+  const evidenceSummaryValue = typeof evidenceSummary === "string" ? evidenceSummary : undefined;
+  const attemptRecoveryChainValue = typeof attemptRecoveryChain === "string" ? attemptRecoveryChain : undefined;
+  const materialRisksValue = typeof materialRisks === "string" ? materialRisks : undefined;
+  return Object.freeze({
+    work_id: candidate.work_id,
+    repository: candidate.repository,
+    base_sha: candidate.base_sha,
+    target_branch: candidate.target_branch,
+    acceptance: Object.freeze(candidate.acceptance.map((entry) => Object.freeze({ id: (entry as { id: string }).id }))),
+    ...(sourceWorkUrlValue === undefined ? {} : { source_work_url: sourceWorkUrlValue }),
+    ...(acceptanceSummaryValue === undefined ? {} : { acceptance_summary: acceptanceSummaryValue }),
+    ...(evidenceSummaryValue === undefined ? {} : { evidence_summary: evidenceSummaryValue }),
+    ...(attemptRecoveryChainValue === undefined ? {} : { attempt_recovery_chain: attemptRecoveryChainValue }),
+    ...(materialRisksValue === undefined ? {} : { material_risks: materialRisksValue }),
+  });
 }
 
 function snapshotPublisherCommandResult(value: unknown): CommandResult {
@@ -96,6 +167,39 @@ function requireAbsolutePath(value: string, name: string): string {
     !/^[A-Za-z0-9_./+-]+$/u.test(value)
   ) {
     contractViolation(name);
+  }
+  return value;
+}
+
+export function requireCanonicalTargetBranch(value: string): string {
+  const components = value.split("/");
+  const invalidCharacter = Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x20 || code === 0x7f || "~^:?*".includes(character);
+  }) ||
+    value.includes("\\") ||
+    value.includes("[") ||
+    value.includes("]");
+  if (
+    value.length === 0 ||
+    value.length > 255 ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.startsWith("-") ||
+    value.endsWith(".") ||
+    value.endsWith(".lock") ||
+    value.includes("..") ||
+    value.includes("@{") ||
+    invalidCharacter ||
+    components.some((component) =>
+      component.length === 0 ||
+      component === "." ||
+      component === ".." ||
+      component.startsWith(".") ||
+      component.endsWith("."),
+    )
+  ) {
+    contractViolation("publisher target branch");
   }
   return value;
 }
@@ -176,6 +280,149 @@ function publicationMessage(candidate: VerifiedCandidate): string {
   ].join("\n");
 }
 
+interface PullRequestRecord {
+  readonly number: number;
+  readonly url: string;
+  readonly headRef: string;
+  readonly headSha: string;
+  readonly headRepository: string;
+  readonly baseRef: string;
+  readonly baseRepository: string;
+}
+
+interface PublisherGhClient {
+  invoke(args: readonly string[], input?: string): Promise<CommandResult>;
+  runSuccessfully(args: readonly string[], input?: string): Promise<string>;
+}
+
+function pullRequestField(value: unknown, key: string): unknown {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    contractViolation("publisher pull request response");
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor)) {
+    contractViolation("publisher pull request response");
+  }
+  return descriptor.value;
+}
+
+function parsePullRequest(value: unknown, repository: string): PullRequestRecord {
+  const number = pullRequestField(value, "number");
+  const url = pullRequestField(value, "html_url");
+  const head = pullRequestField(value, "head");
+  const base = pullRequestField(value, "base");
+  const headRef = pullRequestField(head, "ref");
+  const headSha = pullRequestField(head, "sha");
+  const headRepo = pullRequestField(head, "repo");
+  const headRepository = pullRequestField(headRepo, "full_name");
+  const baseRef = pullRequestField(base, "ref");
+  const baseRepo = pullRequestField(base, "repo");
+  const baseRepository = pullRequestField(baseRepo, "full_name");
+  if (
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    typeof url !== "string" ||
+    url !== `https://github.com/${repository}/pull/${String(number)}` ||
+    typeof headRef !== "string" ||
+    headRef.length === 0 ||
+    typeof headSha !== "string" ||
+    !shaPattern.test(headSha) ||
+    typeof headRepository !== "string" ||
+    headRepository.length === 0 ||
+    typeof baseRef !== "string" ||
+    baseRef.length === 0 ||
+    typeof baseRepository !== "string" ||
+    baseRepository.length === 0
+  ) {
+    contractViolation("publisher pull request response");
+  }
+  return Object.freeze({ number, url, headRef, headSha, headRepository, baseRef, baseRepository });
+}
+
+function parsePullRequestList(stdout: string, repository: string): readonly PullRequestRecord[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    contractViolation("publisher pull request list");
+  }
+  if (!Array.isArray(parsed)) contractViolation("publisher pull request list");
+  const pages = parsed.length === 0 || parsed.every((value) => Array.isArray(value))
+    ? parsed as readonly unknown[][]
+    : [parsed];
+  const values = pages.flat();
+  if (values.length > 10_000) contractViolation("publisher pull request list");
+  return Object.freeze(values.map((value) => parsePullRequest(value, repository)));
+}
+
+function parsePullRequestResponse(stdout: string, repository: string): PullRequestRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    contractViolation("publisher pull request response");
+  }
+  return parsePullRequest(parsed, repository);
+}
+
+function parseDefaultBranch(stdout: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    contractViolation("publisher repository response");
+  }
+  const branch = pullRequestField(parsed, "default_branch");
+  if (
+    typeof branch !== "string" ||
+    branch.length === 0 ||
+    branch.length > 255 ||
+    /[\r\n\0]/u.test(branch)
+  ) {
+    contractViolation("publisher default branch");
+  }
+  return branch;
+}
+
+function pullRequestTitle(candidate: VerifiedCandidate): string {
+  return `chore(opc): deliver ${candidate.manifest.work_id}`;
+}
+
+function pullRequestBody(
+  candidate: VerifiedCandidate,
+  contract: PublisherContract,
+  commitSha: string,
+): string {
+  const acceptanceSummary = contract.acceptance_summary ?? candidate.review.criteria
+    .map((criterion) => `${criterion.id}:${criterion.status}`)
+    .join(", ");
+  const evidenceSummary = contract.evidence_summary ?? candidate.manifest.evidence
+    .map((evidence) => `${evidence.id}:${evidence.status}:${String(evidence.exit_code)}`)
+    .join(", ");
+  const risks = contract.material_risks ?? (candidate.review.material_risks.length === 0
+    ? "none"
+    : candidate.review.material_risks.join("; "));
+  return [
+    publicationMarker,
+    `Work-ID: ${candidate.manifest.work_id}`,
+    `Approval-Digest: ${candidate.manifest.approval_digest}`,
+    `Artifact-Digest: ${candidate.manifest.artifact_sha256}`,
+    `Commit-SHA: ${commitSha}`,
+    `Source-Work: ${contract.source_work_url ?? "unavailable"}`,
+    `Acceptance: ${acceptanceSummary}`,
+    `Evidence: ${evidenceSummary}`,
+    `Attempt-Recovery: ${contract.attempt_recovery_chain ?? `attempt-${String(candidate.manifest.attempt)}`}`,
+    `Material-Risks: ${risks}`,
+    "Human merge required.",
+  ].join("\n").slice(0, 16_384);
+}
+
 interface PublisherGitClient {
   invoke(
     args: readonly string[],
@@ -191,7 +438,7 @@ interface PublisherGitClient {
 
 async function rehashCandidateTree(input: {
   readonly candidate: VerifiedCandidate;
-  readonly contract: ValidatedExecutionContract;
+  readonly contract: PublisherContract;
   readonly locations: GitLocations;
   readonly git: PublisherGitClient;
 }): Promise<string> {
@@ -264,15 +511,17 @@ async function rehashCandidateTree(input: {
 
 async function publishRehashedTree(input: {
   readonly candidate: VerifiedCandidate;
-  readonly contract: ValidatedExecutionContract;
+  readonly contract: PublisherContract;
   readonly onboarding: ApprovedPublisherOnboarding;
   readonly treeSha: string;
   readonly remote: string;
   readonly deadlineEpochMs: number;
   readonly currentTime: () => number;
+  readonly revalidate?: () => Promise<void>;
   readonly git: PublisherGitClient;
+  readonly gh: PublisherGhClient;
 }): Promise<PublicationOutcome> {
-  const { candidate, contract, onboarding, treeSha, remote, deadlineEpochMs, currentTime, git } = input;
+  const { candidate, contract, onboarding, treeSha, remote, deadlineEpochMs, currentTime, revalidate, git, gh } = input;
   const message = publicationMessage(candidate);
   const remoteRef = `refs/heads/${contract.target_branch}`;
   const remoteCommit = (stdout: string): string | undefined => {
@@ -315,13 +564,150 @@ async function publishRehashedTree(input: {
       remoteMessage.includes(`Artifact-Digest: ${candidate.manifest.artifact_sha256}`) &&
       remoteIdentity === `${onboarding.manifest.author.name}\n${onboarding.manifest.author.email}`;
   };
-  const reusedOutcome = (remoteSha: string): PublicationOutcome => Object.freeze({
-    status: "published",
-    branch: contract.target_branch,
-    commitSha: remoteSha,
-    treeSha,
-    reused: true,
-  });
+  const repository = contract.repository;
+  const repositoryOwner = repository.split("/")[0] ?? "";
+  const pullRequestEndpoint = `repos/${repository}/pulls?state=all&per_page=100&head=${encodeURIComponent(`${repositoryOwner}:${contract.target_branch}`)}`;
+  type PullRequestObservation =
+    | { readonly status: "match"; readonly pullRequest: PullRequestRecord }
+    | { readonly status: "none" }
+    | { readonly status: "conflict" }
+    | { readonly status: "unavailable" };
+  const observePullRequest = async (
+    commitSha: string,
+    endpoint: string,
+    baseBranch: string,
+  ): Promise<PullRequestObservation> => {
+    try {
+      const listed = parsePullRequestList(
+        await gh.runSuccessfully([
+          "api",
+          "--method",
+          "GET",
+          endpoint,
+          "--paginate",
+          "--slurp",
+        ]),
+        repository,
+      ).filter((pullRequest) =>
+        pullRequest.headRef === contract.target_branch &&
+        pullRequest.baseRef === baseBranch,
+      );
+      if (listed.length > 1) return Object.freeze({ status: "conflict" });
+      const existing = listed[0];
+      if (existing === undefined) return Object.freeze({ status: "none" });
+      if (
+        existing.headRepository !== repository ||
+        existing.baseRepository !== repository ||
+        existing.headSha !== commitSha
+      ) {
+        return Object.freeze({ status: "conflict" });
+      }
+      return Object.freeze({ status: "match", pullRequest: existing });
+    } catch {
+      return Object.freeze({ status: "unavailable" });
+    }
+  };
+  const publishPullRequest = async (
+    commitSha: string,
+  ): Promise<
+    | { readonly status: "published"; readonly number: number; readonly url: string; readonly reused: boolean }
+    | { readonly status: "ambiguous"; readonly reason: "PULL_REQUEST_CREATE_TIMEOUT" }
+  > => {
+    await revalidate?.();
+    const defaultBranch = parseDefaultBranch(await gh.runSuccessfully([
+      "api",
+      "--method",
+      "GET",
+      `repos/${repository}`,
+    ]));
+    const endpoint = `${pullRequestEndpoint}&base=${encodeURIComponent(defaultBranch)}`;
+    const existing = await observePullRequest(commitSha, endpoint, defaultBranch);
+    if (existing.status === "match") {
+      return Object.freeze({
+        status: "published",
+        number: existing.pullRequest.number,
+        url: existing.pullRequest.url,
+        reused: true,
+      });
+    }
+    if (existing.status === "conflict") {
+      contractViolation("publisher pull request collision");
+    }
+    if (existing.status === "unavailable") {
+      contractViolation("publisher pull request observation");
+    }
+    await revalidate?.();
+    const created = await gh.invoke([
+      "api",
+      "--method",
+      "POST",
+      `repos/${repository}/pulls`,
+      "--raw-field",
+      `title=${pullRequestTitle(candidate)}`,
+      "--raw-field",
+      `body=${pullRequestBody(candidate, contract, commitSha)}`,
+      "--raw-field",
+      `head=${contract.target_branch}`,
+      "--raw-field",
+      `base=${defaultBranch}`,
+    ]);
+    let response: PullRequestRecord | undefined;
+    if (created.status === "pass" && created.exitCode === 0) {
+      try {
+        response = parsePullRequestResponse(created.stdout, repository);
+      } catch {
+        response = undefined;
+      }
+    }
+    const observed = await observePullRequest(commitSha, endpoint, defaultBranch);
+    if (observed.status === "conflict") {
+      contractViolation("publisher pull request collision");
+    }
+    if (observed.status === "match") {
+      if (
+        response !== undefined &&
+        (
+          response.number !== observed.pullRequest.number ||
+          response.url !== observed.pullRequest.url ||
+          response.headRef !== contract.target_branch ||
+          response.headSha !== commitSha ||
+          response.headRepository !== repository ||
+          response.baseRef !== defaultBranch ||
+          response.baseRepository !== repository
+        )
+      ) {
+        contractViolation("publisher pull request result");
+      }
+      return Object.freeze({
+        status: "published",
+        number: observed.pullRequest.number,
+        url: observed.pullRequest.url,
+        reused: response === undefined || created.status !== "pass" || created.exitCode !== 0,
+      });
+    }
+    return Object.freeze({ status: "ambiguous", reason: "PULL_REQUEST_CREATE_TIMEOUT" });
+  };
+  const publishedOutcome = (remoteSha: string, reused: boolean): Promise<PublicationOutcome> =>
+    publishPullRequest(remoteSha).then((pullRequest) => {
+      if (pullRequest.status === "ambiguous") {
+        return Object.freeze({
+          status: "ambiguous",
+          branch: contract.target_branch,
+          commitSha: remoteSha,
+          reason: pullRequest.reason,
+        });
+      }
+      return Object.freeze({
+        status: "published",
+        branch: contract.target_branch,
+        commitSha: remoteSha,
+        treeSha,
+        reused,
+        pullRequestNumber: pullRequest.number,
+        pullRequestUrl: pullRequest.url,
+        pullRequestReused: pullRequest.reused,
+      });
+    });
   const beforePush = await git.invoke(["ls-remote", "--heads", remote, remoteRef]);
   if (beforePush.status !== "pass" || beforePush.exitCode !== 0) {
     contractViolation("publisher remote query");
@@ -329,7 +715,7 @@ async function publishRehashedTree(input: {
   const existingCommit = remoteCommit(beforePush.stdout);
   if (existingCommit !== undefined) {
     if (!(await verifyRemoteCommit(existingCommit))) contractViolation("publisher branch collision");
-    return reusedOutcome(existingCommit);
+    return publishedOutcome(existingCommit, true);
   }
   await git.runSuccessfully(["config", "--local", "user.name", onboarding.manifest.author.name]);
   await git.runSuccessfully(["config", "--local", "user.email", onboarding.manifest.author.email]);
@@ -340,6 +726,7 @@ async function publishRehashedTree(input: {
     { GIT_AUTHOR_DATE: baseDate, GIT_COMMITTER_DATE: baseDate },
   );
   if (!shaPattern.test(commitSha)) contractViolation("publisher commit object");
+  await revalidate?.();
   const pushed = await git.invoke([
     "push",
     "--porcelain",
@@ -357,7 +744,7 @@ async function publishRehashedTree(input: {
           if (!(await verifyRemoteCommit(reconciledCommit))) {
             contractViolation("publisher ambiguous remote branch");
           }
-          return reusedOutcome(reconciledCommit);
+          return publishedOutcome(reconciledCommit, true);
         }
       }
     }
@@ -369,19 +756,18 @@ async function publishRehashedTree(input: {
     });
   }
   if (pushed.status !== "pass" || pushed.exitCode !== 0) contractViolation("publisher push");
+  await revalidate?.();
   const confirmed = await git.runSuccessfully(["ls-remote", "--heads", remote, remoteRef]);
   if (remoteCommit(confirmed) !== commitSha) contractViolation("publisher remote result");
-  return Object.freeze({
-    status: "published",
-    branch: contract.target_branch,
-    commitSha,
-    treeSha,
-    reused: false,
-  });
+  return publishedOutcome(commitSha, false);
 }
 
 export function createPublisherAdapter(options: PublisherAdapterOptions): Publisher {
-  const contract = validateExecutionContract(options.contract);
+  const contract =
+    ("version" in options.contract)
+      ? validateExecutionContract(options.contract)
+      : publicationContract(options.contract) ?? contractViolation("publisher contract");
+  requireCanonicalTargetBranch(contract.target_branch);
   const onboarding = snapshotApprovedPublisherOnboarding(options.onboarding);
   const gitPath = requireAbsolutePath(options.gitPath, "publisher git path");
   const ghPath = requireAbsolutePath(options.ghPath, "publisher gh path");
@@ -434,6 +820,7 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_TERMINAL_PROMPT: "0",
         LC_ALL: "C",
+        ...(options.githubToken === undefined ? {} : { GH_TOKEN: options.githubToken }),
       });
       const gitPrefix = Object.freeze([
         "-C",
@@ -485,7 +872,43 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         return result.stdout.trimEnd();
       };
 
+      const invokeGh = async (args: readonly string[], input?: string): Promise<CommandResult> => {
+        const current = currentTime();
+        if (current >= options.deadlineEpochMs) {
+          contractViolation("publisher absolute deadline");
+        }
+        const result = snapshotPublisherCommandResult(await options.sandbox.run({
+          role: "publisher",
+          command: ghPath,
+          args,
+          cwd: locations.worktree,
+          env: environmentBase,
+          readable,
+          readOnly: Object.freeze([onboarding.manifest.githubConfigDirectory]),
+          writable,
+          network: { mode: "github-https", host: "github.com", port: 443 },
+          deadlineEpochMs: options.deadlineEpochMs,
+          ...(input === undefined ? {} : { input }),
+        }));
+        if (currentTime() >= options.deadlineEpochMs && result.status !== "timeout") {
+          contractViolation("publisher absolute deadline");
+        }
+        if (Buffer.byteLength(result.stdout) > maximumOutputBytes || Buffer.byteLength(result.stderr) > maximumOutputBytes) {
+          contractViolation("publisher command output");
+        }
+        return result;
+      };
+
+      const runGhSuccessfully = async (args: readonly string[], input?: string): Promise<string> => {
+        const result = await invokeGh(args, input);
+        if (result.status !== "pass" || result.exitCode !== 0) {
+          contractViolation(`publisher gh command ${args.at(-1) ?? "unknown"}`);
+        }
+        return result.stdout.trimEnd();
+      };
+
       const git: PublisherGitClient = { invoke, runSuccessfully: runGitSuccessfully };
+      const gh: PublisherGhClient = { invoke: invokeGh, runSuccessfully: runGhSuccessfully };
       const treeSha = await rehashCandidateTree({ candidate, contract, locations, git });
       return publishRehashedTree({
         candidate,
@@ -495,7 +918,9 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         remote,
         deadlineEpochMs: options.deadlineEpochMs,
         currentTime,
+        ...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
         git,
+        gh,
       });
     },
   });

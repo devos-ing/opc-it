@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { expect, it } from "bun:test";
 import { parseDocument } from "yaml";
 
@@ -28,6 +29,7 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   const jobs = record(workflow.jobs, "jobs");
   const execute = record(jobs.execute, "execute");
   const review = record(jobs.review, "review");
+  const publish = record(jobs.publish, "publish");
   const steps = records(review.steps, "review.steps");
 
   expect(record(execute.outputs, "execute.outputs")).toHaveProperty("artifact_sha256");
@@ -38,6 +40,11 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   expect(review["runs-on"]).toEqual(["self-hosted", "macOS", "ARM64", "opc"]);
   expect(review["timeout-minutes"]).toBe(20);
   expect(record(review.permissions, "review.permissions")).toEqual({ contents: "read" });
+  expect(publish.needs).toEqual(["dispatch-and-claim", "execute", "review", "conclude"]);
+  expect(publish.if).toContain("needs.review.result == 'success'");
+  expect(publish.if).toContain("needs.conclude.result == 'success'");
+  expect(record(publish.permissions, "publish.permissions")).toMatchObject({ contents: "write" });
+  expect(records(publish.steps, "publish.steps").some((step) => step.name === "Publish reviewed candidate")).toBe(true);
 
   const download = records(review.steps, "review.steps")[0];
   expect(download?.uses).toBe("actions/download-artifact@v4");
@@ -50,7 +57,7 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   const codex = namedStep(steps, "Review candidate independently");
   const decision = namedStep(steps, "Apply deterministic Evidence Gate");
   for (const step of [prepare, codex, decision]) {
-    expect(step.uses).toMatch(/^0xroylee\/OPC@[0-9a-f]{40}$/);
+    expect(step.uses).toBe(`0xroylee/OPC@${execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()}`);
     expect(record(step.with, "review-action.with")).not.toHaveProperty("github-token");
   }
   expect(record(codex.with, "codex.with")).toMatchObject({

@@ -33,6 +33,7 @@ import {
   contractDeadlineEpochMs,
   exactOutcomeStatus,
   failureFromOutcome,
+  publicationFromJournalMetadata,
   snapshotPublicationOutcome,
 } from "./delivery-journal-codecs.js";
 import {
@@ -160,7 +161,7 @@ export async function executeClaimedDelivery(
         await appendLifecycleTransition(configured, delivery, "result", context, occurredAt, coordinator, {
           from: "reviewing",
           event: "verify",
-          to: "result-ready",
+          to: "reviewing",
           metadata: candidateJournalMetadata(candidate),
         });
         await recheckDeliveryBoundary(configured, delivery, "publish", context);
@@ -437,9 +438,10 @@ export async function resumePublishedResult(
   ) {
     return;
   }
-  const candidateAuthority = latestLeaseLifecycleTransition(
-    timeline,
-    timeline.leaseAuthority.payload.metadata.lease_id ?? "",
+  const leaseId = timeline.leaseAuthority.payload.metadata.lease_id ?? "";
+  const candidateAuthority = timeline.accepted.findLast(({ payload }) =>
+    payload.metadata.lease_id === leaseId &&
+    payload.metadata.verified_candidate !== undefined,
   );
   const candidate = candidateFromJournal(candidateAuthority?.payload.metadata ?? {});
   if (candidate === undefined) throw new TypeError("INVALID_DELIVERY_RESUME");
@@ -493,14 +495,36 @@ export async function resumePublishedResult(
       coordinator,
     });
     await heartbeat.race((async () => {
-    if (timeline.current?.payload.to === "reviewing") {
-      await recheckDeliveryBoundary(configured, delivery, "result", context);
-      await appendLifecycleTransition(configured, delivery, "result", context, occurredAt, coordinator, {
-        from: "reviewing",
-        event: "verify",
-        to: "result-ready",
-        metadata: candidateJournalMetadata(candidate),
-      });
+    const publicationTransition = latestLeaseLifecycleTransition(
+      timeline,
+      leaseId,
+    );
+    if (
+      publicationTransition?.payload.event === "publish" &&
+      publicationTransition.payload.to === "result-ready" &&
+      delivery.reconcilePublication !== undefined
+    ) {
+      const publication = publicationFromJournalMetadata(publicationTransition.payload.metadata);
+      if (publication !== undefined) {
+        const reconciliation = await delivery.reconcilePublication(publication, context);
+        if (reconciliation === "merged" || reconciliation === "closed") {
+          await appendLifecycleTransition(configured, delivery, "terminal", context, occurredAt, coordinator, {
+            from: "result-ready",
+            event: reconciliation === "merged" ? "merge" : "close-unmerged",
+            to: reconciliation === "merged" ? "delivered" : "needs-decision",
+            metadata: {
+              branch: publication.branch,
+              commit_sha: publication.commitSha,
+              tree_sha: publication.treeSha,
+              reused: String(publication.reused),
+              pull_request_number: String(publication.pullRequestNumber),
+              pull_request_url: publication.pullRequestUrl,
+              pull_request_reused: String(publication.pullRequestReused),
+            },
+          });
+          return;
+        }
+      }
     }
     await recheckDeliveryBoundary(configured, delivery, "publish", context);
     const publicationPending: unknown = delivery.publish(candidate, context);

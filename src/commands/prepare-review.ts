@@ -22,6 +22,7 @@ import { parseExecutionEnvelopePayload } from "./prepare-execution.js";
 export interface ReviewRuntime {
   readonly runnerTemp: string;
   readonly actionPath: string;
+  readonly reviewInputDirectory?: string;
 }
 
 export interface LoadedCandidate {
@@ -30,6 +31,7 @@ export interface LoadedCandidate {
   readonly manifest: ResultManifest;
   readonly diff: string;
   readonly evidenceIndexJson: string;
+  readonly entries: readonly BundleEntry[];
 }
 
 export interface PreparedReview {
@@ -78,7 +80,7 @@ export async function loadCandidateForReview(
   },
   runtime: ReviewRuntime,
 ): Promise<LoadedCandidate> {
-  const expectedDirectory = resolve(runtime.runnerTemp, "opc-review-input");
+  const expectedDirectory = resolve(runtime.reviewInputDirectory ?? join(runtime.runnerTemp, "opc-review-input"));
   if (resolve(input.inputDirectory) !== expectedDirectory) {
     throw new DomainError("INVALID_EXECUTION_INPUT", "review input directory");
   }
@@ -158,6 +160,7 @@ export async function loadCandidateForReview(
     manifest,
     diff: Buffer.from(diffBytes).toString("utf8"),
     evidenceIndexJson: await readFile(join(verified.directory, "bundle-index.json"), "utf8"),
+    entries: verified.entries,
     bundle: {
       expectedArtifactDigest: input.artifactSha256,
       actualArtifactDigest: verified.artifactSha256,

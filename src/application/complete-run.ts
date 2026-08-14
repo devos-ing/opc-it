@@ -23,7 +23,7 @@ export interface CompleteRunInput {
 }
 
 export type CompleteRunResult =
-  | { readonly outcome: "verified"; readonly state: "result-ready" }
+  | { readonly outcome: "verified"; readonly state: "reviewing" }
   | { readonly outcome: "recovery"; readonly recovery: RecoveryResult };
 
 function approvedAttempts(value: number): 1 | 2 | 3 {
@@ -101,7 +101,6 @@ export async function completeRun(
   let state = input.issue.state;
   if (input.observed.kind === "verified") {
     state = await advanceToReviewing(state, input, port);
-    if (state === "result-ready") return { outcome: "verified", state };
     if (state !== "reviewing") {
       throw new DomainError("RUN_OUTCOME_CONFLICT", `${state}:verify`);
     }
@@ -113,10 +112,10 @@ export async function completeRun(
         event: "verify",
         metadata: { run_id: input.runId, evidence_url: input.evidenceUrl },
       },
-      "result-ready",
+      "reviewing",
       port,
     );
-    return { outcome: "verified", state: state as "result-ready" };
+    return { outcome: "verified", state: state as "reviewing" };
   }
 
   if (input.observed.phase === "before-start") {

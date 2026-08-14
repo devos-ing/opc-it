@@ -6,6 +6,8 @@
 
 **Architecture:** Keep the legacy Action path passing while adding deep planning and queue modules behind small public interfaces. Runtime code may import feature interfaces, features may own ports, and platform adapters must not be imported by features.
 
+> Historical-plan note: the approved 2026-08-14 scheduled-delivery rescope supersedes any later local self-upgrade, upgrade-health, upgrade-fencing, or rollback-transaction wording in this document. The current production route is GitHub's native cron invoking the immutable Actions control workflow; repository operators/workflows with `issues:write` are the trusted queue writers, while HMAC remains only in the injected local runtime seam.
+
 **Tech Stack:** Bun 1.3.8, TypeScript 5.9, TypeBox, AJV, `node:crypto`, Bun test, ESLint.
 
 ---
@@ -83,7 +85,7 @@ Status: Accepted
 
 OPC v2 runs a Bun/TypeScript daemon as the current macOS user through a user LaunchAgent. It polls GitHub Issues through `gh`, uses an independent OPC `CODEX_HOME`, and requires staged local permission grants. It does not create `opc-runner`, install a system LaunchDaemon, write `/etc/codex`, or register a GitHub Actions Runner.
 
-The daemon owns polling, signed claims, leases, heartbeat, bounded recovery, and upgrade health. GitHub Issues remain the authoritative transition journal. Current-user authority is constrained with separate Controller, Codex, Target Command, and Publisher sandbox profiles; it is not treated as equivalent to a dedicated Unix account.
+GitHub native cron invokes the approved Actions control workflow; the daemon owns only local scheduler health and does not dispatch that workflow. Repository operators/workflows with `issues:write` are the trusted queue writers, and immutable comments plus exact PR identities drive publication reconciliation. The local HMAC model remains only for the injected local runtime seam. GitHub Issues remain the authoritative transition journal. Current-user authority is constrained with separate Controller, Codex, Target Command, and Publisher sandbox profiles; it is not treated as equivalent to a dedicated Unix account. Local self-upgrade health and rollback are outside this architecture and superseded by the scheduled-delivery rescope.
 
 This trades GitHub Actions scheduling and account isolation for direct local control and simpler user onboarding. The accepted residual risk and rollback requirements are defined in `docs/superpowers/specs/2026-08-10-opc-current-user-daemon-design.md`.
 ```

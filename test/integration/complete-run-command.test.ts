@@ -204,7 +204,7 @@ it("persists a verified production run through all M3 states", async () => {
 
   expect(result).toEqual({
     command: "complete-run",
-    completion: { outcome: "verified", state: "result-ready" },
+    completion: { outcome: "verified", state: "reviewing" },
   });
   expect(
     api.requests.filter((request) => request.method === "POST").map((request) => request.path),

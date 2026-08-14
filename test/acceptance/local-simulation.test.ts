@@ -38,9 +38,9 @@ async function runCliProcess(path: string): Promise<{
   return { exitCode, stdout, stderr };
 }
 
-it("reaches result-ready after evidence and review pass", async () => {
+it("remains reviewing after evidence and review pass until publication", async () => {
   expect(await simulate(await fixture("success"))).toMatchObject({
-    finalState: "result-ready",
+    finalState: "reviewing",
     attempts: 1,
   });
 });
@@ -110,7 +110,7 @@ it("rejects work failures outside running or reviewing", async () => {
 
 it("serializes the successful simulation result", async () => {
   expect(await runSimulation(fileURLToPath(fixtureUrl("success")))).toBe(
-    '{"finalState":"result-ready","attempts":1,"recoveryIssues":0,"runIncidents":0,"transitions":["needs-approval:approve:ready","ready:claim:claimed","claimed:start:running","running:candidate:reviewing","reviewing:verify:result-ready"]}',
+    '{"finalState":"reviewing","attempts":1,"recoveryIssues":0,"runIncidents":0,"transitions":["needs-approval:approve:ready","ready:claim:claimed","claimed:start:running","running:candidate:reviewing","reviewing:verify:reviewing"]}',
   );
 });
 
@@ -125,7 +125,7 @@ it("writes successful CLI results to stdout with one newline", async () => {
     stderr: result.stderr,
   }).toEqual({
     exitCode: 0,
-    finalState: "result-ready",
+    finalState: "reviewing",
     stdoutEndsWithNewline: true,
     stderr: "",
   });

@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
 import { trustedFailureStepNames } from "../../src/adapters/github/run-outcome.js";
@@ -23,9 +24,10 @@ function assertTargetCallerPermissions(workflow: Record<string, unknown>): void 
   for (const [name, value] of Object.entries(jobs)) {
     const job = record(value, name);
     expect(record(job.permissions, `${name}.permissions`)).toEqual({
-      contents: "read",
+      contents: "write",
       issues: "write",
       actions: "write",
+      "pull-requests": "write",
     });
   }
 }
@@ -46,6 +48,7 @@ it("keeps the Target caller thin, serialized, and immutably pinned", async () =>
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
   assertTargetCallerPermissions(workflow);
+  expect(source).toContain("event_name: ${{ github.event_name }}");
 });
 
 it("keeps the canonical control template byte-for-byte aligned with the workflow", async () => {
@@ -53,8 +56,7 @@ it("keeps the canonical control template byte-for-byte aligned with the workflow
     readFile(".github/workflows/reusable-opc.yml", "utf8"),
     readFile("templates/control/reusable-opc.yml", "utf8"),
   ]);
-  const actionSha = /0xroylee\/OPC@([0-9a-f]{40})/.exec(source)?.[1];
-  if (!actionSha) throw new Error("MISSING_ACTION_SHA");
+  const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
   expect(
     template
@@ -75,10 +77,12 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   const reviewGate = record(jobs["review-gate"], "review-gate");
   const review = record(jobs.review, "review");
   const conclude = record(jobs.conclude, "conclude");
+  const publish = record(jobs.publish, "publish");
 
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
-  expect(source).toMatch(/uses: "0xroylee\/OPC@[0-9a-f]{40}"/);
+  const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  expect(source).toContain(`uses: "0xroylee/OPC@${actionSha}"`);
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
   expect(source).not.toContain("pull_request");
@@ -106,11 +110,23 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     issues: "write",
     actions: "write",
   });
+  expect(record(publish.permissions, "publish permissions")).toEqual({
+    contents: "write",
+    issues: "write",
+    actions: "read",
+    "pull-requests": "write",
+  });
+  const publishStep = record(
+    (publish.steps as Record<string, unknown>[]).at(-1),
+    "publish step",
+  );
+  expect(publishStep.uses).toBe(`0xroylee/OPC@${actionSha}`);
   expect(record(dispatchAndClaim.concurrency, "dispatch concurrency")).toEqual({
     group: "opc-control-${{ github.repository }}",
     "cancel-in-progress": false,
   });
   expect(conclude.needs).toEqual(["dispatch-and-claim", "heartbeat", "execute", "review"]);
+  expect(publish.needs).toEqual(["dispatch-and-claim", "execute", "review", "conclude"]);
   expect(conclude.if).toContain("always()");
   expect(conclude.if).toContain("!cancelled()");
   expect(conclude.if).toContain("vars.OPC_ENABLED == 'true'");
@@ -134,10 +150,12 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     "github-token": "${{ github.token }}",
     enabled: "${{ vars.OPC_ENABLED }}",
   });
+  const concludeSteps = conclude.steps as Record<string, unknown>[];
   const concludeStep = record(
-    (conclude.steps as Record<string, unknown>[])[0],
+    concludeSteps.find((step) => step.name === "Persist verified result or bounded Recovery"),
     "conclude step",
   );
+  expect(concludeStep.uses).toBe(`0xroylee/OPC@${actionSha}`);
   expect(record(concludeStep.with, "conclude.with")).toMatchObject({
     command: "complete-run",
     "payload-b64": "${{ needs.dispatch-and-claim.outputs.envelope_b64 }}",
@@ -146,4 +164,15 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   for (const name of Object.values(trustedFailureStepNames)) {
     expect(source).toContain(`name: ${name}`);
   }
+});
+
+it("uses one immutable control Action SHA for every stateful command", async () => {
+  const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
+  const actionRefs = [...source.matchAll(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/g)].map(
+    (match) => match[1],
+  );
+  expect(actionRefs.length).toBeGreaterThan(0);
+  expect(new Set(actionRefs).size).toBe(1);
+  expect(source).not.toContain("uses: ./.opc-control");
+  expect(source).toContain(`uses: "0xroylee/OPC@${execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()}"`);
 });

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the dedicated-user GitHub Actions Runner architecture with a maintainable Bun/TypeScript daemon that runs as the current user only after staged permission grants.
+**Goal:** Run the current-user daemon with staged permission grants while GitHub's native cron drives the approved immutable Actions control workflow. The local runtime seam retains signed HMAC transitions; no workflow receives that key.
 
-**Architecture:** Delivery is split into five blocking, independently verifiable plans. New code is feature-first; runtime callers use small deep-module interfaces, while GitHub, Telegram, Codex, sandbox, journal, and future App implementations sit at real adapter seams.
+**Architecture:** Delivery is split into five blocking, independently verifiable plans. New code is feature-first; runtime callers use small deep-module interfaces, while GitHub, Telegram, Codex, sandbox, journal, and future App implementations sit at real adapter seams. GitHub Actions owns the scheduled queue writer boundary (`issues:write`); immutable bot publication comments and exact PR identities drive merge/close reconciliation.
 
 **Tech Stack:** Bun 1.3.8, TypeScript 5.9, TypeBox/AJV, `bun:sqlite`, `gh`, Codex CLI, Telegram Bot API, launchd, macOS sandbox.
 
@@ -18,6 +18,7 @@
 - M3: [`2026-08-10-opc-daemon-m3-onboarding-approvals.md`](2026-08-10-opc-daemon-m3-onboarding-approvals.md)
 - M4: [`2026-08-10-opc-daemon-m4-isolated-delivery.md`](2026-08-10-opc-daemon-m4-isolated-delivery.md)
 - M5: [`2026-08-10-opc-daemon-m5-rollout.md`](2026-08-10-opc-daemon-m5-rollout.md)
+- Task 2 rescope: [`2026-08-14-opc-scheduled-delivery-rescope-design.md`](../specs/2026-08-14-opc-scheduled-delivery-rescope-design.md) and [`2026-08-14-opc-scheduled-delivery-rescope.md`](2026-08-14-opc-scheduled-delivery-rescope.md)
 
 ## Blocking graph
 
@@ -49,9 +50,9 @@ Evidence: distinct onboarding/install/pairing/activation/uninstall digests; curr
 
 Evidence: Target credential reads and unapproved network access fail closed; Codex execution and review are independently digest-bound; the frozen candidate produces one deterministic commit/push with crash-safe reconciliation; Recovery is bounded to three attempts with signed heartbeat, outage, policy-ceiling, and terminal replay authority. Final focused M4 verification passes 119 tests with 1 exact parent-Seatbelt skip and 0 failures; the delivery-loop acceptance passes twice at 8/8; the full suite passes 876 tests with 1 exact skip, 0 failures, and 2,663 expectations. Lint, typecheck, build, and diff checks pass, and independent whole-M4 Spec and Standards/security reviews report 0 findings. No real GitHub endpoint, credential, network push, Codex, Target command, Keychain, LaunchAgent activation, or persistent repository was used.
 
-- [ ] **Checkpoint 5: Complete M5 and ask for final activation approval**
+- [ ] **Checkpoint 5: Complete M5 scheduled delivery and ask for final activation approval**
 
-Evidence: signed crash/security matrix; upgrade rollback; legacy runtime removed; real private sandbox URLs/digests recorded; `OPC_ENABLED=false` until the user runs the displayed activation command.
+Evidence: signed crash/security matrix; scheduled approved-work delivery through one commit, branch, and idempotent pull request; legacy runtime removed; real private sandbox URLs/digests recorded; `OPC_ENABLED=false` until the user runs the displayed activation command. The former local self-upgrade scope is superseded by the Task 2 rescope and is not supported.
 
 ## Cross-plan invariants
 

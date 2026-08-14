@@ -69,6 +69,10 @@ export interface EnabledDeliveryRuntime {
   readonly now: () => number;
   readonly runDelivery: (context: DaemonDeliveryContext) => Promise<DeliveryOutcome>;
   readonly publish: (candidate: VerifiedCandidate, context: DaemonDeliveryContext) => Promise<PublicationOutcome>;
+  readonly reconcilePublication?: (
+    publication: Extract<PublicationOutcome, { readonly status: "published" }>,
+    context: DaemonDeliveryContext,
+  ) => Promise<"open" | "merged" | "closed">;
   readonly revalidate: (
     boundary: DeliveryLoopBoundary,
     context: DaemonDeliveryContext,
@@ -167,6 +171,12 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
     const now = ownDataProperty(deliveryValue, "now");
     const publish = ownDataProperty(deliveryValue, "publish");
     const revalidate = ownDataProperty(deliveryValue, "revalidate");
+    const reconcilePublicationDescriptor = Object.getOwnPropertyDescriptor(deliveryValue, "reconcilePublication");
+    const reconcilePublication: unknown = reconcilePublicationDescriptor === undefined
+      ? undefined
+      : "value" in reconcilePublicationDescriptor
+        ? reconcilePublicationDescriptor.value as unknown
+        : (() => { throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG"); })();
     const recoveryPolicyCeiling = snapshotRecoveryPolicyCeiling(
       ownDataProperty(deliveryValue, "recoveryPolicyCeiling"),
     );
@@ -183,6 +193,7 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       typeof now !== "function" ||
       typeof publish !== "function" ||
       typeof revalidate !== "function" ||
+      (reconcilePublication !== undefined && typeof reconcilePublication !== "function") ||
       (authorityExpansion !== undefined && typeof authorityExpansion !== "function")
     ) {
       throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
@@ -193,6 +204,13 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       now: now as EnabledDeliveryRuntime["now"],
       publish: publish as EnabledDeliveryRuntime["publish"],
       revalidate: revalidate as EnabledDeliveryRuntime["revalidate"],
+      ...(reconcilePublication === undefined
+        ? {}
+        : {
+            reconcilePublication: reconcilePublication as NonNullable<
+              EnabledDeliveryRuntime["reconcilePublication"]
+            >,
+          }),
       recoveryPolicyCeiling,
       ...(authorityExpansion === undefined
         ? {}

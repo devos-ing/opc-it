@@ -306,12 +306,15 @@ export type PublicationOutcome =
       readonly commitSha: string;
       readonly treeSha: string;
       readonly reused: boolean;
+      readonly pullRequestNumber: number;
+      readonly pullRequestUrl: string;
+      readonly pullRequestReused: boolean;
     }
   | {
       readonly status: "ambiguous";
       readonly branch: string;
       readonly commitSha: string;
-      readonly reason: "PUSH_TIMEOUT";
+      readonly reason: "PUSH_TIMEOUT" | "PULL_REQUEST_CREATE_TIMEOUT";
     };
 
 export interface Publisher {

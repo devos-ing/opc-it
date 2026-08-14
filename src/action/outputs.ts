@@ -5,7 +5,8 @@ function claimResult(result: ActionCommandResult): ClaimResult | undefined {
   if (
     result.command === "validate" ||
     result.command === "policy-gate" ||
-    result.command === "complete-run"
+    result.command === "complete-run" ||
+    result.command === "publish"
   ) {
     return undefined;
   }

@@ -46,6 +46,7 @@ const rolePolicies = {
       "LC_ALL",
       "GIT_AUTHOR_DATE",
       "GIT_COMMITTER_DATE",
+      "GH_TOKEN",
     ]),
   },
 } as const satisfies Readonly<Record<SandboxRequest["role"], {

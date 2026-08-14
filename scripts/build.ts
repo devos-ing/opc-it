@@ -28,7 +28,6 @@ for (const command of [
   "activate",
   "uninstall",
   "daemon",
-  "upgrade",
 ] as const) {
   if (!cliBundle.includes(`${command}: command(`)) {
     throw new Error(`OPC_CLI_COMMAND_MISSING:${command}`);

@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
+import { resolveControlActionSha } from "./control-action-pin.js";
 
-const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const actionSha = resolveControlActionSha();
 const remote = execFileSync("git", ["remote", "get-url", "origin"], {
   encoding: "utf8",
 }).trim();
@@ -10,7 +11,6 @@ const owner = /github\.com[/:]([^/]+)\/OPC(?:\.git)?$/.exec(remote)?.[1];
 if (!owner || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) {
   throw new Error("INVALID_CONTROL_OWNER");
 }
-if (!/^[0-9a-f]{40}$/.test(actionSha)) throw new Error("INVALID_CONTROL_ACTION_SHA");
 
 const source = await readFile("templates/control/reusable-opc.yml", "utf8");
 const rendered = source

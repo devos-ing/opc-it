@@ -16,6 +16,9 @@ inputs:
   input-file:
     description: absolute runner-temp path to structured model output
     required: false
+  review-file:
+    description: absolute runner-temp path to the independent result review JSON
+    required: false
   codex-version:
     description: exact host-installed Codex CLI version
     required: false
