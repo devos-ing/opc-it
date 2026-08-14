@@ -209,6 +209,9 @@ test("reconstructs an existing recovery PR when its trusted transition comment i
       `Approval-Digest: sha256:${"d".repeat(64)}`,
       `Artifact-Digest: sha256:${"f".repeat(64)}`,
       `Commit-SHA: ${commitSha}`,
+      "Source-Work: https://github.com/acme/app/issues/7",
+      "Attempt-Recovery: root:7;current:7;attempt:1",
+      "Material-Risks: none",
       "Human merge required.",
     ].join("\n"),
     head: { ref: branch, sha: commitSha, repo: { full_name: repository } },
@@ -227,7 +230,20 @@ test("reconstructs an existing recovery PR when its trusted transition comment i
         get: () => Promise.resolve({ data: pullRequest }),
       },
       repos: {
-        getCommit: () => Promise.resolve({ data: { commit: { tree: { sha: treeSha } } } }),
+        getCommit: () => Promise.resolve({ data: {
+          commit: {
+            tree: { sha: treeSha },
+            message: [
+              "chore(opc): publish verified result",
+              "",
+              "OPC-Verified-Result: v1",
+              "Work-ID: work-1",
+              `Approval-Digest: sha256:${"d".repeat(64)}`,
+              `Artifact-Digest: sha256:${"f".repeat(64)}`,
+            ].join("\n"),
+            parents: [{ sha: baseSha }],
+          },
+        } }),
       },
     },
   } as unknown as Octokit;
@@ -241,6 +257,9 @@ test("reconstructs an existing recovery PR when its trusted transition comment i
       targetRepository: repository,
       baseRepository: repository,
       baseRef: "main",
+      rootIssueNumber: 7,
+      issueNumber: 7,
+      attempt: 1,
     }),
     transition: (command) => {
       transitions.push({ ...command });
@@ -250,6 +269,85 @@ test("reconstructs an existing recovery PR when its trusted transition comment i
   expect(transitions).toHaveLength(1);
   expect(transitions[0]).toMatchObject({ expected: "reviewing", event: "publish" });
   expect((transitions[0]?.metadata as Record<string, string>).commit_sha).toBe(commitSha);
+});
+
+test("requires one base parent and an immutable commit publication marker", async () => {
+  const body = [
+    "OPC-Verified-Result: v1",
+    "Work-ID: work-1",
+    `Approval-Digest: sha256:${"d".repeat(64)}`,
+    `Artifact-Digest: sha256:${"f".repeat(64)}`,
+    `Commit-SHA: ${commitSha}`,
+    "Source-Work: https://github.com/acme/app/issues/7",
+    "Attempt-Recovery: root:7;current:7;attempt:1",
+    "Material-Risks: none",
+    "Human merge required.",
+  ].join("\n");
+  const message = [
+    "chore(opc): publish verified result",
+    "",
+    "OPC-Verified-Result: v1",
+    "Work-ID: work-1",
+    `Approval-Digest: sha256:${"d".repeat(64)}`,
+    `Artifact-Digest: sha256:${"f".repeat(64)}`,
+  ].join("\n");
+  const pullRequest = {
+    number: 7,
+    html_url: `https://github.com/${repository}/pull/7`,
+    body,
+    head: { ref: branch, sha: commitSha, repo: { full_name: repository } },
+    base: { ref: "main", repo: { full_name: repository } },
+    merged_at: null,
+    state: "open",
+  };
+  const context = {
+    workId: "work-1",
+    contractDigest: `sha256:${"e".repeat(64)}`,
+    approvalDigest: `sha256:${"d".repeat(64)}`,
+    baseSha,
+    targetBranch: branch,
+    targetRepository: repository,
+    baseRepository: repository,
+    baseRef: "main",
+    rootIssueNumber: 7,
+    issueNumber: 7,
+    attempt: 1 as const,
+  };
+  for (const [index, commit] of [
+    { parents: [], message },
+    { parents: [{ sha: baseSha }, { sha: "d".repeat(40) }], message },
+    { parents: [{ sha: baseSha }], message: message.replace(`Artifact-Digest: sha256:${"f".repeat(64)}`, `Artifact-Digest: sha256:${"0".repeat(64)}`) },
+    { parents: [{ sha: baseSha }], message: "not an OPC publication" },
+  ].entries()) {
+    const transitions: Record<string, unknown>[] = [];
+    const octokit = {
+      rest: {
+        issues: {
+          listForRepo: () => Promise.resolve({ data: [{ number: 7 }] }),
+          listComments: () => Promise.resolve({ data: [] }),
+        },
+        pulls: {
+          list: () => Promise.resolve({ data: [pullRequest] }),
+          get: () => Promise.resolve({ data: pullRequest }),
+        },
+        repos: {
+          getCommit: () => Promise.resolve({ data: { commit: {
+            tree: { sha: treeSha },
+            message: commit.message,
+            parents: commit.parents,
+          } } }),
+        },
+      },
+    } as unknown as Octokit;
+    await reconcilePublishedPullRequests(octokit, {
+      loadPublicationContext: () => Promise.resolve(context),
+      transition: (command) => {
+        transitions.push({ ...command });
+        return Promise.resolve({ current: "result-ready" });
+      },
+    }, "acme", "app");
+    expect(transitions, `authority case ${String(index)}`).toHaveLength(0);
+  }
 });
 
 test("bounds result-ready reconciliation comments", async () => {

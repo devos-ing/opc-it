@@ -129,14 +129,21 @@ export class GitHubStateStore implements ClaimPort {
     readonly baseRepository: string;
     readonly baseRef: string;
     readonly rootIssueNumber: number;
+    readonly issueNumber: number;
+    readonly attempt: 1 | 2 | 3;
   }> {
-    const { contract: parsed, rootIssueNumber } = await this.issues.loadPublicationRoot(issueNumber);
+    const { contract: parsed, currentContract, rootIssueNumber } =
+      await this.issues.loadPublicationRoot(issueNumber);
     const repository = `${this.owner}/${this.repo}`;
     const { data: repositoryInfo } = await this.octokit.rest.repos.get({
       owner: this.owner,
       repo: this.repo,
     });
     const contractDigest = digestCanonical(parsed);
+    const attemptValue = currentContract.kind === "Work" ? 1 : currentContract.attempt;
+    if (attemptValue !== 1 && attemptValue !== 2 && attemptValue !== 3) {
+      throw new DomainError("INVALID_ATTEMPT_LABELS", String(attemptValue));
+    }
     return Object.freeze({
       workId: parsed.work_id,
       contractDigest,
@@ -147,6 +154,8 @@ export class GitHubStateStore implements ClaimPort {
       baseRepository: repository,
       baseRef: repositoryInfo.default_branch,
       rootIssueNumber,
+      issueNumber,
+      attempt: attemptValue,
     });
   }
 

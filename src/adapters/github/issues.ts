@@ -126,7 +126,14 @@ export class GitHubIssues {
   private async resolveRecoveryRoot(
     contract: RecoveryAddendum,
     visited: ReadonlySet<number>,
+    depth = 0,
   ): Promise<number> {
+    if (depth > 0 && contract.attempt === 2) {
+      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
+    }
+    if (depth >= 2) {
+      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
+    }
     if (visited.has(contract.parent_issue)) {
       throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
     }
@@ -150,17 +157,22 @@ export class GitHubIssues {
 
     const parentContract = parseIssueContractYaml(extractContractBlock(parentBody));
     if (parentContract.kind === "Work") {
-      if (parentContract.work_id !== contract.root_work_id) {
+      if (contract.attempt !== 2 || parentContract.work_id !== contract.root_work_id) {
         throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
       }
       return contract.parent_issue;
     }
-    if (parentContract.root_work_id !== contract.root_work_id) {
+    if (
+      contract.attempt !== 3 ||
+      parentContract.attempt !== 2 ||
+      parentContract.root_work_id !== contract.root_work_id
+    ) {
       throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
     }
     return this.resolveRecoveryRoot(
       parentContract,
       new Set([...visited, contract.parent_issue]),
+      depth + 1,
     );
   }
 
@@ -175,6 +187,7 @@ export class GitHubIssues {
 
   async loadPublicationRoot(number: number): Promise<{
     readonly contract: MilestoneContract;
+    readonly currentContract: MilestoneContract | RecoveryAddendum;
     readonly rootIssueNumber: number;
   }> {
     const { data: issue } = await this.octokit.rest.issues.get({
@@ -189,7 +202,7 @@ export class GitHubIssues {
     const contract = parseIssueContractYaml(extractContractBlock(body));
     const rootIssueNumber = await this.rootIssueNumber(contract, number);
     if (contract.kind === "Work") {
-      return { contract, rootIssueNumber };
+      return { contract, currentContract: contract, rootIssueNumber };
     }
     const { data: rootIssue } = await this.octokit.rest.issues.get({
       owner: this.owner,
@@ -204,7 +217,7 @@ export class GitHubIssues {
     if (rootContract.kind !== "Work" || rootContract.work_id !== contract.root_work_id) {
       throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
     }
-    return { contract: rootContract, rootIssueNumber };
+    return { contract: rootContract, currentContract: contract, rootIssueNumber };
   }
 
   async loadWorkIssue(number: number): Promise<WorkIssueRecord> {

@@ -122,7 +122,7 @@ it("returns the existing open Recovery without dispatching again", async () => {
   const api = createGitHubApi([
     {
       method: "GET",
-      path: "/repos/acme/app/issues?state=open&per_page=100",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=1",
       response: [
         { number: 41, user: { login: "mallory" }, body: recoveryBody() },
         { number: 42, user: { login: "github-actions[bot]" }, body: recoveryBody() },
@@ -148,7 +148,7 @@ it("rejects a new fingerprint that conflicts with an occupied attempt slot", asy
   const api = createGitHubApi([
     {
       method: "GET",
-      path: "/repos/acme/app/issues?state=open&per_page=100",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=1",
       response: [
         {
           number: 42,
@@ -174,7 +174,7 @@ it("creates one unassigned Recovery and dispatches it exactly once", async () =>
   const api = createGitHubApi([
     {
       method: "GET",
-      path: "/repos/acme/app/issues?state=open&per_page=100",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=1",
       response: [
         { number: 40, user: { login: "mallory" }, body: recoveryBody() },
         { number: 41, user: { login: "github-actions[bot]" }, body: "# malformed" },
@@ -204,7 +204,7 @@ it("creates one unassigned Recovery and dispatches it exactly once", async () =>
       path: "/repos/acme/app/issues",
       body: {
         assignees: [],
-        labels: ["opc:recovery", "opc:ready", "opc:attempt-2"],
+        labels: ["opc:work", "opc:recovery", "opc:ready", "opc:attempt-2"],
       },
     },
     {

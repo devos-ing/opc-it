@@ -257,7 +257,7 @@ Claim, reconcile, conclude, and publish all execute the same literal 40-hex cont
 
 The frozen implementation also includes the bounded production-authority repairs required for the Actions route:
 
-- [x] Keep existing Action invocations pinned to the reviewed control SHA; the publish job checks out its own workflow SHA with `persist-credentials: false` and invokes the bundled local Action. Execute/review remain read-only; caller and publish/reconcile jobs receive only the write scopes required for one publication.
+- [x] Keep claim, reconcile, conclude, and publish invocations on one literal 40-hex remote control Action implementation SHA. The Target caller does not perform a local control checkout; execute/review remain read-only, and caller plus publish/reconcile jobs receive only the write scopes required for one publication.
 - [x] Use GitHub native cron; coarse lease expiry reruns the verified attempt and the idempotent publisher reconciles the exact branch/commit/PR before creating anything new.
 - [x] Revalidate current policy/default branch/base SHA at publication boundaries; drift transitions result-ready to needs-reapproval. Materialize reviewed bytes through clean git plumbing with ancestor/symlink checks and verify the resulting tree before publication.
 - [x] Keep publication result-ready until a verified human merge; reconcile merged PRs to delivered and closed-unmerged PRs to needs-decision without auto-merge. PR title/body is deterministic and bounded, with source Work, acceptance/evidence, attempt/recovery, material-risk, and human-merge sections.

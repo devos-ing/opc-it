@@ -286,7 +286,7 @@ it("creates and dispatches one bounded Recovery for a failed executor", async ()
     { method: "PUT", path: "/repos/acme/app/issues/7/labels" },
     {
       method: "GET",
-      path: "/repos/acme/app/issues?state=open&per_page=100",
+      path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=1",
       response: [],
     },
     { method: "POST", path: "/repos/acme/app/issues", response: { number: 42 } },

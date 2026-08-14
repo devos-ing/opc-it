@@ -78,6 +78,9 @@ interface PublicationContext {
   readonly targetRepository?: string;
   readonly baseRepository?: string;
   readonly baseRef?: string;
+  readonly rootIssueNumber?: number;
+  readonly issueNumber?: number;
+  readonly attempt?: 1 | 2 | 3;
 }
 
 export interface PublicationReplay {
@@ -86,9 +89,7 @@ export interface PublicationReplay {
 }
 
 export interface PublicationStateStore {
-  readonly loadPublicationContext?: (issueNumber: number) => Promise<PublicationContext & {
-    readonly rootIssueNumber?: number;
-  }>;
+  readonly loadPublicationContext?: (issueNumber: number) => Promise<PublicationContext>;
   transition(command: {
     readonly issueNumber: number;
     readonly expected: "reviewing" | "result-ready";
@@ -102,12 +103,17 @@ function parsePullRequestBody(body: string | null | undefined): {
   readonly approvalDigest: string;
   readonly artifactDigest: string;
   readonly commitSha: string;
+  readonly sourceWork?: string;
+  readonly attemptRecovery?: string;
 } | undefined {
   if (body === null || body === undefined || body.length > 16_384) return undefined;
   const fields = new Map<string, string>();
   for (const line of body.split(/\r?\n/u)) {
     const match = /^([A-Za-z-]+): (.{1,4096})$/u.exec(line);
-    if (match?.[1] !== undefined && match[2] !== undefined) fields.set(match[1], match[2]);
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      if (fields.has(match[1])) return undefined;
+      fields.set(match[1], match[2]);
+    }
   }
   const workId = fields.get("Work-ID");
   const approvalDigest = fields.get("Approval-Digest");
@@ -115,6 +121,7 @@ function parsePullRequestBody(body: string | null | undefined): {
   const commitSha = fields.get("Commit-SHA");
   if (
     !body.startsWith("OPC-Verified-Result: v1\n", 0) ||
+    (body.match(/^OPC-Verified-Result: v1$/gmu) ?? []).length !== 1 ||
     workId === undefined ||
     approvalDigest === undefined ||
     artifactDigest === undefined ||
@@ -123,7 +130,57 @@ function parsePullRequestBody(body: string | null | undefined): {
     !/^sha256:[0-9a-f]{64}$/u.test(artifactDigest) ||
     !/^[0-9a-f]{40}$/u.test(commitSha)
   ) return undefined;
-  return Object.freeze({ workId, approvalDigest, artifactDigest, commitSha });
+  const parsed = {
+    workId,
+    approvalDigest,
+    artifactDigest,
+    commitSha,
+  };
+  const sourceWork = fields.get("Source-Work");
+  const attemptRecovery = fields.get("Attempt-Recovery");
+  if (sourceWork !== undefined && attemptRecovery !== undefined) {
+    return Object.freeze({ ...parsed, sourceWork, attemptRecovery });
+  }
+  if (sourceWork !== undefined) return Object.freeze({ ...parsed, sourceWork });
+  if (attemptRecovery !== undefined) return Object.freeze({ ...parsed, attemptRecovery });
+  return Object.freeze(parsed);
+}
+
+function expectedAttemptRecovery(context: PublicationContext): string | undefined {
+  if (
+    context.rootIssueNumber === undefined ||
+    context.issueNumber === undefined ||
+    context.attempt === undefined
+  ) return undefined;
+  return `root:${String(context.rootIssueNumber)};current:${String(context.issueNumber)};attempt:${String(context.attempt)}`;
+}
+
+function parsePublicationMarker(message: string | null | undefined): {
+  readonly workId: string;
+  readonly approvalDigest: string;
+  readonly artifactDigest: string;
+} | undefined {
+  if (message === null || message === undefined) return undefined;
+  const lines = message.split(/\r?\n/u);
+  if (lines.filter((line) => line === "OPC-Verified-Result: v1").length !== 1) return undefined;
+  const fields = new Map<string, string>();
+  for (const line of lines) {
+    const match = /^([A-Za-z-]+): (.{1,4096})$/u.exec(line);
+    if (match?.[1] === undefined || match[2] === undefined) continue;
+    if (fields.has(match[1])) return undefined;
+    fields.set(match[1], match[2]);
+  }
+  const workId = fields.get("Work-ID");
+  const approvalDigest = fields.get("Approval-Digest");
+  const artifactDigest = fields.get("Artifact-Digest");
+  if (
+    workId === undefined ||
+    approvalDigest === undefined ||
+    artifactDigest === undefined ||
+    !/^sha256:[0-9a-f]{64}$/u.test(approvalDigest) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(artifactDigest)
+  ) return undefined;
+  return Object.freeze({ workId, approvalDigest, artifactDigest });
 }
 
 async function recoverPublicationFromPullRequest(
@@ -161,6 +218,10 @@ async function recoverPublicationFromPullRequest(
   const pullRequest = matches[0];
   if (pullRequest === undefined) return undefined;
   const body = parsePullRequestBody(pullRequest.body);
+  const expectedSourceWork = context.rootIssueNumber === undefined
+    ? undefined
+    : `https://github.com/${owner}/${repo}/issues/${String(context.rootIssueNumber)}`;
+  const expectedAttempt = expectedAttemptRecovery(context);
   if (
     body === undefined ||
     body.workId !== context.workId ||
@@ -168,7 +229,9 @@ async function recoverPublicationFromPullRequest(
     (expectedArtifactDigest !== undefined && body.artifactDigest !== expectedArtifactDigest) ||
     pullRequest.number <= 0 ||
     pullRequest.html_url !== `https://github.com/${owner}/${repo}/pull/${String(pullRequest.number)}` ||
-    body.commitSha !== pullRequest.head?.sha
+    body.commitSha !== pullRequest.head?.sha ||
+    (expectedSourceWork !== undefined && body.sourceWork !== expectedSourceWork) ||
+    (expectedAttempt !== undefined && body.attemptRecovery !== expectedAttempt)
   ) {
     throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation pull-request identity");
   }
@@ -177,6 +240,29 @@ async function recoverPublicationFromPullRequest(
     repo,
     ref: body.commitSha,
   });
+  const commitData = commit.data as typeof commit.data & {
+    readonly parents?: readonly { readonly sha?: string | null }[];
+  };
+  const commitBody = commitData.commit as typeof commitData.commit & {
+    readonly parents?: readonly { readonly sha?: string | null }[];
+  };
+  const parents = Array.isArray(commitData.parents)
+    ? commitData.parents
+    : Array.isArray(commitBody.parents)
+      ? commitBody.parents
+      : undefined;
+  if (parents?.length !== 1 || parents[0]?.sha !== context.baseSha) {
+    throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation commit parent");
+  }
+  const marker = parsePublicationMarker(commitBody.message);
+  if (
+    marker === undefined ||
+    marker.workId !== body.workId ||
+    marker.approvalDigest !== body.approvalDigest ||
+    marker.artifactDigest !== body.artifactDigest
+  ) {
+    throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation commit marker");
+  }
   const treeSha = commit.data.commit.tree.sha;
   if (typeof treeSha !== "string" || !/^[0-9a-f]{40}$/u.test(treeSha)) {
     throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation commit tree");
@@ -376,12 +462,17 @@ export async function reconcilePublishedPullRequests(
       .find((candidate): candidate is Readonly<Record<string, string>> =>
         candidate !== undefined && requiredPublicationMetadata(candidate));
     if (metadata === undefined && publicationContext !== undefined) {
-      metadata = await recoverPublicationFromPullRequest(
-        octokit,
-        owner,
-        repo,
-        publicationContext,
-      );
+      try {
+        metadata = await recoverPublicationFromPullRequest(
+          octokit,
+          owner,
+          repo,
+          publicationContext,
+        );
+      } catch (error) {
+        if (error instanceof DomainError && error.code === "RUN_OUTCOME_CONFLICT") continue;
+        throw error;
+      }
     }
     if (!metadata) continue;
     if (publicationContext !== undefined && (
@@ -734,11 +825,11 @@ export async function runActionCommand(
   if (inputs.command === "reconcile") {
     await assertCurrentPolicyEnabled();
     const clock = context.clock ?? systemClock;
+    await reconcilePublishedPullRequests(octokit, store, inputs.owner, inputs.repo);
     const reconciliation = await reconcileRepository(
       new GitHubReconciler(octokit, inputs.owner, inputs.repo, context.controlOwner),
       clock,
     );
-    await reconcilePublishedPullRequests(octokit, store, inputs.owner, inputs.repo);
     const claim =
       reconciliation.active === 0
         ? await claimNextWork(store, clock, { runId: context.runId })

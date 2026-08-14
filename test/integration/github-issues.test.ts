@@ -99,6 +99,23 @@ function recoveryIssueFixture(parentIssue: number): IssueFixture {
   });
 }
 
+function recoveryContractBody(parentIssue: number, attempt: 2 | 3): string {
+  const recovery = [
+    "kind: Recovery",
+    `root_work_id: ${validMilestoneObject.work_id}`,
+    `parent_issue: ${String(parentIssue)}`,
+    `attempt: ${String(attempt)}`,
+    `approval_digest: ${approvalDigest}`,
+    "failure_type: execution",
+    `error_fingerprint: sha256:${"f".repeat(64)}`,
+    "evidence_links: [https://github.com/acme/app/actions/runs/1]",
+    "repair_hypothesis: retry the failed unit test",
+    "verification_focus: unit",
+    "",
+  ].join("\n");
+  return `# Recovery\n\n\`\`\`yaml opc-contract\n${recovery}\`\`\`\n`;
+}
+
 function mockIssueAndComments(
   issue: IssueFixture,
   comments: readonly ApprovalFixture[],
@@ -133,6 +150,58 @@ it("loads one issue and its latest unedited owner approval", async () => {
     approvalDigest,
     approval: { actor: "roy", createdAt: "2026-08-08T00:01:00Z" },
   });
+  expect(api.isDone()).toBe(true);
+});
+
+it("bounds Recovery root hydration to the strict attempt-3 to attempt-2 to Work chain", async () => {
+  const current = issueFixture({
+    number: 9,
+    body: recoveryContractBody(8, 3),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-3" }],
+  });
+  const parent = issueFixture({
+    number: 8,
+    body: recoveryContractBody(7, 2),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-2" }],
+  });
+  const api = mockIssueAndComments(
+    current,
+    [],
+    [{ path: "/repos/acme/app/issues/8", body: parent }],
+  );
+  const error = await new GitHubIssues(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    undefined,
+  ).loadWorkIssue(9).catch((value: unknown) => value);
+  expect(error).toMatchObject({ code: "RECOVERY_ROOT_CONTRADICTORY" });
+  expect(api.isDone()).toBe(true);
+});
+
+it("rejects a Recovery attempt-2 parented by another Recovery before fetching further", async () => {
+  const current = issueFixture({
+    number: 8,
+    body: recoveryContractBody(7, 2),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-2" }],
+  });
+  const parent = issueFixture({
+    number: 7,
+    body: recoveryContractBody(6, 2),
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-2" }],
+  });
+  const api = mockIssueAndComments(
+    current,
+    [],
+    [{ path: "/repos/acme/app/issues/7", body: parent }],
+  );
+  const error = await new GitHubIssues(
+    new Octokit({ auth: "test", request: { fetch: api.fetch } }),
+    "acme",
+    "app",
+    undefined,
+  ).loadWorkIssue(8).catch((value: unknown) => value);
+  expect(error).toMatchObject({ code: "RECOVERY_ROOT_CONTRADICTORY" });
   expect(api.isDone()).toBe(true);
 });
 
