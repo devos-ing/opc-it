@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { expect, it } from "bun:test";
 import { parseDocument } from "yaml";
 
@@ -23,6 +22,8 @@ function namedStep(steps: Record<string, unknown>[], name: string): Record<strin
 
 it("reviews only the verified Candidate Bundle in a fresh read-only session", async () => {
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
+  const actionSha = source.match(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/)?.[1];
+  if (!actionSha) throw new Error("MISSING_CONTROL_ACTION_SHA");
   const document = parseDocument(source, { uniqueKeys: true, schema: "core" });
   if (document.errors.length > 0) throw new Error(document.errors[0]?.message ?? "INVALID_YAML");
   const workflow = record(document.toJS(), "workflow");
@@ -57,7 +58,7 @@ it("reviews only the verified Candidate Bundle in a fresh read-only session", as
   const codex = namedStep(steps, "Review candidate independently");
   const decision = namedStep(steps, "Apply deterministic Evidence Gate");
   for (const step of [prepare, codex, decision]) {
-    expect(step.uses).toBe(`0xroylee/OPC@${execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()}`);
+    expect(step.uses).toBe(`0xroylee/OPC@${actionSha}`);
     expect(record(step.with, "review-action.with")).not.toHaveProperty("github-token");
   }
   expect(record(codex.with, "codex.with")).toMatchObject({

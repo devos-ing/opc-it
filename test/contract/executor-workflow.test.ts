@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { expect, it } from "bun:test";
 import { parseDocument } from "yaml";
 
@@ -29,6 +28,8 @@ function namedStep(steps: Record<string, unknown>[], name: string): Record<strin
 
 it("runs the executor on the dedicated Mac with no repository write credential", async () => {
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
+  const actionSha = source.match(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/)?.[1];
+  if (!actionSha) throw new Error("MISSING_CONTROL_ACTION_SHA");
   const workflow = parseWorkflow(source);
   const inputs = record(record(record(workflow.on, "on").workflow_call, "workflow_call").inputs, "inputs");
   const jobs = record(workflow.jobs, "jobs");
@@ -67,7 +68,7 @@ it("runs the executor on the dedicated Mac with no repository write credential",
   const codex = namedStep(steps, "Execute approved milestone");
   const finalize = namedStep(steps, "Build Candidate Result");
   for (const step of [prepare, codex, finalize]) {
-    expect(step.uses).toBe(`0xroylee/OPC@${execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()}`);
+    expect(step.uses).toBe(`0xroylee/OPC@${actionSha}`);
     expect(record(step.with, "local.with")).not.toHaveProperty("github-token");
   }
   expect(finalize.if).toContain("always()");
@@ -96,7 +97,6 @@ it("runs the executor on the dedicated Mac with no repository write credential",
     /openai\/codex-action|OPENAI_API_KEY|CODEX_API_KEY|CODEX_HOME|api[-_]?key.*secret/i,
   );
   expect(source).not.toContain("actions/checkout@v4\n        with:\n          repository: 0xroylee/OPC");
-  const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const opcActionRefs = [...source.matchAll(new RegExp(`uses: "(0xroylee/OPC@${actionSha})"`, "g"))].map(
     (match) => match[1],
   );

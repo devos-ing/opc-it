@@ -32,6 +32,15 @@ function assertTargetCallerPermissions(workflow: Record<string, unknown>): void 
   }
 }
 
+function pinnedControlActionSha(source: string): string {
+  const refs = [...source.matchAll(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/g)].map(
+    (match) => match[1] ?? "",
+  );
+  expect(refs.length).toBeGreaterThan(0);
+  expect(new Set(refs).size).toBe(1);
+  return refs[0] ?? "";
+}
+
 it("keeps the Target caller thin, serialized, and immutably pinned", async () => {
   const template = await readFile("templates/target/.github/workflows/opc.yml", "utf8");
   const source = template
@@ -56,7 +65,7 @@ it("keeps the canonical control template byte-for-byte aligned with the workflow
     readFile(".github/workflows/reusable-opc.yml", "utf8"),
     readFile("templates/control/reusable-opc.yml", "utf8"),
   ]);
-  const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const actionSha = pinnedControlActionSha(source);
 
   expect(
     template
@@ -81,8 +90,14 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
 
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
-  const actionSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const actionSha = pinnedControlActionSha(source);
   expect(source).toContain(`uses: "0xroylee/OPC@${actionSha}"`);
+  expect(
+    execFileSync("git", ["show", `${actionSha}:dist/action/index.cjs`], {
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+  ).toBe(await readFile("dist/action/index.cjs", "utf8"));
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
   expect(source).not.toContain("pull_request");
@@ -168,11 +183,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
 
 it("uses one immutable control Action SHA for every stateful command", async () => {
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
-  const actionRefs = [...source.matchAll(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/g)].map(
-    (match) => match[1],
-  );
-  expect(actionRefs.length).toBeGreaterThan(0);
-  expect(new Set(actionRefs).size).toBe(1);
+  const actionSha = pinnedControlActionSha(source);
   expect(source).not.toContain("uses: ./.opc-control");
-  expect(source).toContain(`uses: "0xroylee/OPC@${execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()}"`);
+  expect(source).toContain(`uses: "0xroylee/OPC@${actionSha}"`);
 });
