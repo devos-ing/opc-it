@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Claim or reconcile
         id: opc
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: ${{ inputs.event_name == 'schedule' && 'reconcile' || 'claim' }}
           repository: ${{ github.repository }}
@@ -46,7 +46,7 @@ jobs:
       actions: read
     steps:
       - name: Watch executor and reviewer liveness
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: heartbeat
           repository: ${{ github.repository }}
@@ -62,7 +62,7 @@ jobs:
       contents: read
     steps:
       - name: Recheck current Repository Policy before execute
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: policy-gate
           repository: ${{ github.repository }}
@@ -84,7 +84,7 @@ jobs:
     steps:
       - name: Establish approved execution deadline
         id: deadline
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: execution-deadline
           repository: ${{ github.repository }}
@@ -100,7 +100,7 @@ jobs:
           fetch-depth: 0
       - name: Prepare execution workspace
         id: prepare
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: prepare-execution
           repository: ${{ github.repository }}
@@ -110,21 +110,21 @@ jobs:
           deadline-epoch-ms: ${{ steps.deadline.outputs['deadline-epoch-ms'] }}
       - name: Record Bootstrap Failure
         if: always() && steps.prepare.outputs['prepare-outcome'] == 'work-failure'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
           reported-outcome: execution
       - name: Record Prepare Run Incident
         if: always() && steps.prepare.outputs['prepare-outcome'] == 'run-incident'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
           reported-outcome: infrastructure
       - name: Execute approved milestone
         id: codex
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: run-codex
           repository: ${{ github.repository }}
@@ -137,7 +137,7 @@ jobs:
       - name: Build Candidate Result
         if: always() && steps.prepare.outcome == 'success'
         id: finalize
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: finalize-execution
           repository: ${{ github.repository }}
@@ -148,14 +148,14 @@ jobs:
           deadline-epoch-ms: ${{ steps.deadline.outputs['deadline-epoch-ms'] }}
       - name: Record Executor Failure
         if: always() && steps.finalize.outputs['finalize-outcome'] == 'work-failure'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
           reported-outcome: execution
       - name: Record Executor Run Incident
         if: always() && steps.finalize.outputs['finalize-outcome'] == 'run-incident'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
@@ -178,7 +178,7 @@ jobs:
       contents: read
     steps:
       - name: Recheck current Repository Policy
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: policy-gate
           repository: ${{ github.repository }}
@@ -201,7 +201,7 @@ jobs:
           path: ${{ runner.temp }}/opc-review-input
       - name: Verify bundle and prepare review input
         id: prepare-review
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: prepare-review
           repository: ${{ github.repository }}
@@ -211,7 +211,7 @@ jobs:
           artifact-sha256: ${{ needs.execute.outputs.artifact_sha256 }}
       - name: Review candidate independently
         id: codex-review
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: run-codex
           repository: ${{ github.repository }}
@@ -223,14 +223,14 @@ jobs:
           timeout-seconds: 900
       - name: Record Review Failure
         if: always() && steps.codex-review.outputs['codex-outcome'] == 'work-failure'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
           reported-outcome: review
       - name: Record Reviewer Run Incident
         if: always() && steps.codex-review.outputs['codex-outcome'] == 'run-incident'
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: report-run-failure
           repository: ${{ github.repository }}
@@ -238,7 +238,7 @@ jobs:
       - name: Apply deterministic Evidence Gate
         if: steps.codex-review.outputs['codex-outcome'] == 'completed'
         id: decision
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: decide-result
           repository: ${{ github.repository }}
@@ -268,7 +268,7 @@ jobs:
       actions: write
     steps:
       - name: Persist verified result or bounded Recovery
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: complete-run
           repository: ${{ github.repository }}
@@ -301,7 +301,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Publish reviewed candidate
-        uses: "0xroylee/OPC@10acb74a05dbfca611132940f505929c47c3761f"
+        uses: "0xroylee/OPC@288abb73194c9b13cd7b63a0f51734c64caebaa9"
         with:
           command: publish
           repository: ${{ github.repository }}
