@@ -173,6 +173,40 @@ export class GitHubIssues {
       : this.resolveRecoveryRoot(contract, new Set([number]));
   }
 
+  async loadPublicationRoot(number: number): Promise<{
+    readonly contract: MilestoneContract;
+    readonly rootIssueNumber: number;
+  }> {
+    const { data: issue } = await this.octokit.rest.issues.get({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: number,
+    });
+    const body = issue.body;
+    if (body === null || body === undefined) {
+      throw new DomainError("INCOMPLETE_ISSUE", String(number));
+    }
+    const contract = parseIssueContractYaml(extractContractBlock(body));
+    const rootIssueNumber = await this.rootIssueNumber(contract, number);
+    if (contract.kind === "Work") {
+      return { contract, rootIssueNumber };
+    }
+    const { data: rootIssue } = await this.octokit.rest.issues.get({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: rootIssueNumber,
+    });
+    const rootBody = rootIssue.body;
+    if (rootBody === null || rootBody === undefined) {
+      throw new DomainError("RECOVERY_ROOT_MISSING", String(rootIssueNumber));
+    }
+    const rootContract = parseIssueContractYaml(extractContractBlock(rootBody));
+    if (rootContract.kind !== "Work" || rootContract.work_id !== contract.root_work_id) {
+      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", contract.root_work_id);
+    }
+    return { contract: rootContract, rootIssueNumber };
+  }
+
   async loadWorkIssue(number: number): Promise<WorkIssueRecord> {
     const [{ data: issue }, comments] = await Promise.all([
       this.octokit.rest.issues.get({

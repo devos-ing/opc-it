@@ -18,8 +18,6 @@ import {
 } from "../../domain/state.js";
 import { parseRepositoryPolicyYaml } from "../../domain/validation.js";
 import { digestCanonical } from "../../domain/identity.js";
-import { parseIssueContractYaml } from "../../domain/validation.js";
-import { extractContractBlock } from "./issue-parser.js";
 import {
   GitHubIssues,
   attemptFromLabels,
@@ -132,14 +130,7 @@ export class GitHubStateStore implements ClaimPort {
     readonly baseRef: string;
     readonly rootIssueNumber: number;
   }> {
-    const issue = await this.loadWorkIssue(issueNumber);
-    const rootIssue = issue.rootIssueNumber === issue.number
-      ? issue
-      : await this.loadWorkIssue(issue.rootIssueNumber);
-    const parsed = parseIssueContractYaml(extractContractBlock(rootIssue.body));
-    if (parsed.kind !== "Work") {
-      throw new DomainError("RECOVERY_ROOT_CONTRADICTORY", parsed.root_work_id);
-    }
+    const { contract: parsed, rootIssueNumber } = await this.issues.loadPublicationRoot(issueNumber);
     const repository = `${this.owner}/${this.repo}`;
     const { data: repositoryInfo } = await this.octokit.rest.repos.get({
       owner: this.owner,
@@ -155,7 +146,7 @@ export class GitHubStateStore implements ClaimPort {
       targetRepository: repository,
       baseRepository: repository,
       baseRef: repositoryInfo.default_branch,
-      rootIssueNumber: rootIssue.number,
+      rootIssueNumber,
     });
   }
 

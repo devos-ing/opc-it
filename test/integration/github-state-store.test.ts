@@ -281,6 +281,35 @@ it("loads publication context through the production Work/Recovery parser and bi
   });
 });
 
+it("loads publication context from bounded issue bodies without loading unbounded comments", async () => {
+  const contract = { ...validMilestoneObject, policy_sha: digestCanonical(validPolicy) };
+  const issue = {
+    number: 7,
+    user: { login: "roy" },
+    body: "# Work\n\n```yaml opc-contract\n" + JSON.stringify(contract) + "\n```\n",
+    labels: [{ name: "opc:reviewing" }, { name: "opc:attempt-1" }],
+    created_at: "2026-08-08T00:00:00Z",
+  };
+  const fetch = createGitHubApi(
+    new Map<string, unknown>([
+      ["GET /repos/acme/app/issues/7", issue],
+      ["GET /repos/acme/app", { default_branch: "main", owner: { login: "acme" } }],
+    ]),
+  );
+  const store = new GitHubStateStore(
+    new Octokit({ auth: "test", request: { fetch } }),
+    "acme",
+    "app",
+    undefined,
+    "acme",
+  );
+  const context = await store.loadPublicationContext(7);
+  expect(context).toMatchObject({
+    workId: contract.work_id,
+    targetBranch: `opc/${contract.work_id}`,
+  });
+});
+
 it("repairs a mutable relabel while applying the trusted next transition", async () => {
   const relabeledIssue = {
     number: 7,

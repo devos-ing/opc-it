@@ -4,7 +4,7 @@
 
 **Goal:** Remove the local OPC self-upgrade subsystem and retain the existing scheduled approved-work flow that runs a development agent, verifies its result, and creates one delivery pull request only on success.
 
-**Architecture:** GitHub's native cron invokes the immutable target `opc.yml`; the reusable workflow owns claim/reconciliation, Codex execution, evidence review, and publication. Repository operators and workflows with `issues:write` are the trusted queue writers, and immutable `github-actions[bot]` transition comments are accepted only for the exact closed transition they record. The daemon keeps its local HMAC authority for local runtime seams and does not dispatch Actions or expose that key to workflows. Publication is attempted before `reviewing -> result-ready`; a coarse lease retry reruns the verified attempt and the publisher reuses an existing branch/PR. Delete upgrade-only commands, feature modules, native helpers, filesystem-lock hardening added solely for upgrade lifecycle proofs, and their tests.
+**Architecture:** GitHub's native cron invokes the immutable target `opc.yml`; the reusable workflow owns claim/reconciliation, Codex execution, evidence review, and publication. Repository operators and workflows with `issues:write` are the trusted queue writers, and immutable `github-actions[bot]` transition comments are accepted only for the exact closed transition they record. The local runtime authority is separate from Actions; the daemon does not dispatch Actions or expose local credentials to workflows. Publication is attempted before `reviewing -> result-ready`; a coarse lease retry reruns the verified attempt and the publisher reuses an existing branch/PR. Delete upgrade-only commands, feature modules, native helpers, filesystem-lock hardening added solely for upgrade lifecycle proofs, and their tests.
 
 **Tech Stack:** TypeScript, Bun, GitHub queue/publisher adapters, macOS daemon adapter, Vitest-compatible Bun tests.
 
@@ -235,12 +235,12 @@ Expected: one commit containing the approved rescope and no unrelated files.
 
 The independent review identified that the publisher stopped after branch publication. This repair is part of the approved scheduled-delivery scope and is implemented before the final gates:
 
-- [x] Extend `PublicationOutcome` and `snapshotPublicationOutcome` with the exact pull-request number, URL, and reuse flag; record those values in the signed terminal lifecycle metadata.
+- [x] Extend `PublicationOutcome` and `snapshotPublicationOutcome` with the exact pull-request number, URL, and reuse flag; record those values in the immutable trusted-writer lifecycle metadata.
 - [x] Use the publisher's authorized absolute `ghPath` and sandbox to reconcile an existing pull request for the repository, published head branch, default base branch, and published commit before creating one.
 - [x] Create a deterministic title/body only when no matching pull request exists; reconcile again after success or a create timeout and reject conflicting or duplicate pull requests.
 - [x] Cover successful publication, no pull request after pre-publication failure, retry reuse, create-timeout reconciliation, and duplicate/conflicting pull-request rejection in `test/integration/daemon-publication.test.ts`.
 - [x] Parse raw GitHub PR JSON (including nested head/base repository identity), paginate complete list responses, reject non-canonical target refs before side effects, and reconcile every possibly-mutating create result.
-- [x] Keep Work `reviewing` through verification and append one signed `reviewing -> result-ready` publication transition only after the commit, push, and PR exist; reserve human merge for `delivered` and closed-unmerged PRs for `needs-decision`.
+- [x] Keep Work `reviewing` through verification and append one immutable trusted-writer `reviewing -> result-ready` publication transition only after the commit, push, and PR exist; reserve human merge for `delivered` and closed-unmerged PRs for `needs-decision`.
 - [x] Use GitHub's native cron and the existing reusable workflow; the daemon does not dispatch scheduled runs or claim work locally.
 
 Human merge remains the delivery boundary; OPC does not merge pull requests automatically.
@@ -249,7 +249,9 @@ Human merge remains the delivery boundary; OPC does not merge pull requests auto
 
 The local daemon HMAC transition model remains valid for the local runtime seam. The production scheduled-delivery route uses GitHub's native cron and treats repository operators/workflows with `issues:write` as trusted queue writers. Reconciliation accepts only an immutable `github-actions[bot]` publication comment whose exact PR identity and closed lifecycle transition match the canonical repository, branch, commit, and Work metadata; author text alone is not an authority claim. No workflow receives or exposes the daemon HMAC key.
 
-The Actions publication record is an immutable trusted-writer record, not a signed CI record. Pre-publication failures occur before the publisher call and leave zero commit, push, or pull-request side effects; post-publication crashes are retried by the coarse lease and reconcile the exact existing branch/PR for idempotent reuse.
+The Actions publication record is an immutable trusted-writer record. A pre-publication failure occurs before the publisher call and leaves zero commit, push, or pull-request side effects; a post-publication crash is retried by the coarse lease and reconciles the exact existing branch/PR for idempotent reuse.
+
+Claim, reconcile, conclude, and publish all execute the same literal 40-hex control Action implementation SHA. The renderer resolves that SHA from the control commit; after the final implementation commit, regenerate the release pin from that commit before rollout.
 
 ### Post-review production-authority repairs
 
@@ -260,4 +262,4 @@ The frozen implementation also includes the bounded production-authority repairs
 - [x] Revalidate current policy/default branch/base SHA at publication boundaries; drift transitions result-ready to needs-reapproval. Materialize reviewed bytes through clean git plumbing with ancestor/symlink checks and verify the resulting tree before publication.
 - [x] Keep publication result-ready until a verified human merge; reconcile merged PRs to delivered and closed-unmerged PRs to needs-decision without auto-merge. PR title/body is deterministic and bounded, with source Work, acceptance/evidence, attempt/recovery, material-risk, and human-merge sections.
 
-Recovery-chain boundary: the canonical queue model has no separate root-success event. A successful retry intentionally leaves the root in `recovering` while its signed child owns the next attempt; the child then follows the ordinary reviewing/publish/merge lifecycle. Only attempt exhaustion terminalizes both child and recovering root as `blocked`. The lease reruns a whole verified attempt after a crash; no separate publication intent or micro-window state is invented for this route.
+Recovery-chain boundary: the canonical queue model has no separate root-success event. A successful retry intentionally leaves the root in `recovering` while its child owns the next attempt; the child then follows the ordinary reviewing/publish/merge lifecycle. Only attempt exhaustion terminalizes both child and recovering root as `blocked`. The lease reruns a whole verified attempt after a crash; no separate publication intent or micro-window state is invented for this route.

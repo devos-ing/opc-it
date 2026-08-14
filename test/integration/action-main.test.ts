@@ -250,7 +250,7 @@ it.each(["claim", "reconcile"] as const)(
           },
           {
             method: "GET",
-            path: "/repos/acme/app/issues?state=open&per_page=100&page=1",
+            path: "/repos/acme/app/issues?state=open&labels=opc%3Awork&per_page=100&page=1",
             response: [],
           },
         ]

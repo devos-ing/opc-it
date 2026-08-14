@@ -15,6 +15,7 @@ import { DomainError } from "../domain/errors.js";
 import { digestCanonical } from "../domain/identity.js";
 import { parseExecutionEnvelopePayload } from "./prepare-execution.js";
 import { publishReviewedCandidate, type PublishReviewedCandidateResult } from "./publish-reviewed.js";
+import type { PublicationOutcome } from "../features/delivery/index.js";
 
 export type ActionCommandResult =
   | { readonly command: "validate"; readonly valid: true }
@@ -65,18 +66,27 @@ interface GitHubPullRequest {
   } | null;
   readonly merged_at?: string | null;
   readonly state?: string | null;
+  readonly body?: string | null;
+}
+
+interface PublicationContext {
+  readonly workId: string;
+  readonly contractDigest: string;
+  readonly approvalDigest?: string;
+  readonly baseSha: string;
+  readonly targetBranch: string;
+  readonly targetRepository?: string;
+  readonly baseRepository?: string;
+  readonly baseRef?: string;
+}
+
+export interface PublicationReplay {
+  readonly issueNumber: number;
+  readonly metadata: Readonly<Record<string, string>>;
 }
 
 export interface PublicationStateStore {
-  readonly loadPublicationContext?: (issueNumber: number) => Promise<{
-    readonly workId: string;
-    readonly contractDigest: string;
-    readonly approvalDigest?: string;
-    readonly baseSha: string;
-    readonly targetBranch: string;
-    readonly targetRepository?: string;
-    readonly baseRepository?: string;
-    readonly baseRef?: string;
+  readonly loadPublicationContext?: (issueNumber: number) => Promise<PublicationContext & {
     readonly rootIssueNumber?: number;
   }>;
   transition(command: {
@@ -85,6 +95,144 @@ export interface PublicationStateStore {
     readonly event: "publish" | "merge" | "close-unmerged";
     readonly metadata: Readonly<Record<string, string>>;
   }): Promise<{ readonly current: string }>;
+}
+
+function parsePullRequestBody(body: string | null | undefined): {
+  readonly workId: string;
+  readonly approvalDigest: string;
+  readonly artifactDigest: string;
+  readonly commitSha: string;
+} | undefined {
+  if (body === null || body === undefined || body.length > 16_384) return undefined;
+  const fields = new Map<string, string>();
+  for (const line of body.split(/\r?\n/u)) {
+    const match = /^([A-Za-z-]+): (.{1,4096})$/u.exec(line);
+    if (match?.[1] !== undefined && match[2] !== undefined) fields.set(match[1], match[2]);
+  }
+  const workId = fields.get("Work-ID");
+  const approvalDigest = fields.get("Approval-Digest");
+  const artifactDigest = fields.get("Artifact-Digest");
+  const commitSha = fields.get("Commit-SHA");
+  if (
+    !body.startsWith("OPC-Verified-Result: v1\n", 0) ||
+    workId === undefined ||
+    approvalDigest === undefined ||
+    artifactDigest === undefined ||
+    commitSha === undefined ||
+    !/^sha256:[0-9a-f]{64}$/u.test(approvalDigest) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(artifactDigest) ||
+    !/^[0-9a-f]{40}$/u.test(commitSha)
+  ) return undefined;
+  return Object.freeze({ workId, approvalDigest, artifactDigest, commitSha });
+}
+
+async function recoverPublicationFromPullRequest(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  context: PublicationContext,
+  expectedArtifactDigest?: string,
+): Promise<Readonly<Record<string, string>> | undefined> {
+  if (!context.baseRef || !context.targetRepository || !context.baseRepository) return undefined;
+  const candidates: GitHubPullRequest[] = [];
+  for (let page = 1; page <= maximumReconciliationPages; page += 1) {
+    const response = await octokit.rest.pulls.list({
+      owner,
+      repo,
+      state: "open",
+      head: `${owner}:${context.targetBranch}`,
+      base: context.baseRef,
+      per_page: maximumReconciliationIssuesPerPage,
+      page,
+    });
+    const current = Array.isArray(response.data) ? response.data as GitHubPullRequest[] : [];
+    candidates.push(...current);
+    if (current.length < maximumReconciliationIssuesPerPage) break;
+  }
+  const matches = candidates.filter((pullRequest) =>
+    pullRequest.head?.ref === context.targetBranch &&
+    pullRequest.base?.ref === context.baseRef &&
+    pullRequestRepository(pullRequest, "head") === context.targetRepository &&
+    pullRequestRepository(pullRequest, "base") === context.baseRepository,
+  );
+  if (matches.length > 1) {
+    throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation pull-request collision");
+  }
+  const pullRequest = matches[0];
+  if (pullRequest === undefined) return undefined;
+  const body = parsePullRequestBody(pullRequest.body);
+  if (
+    body === undefined ||
+    body.workId !== context.workId ||
+    body.approvalDigest !== context.approvalDigest ||
+    (expectedArtifactDigest !== undefined && body.artifactDigest !== expectedArtifactDigest) ||
+    pullRequest.number <= 0 ||
+    pullRequest.html_url !== `https://github.com/${owner}/${repo}/pull/${String(pullRequest.number)}` ||
+    body.commitSha !== pullRequest.head?.sha
+  ) {
+    throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation pull-request identity");
+  }
+  const commit = await octokit.rest.repos.getCommit({
+    owner,
+    repo,
+    ref: body.commitSha,
+  });
+  const treeSha = commit.data.commit.tree.sha;
+  if (typeof treeSha !== "string" || !/^[0-9a-f]{40}$/u.test(treeSha)) {
+    throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation commit tree");
+  }
+  return Object.freeze({
+    work_id: context.workId,
+    approval_digest: context.approvalDigest ?? body.approvalDigest,
+    contract_digest: context.contractDigest,
+    base_sha: context.baseSha,
+    target_branch: context.targetBranch,
+    branch: context.targetBranch,
+    commit_sha: body.commitSha,
+    tree_sha: treeSha,
+    reused: "true",
+    pull_request_number: String(pullRequest.number),
+    pull_request_url: pullRequest.html_url ?? "",
+    pull_request_reused: "true",
+    head_repository: context.targetRepository,
+    head_ref: context.targetBranch,
+    head_sha: body.commitSha,
+    base_repository: context.baseRepository,
+    base_ref: context.baseRef,
+    artifact_digest: body.artifactDigest,
+  });
+}
+
+function publicationOutcomeFromMetadata(
+  metadata: Readonly<Record<string, string>>,
+): Extract<PublicationOutcome, { readonly status: "published" }> | undefined {
+  const branch = metadata.branch;
+  const commitSha = metadata.commit_sha;
+  const treeSha = metadata.tree_sha;
+  const pullRequestNumber = Number(metadata.pull_request_number);
+  const pullRequestUrl = metadata.pull_request_url;
+  if (
+    branch === undefined ||
+    commitSha === undefined ||
+    treeSha === undefined ||
+    !/^[0-9a-f]{40}$/u.test(commitSha) ||
+    !/^[0-9a-f]{40}$/u.test(treeSha) ||
+    !Number.isSafeInteger(pullRequestNumber) ||
+    pullRequestNumber <= 0 ||
+    pullRequestUrl === undefined ||
+    (metadata.reused !== "true" && metadata.reused !== "false") ||
+    (metadata.pull_request_reused !== "true" && metadata.pull_request_reused !== "false")
+  ) return undefined;
+  return Object.freeze({
+    status: "published",
+    branch,
+    commitSha,
+    treeSha,
+    reused: metadata.reused === "true",
+    pullRequestNumber,
+    pullRequestUrl,
+    pullRequestReused: metadata.pull_request_reused === "true",
+  });
 }
 
 function pullRequestRepository(
@@ -117,8 +265,9 @@ const publicationRequiredMetadata = [
   "base_repository",
   "base_ref",
 ] as const;
-const maximumReconciliationIssues = 100;
+const maximumReconciliationIssuesPerPage = 100;
 const maximumReconciliationComments = 100;
+const maximumReconciliationPages = 101;
 
 async function boundedIssuePages(
   octokit: Octokit,
@@ -126,20 +275,18 @@ async function boundedIssuePages(
   repo: string,
 ): Promise<readonly { readonly number: number }[]> {
   const issues: { readonly number: number }[] = [];
-  for (let page = 1; page <= 2; page += 1) {
+  for (let page = 1; page <= maximumReconciliationPages; page += 1) {
     const response = await octokit.rest.issues.listForRepo({
       owner,
       repo,
       state: "open",
-      per_page: maximumReconciliationIssues,
+      labels: "opc:work",
+      per_page: maximumReconciliationIssuesPerPage,
       page,
     });
     const current = Array.isArray(response.data) ? response.data : [];
     issues.push(...current);
-    if (issues.length > maximumReconciliationIssues) {
-      throw new DomainError("RUN_OUTCOME_CONFLICT", "publication reconciliation issue limit");
-    }
-    if (current.length < maximumReconciliationIssues) break;
+    if (current.length < maximumReconciliationIssuesPerPage) break;
   }
   return issues;
 }
@@ -201,19 +348,11 @@ export async function reconcilePublishedPullRequests(
   store: PublicationStateStore,
   owner: string,
   repo: string,
-): Promise<void> {
+): Promise<readonly PublicationReplay[]> {
   const issues = await boundedIssuePages(octokit, owner, repo);
+  const replays: PublicationReplay[] = [];
   for (const issue of issues) {
-    let publicationContext: {
-      readonly workId: string;
-      readonly contractDigest: string;
-      readonly approvalDigest?: string;
-      readonly baseSha: string;
-      readonly targetBranch: string;
-      readonly targetRepository?: string;
-      readonly baseRepository?: string;
-      readonly baseRef?: string;
-    } | undefined;
+    let publicationContext: PublicationContext | undefined;
     if (store.loadPublicationContext !== undefined) {
       try {
         publicationContext = await store.loadPublicationContext(issue.number);
@@ -232,16 +371,26 @@ export async function reconcilePublishedPullRequests(
       if (error instanceof DomainError && error.code === "RUN_OUTCOME_CONFLICT") continue;
       throw error;
     }
-    const metadata = comments
+    let metadata = comments
       .map((comment) => publicationRecord(comment))
       .find((candidate): candidate is Readonly<Record<string, string>> =>
         candidate !== undefined && requiredPublicationMetadata(candidate));
+    if (metadata === undefined && publicationContext !== undefined) {
+      metadata = await recoverPublicationFromPullRequest(
+        octokit,
+        owner,
+        repo,
+        publicationContext,
+      );
+    }
     if (!metadata) continue;
     if (publicationContext !== undefined && (
       metadata.work_id !== publicationContext.workId ||
       metadata.contract_digest !== publicationContext.contractDigest ||
       metadata.base_sha !== publicationContext.baseSha ||
       metadata.target_branch !== publicationContext.targetBranch ||
+      metadata.branch !== publicationContext.targetBranch ||
+      metadata.head_ref !== publicationContext.targetBranch ||
       (publicationContext.approvalDigest !== undefined &&
         metadata.approval_digest !== publicationContext.approvalDigest) ||
       (publicationContext.targetRepository !== undefined &&
@@ -262,31 +411,44 @@ export async function reconcilePublishedPullRequests(
       pullRequest.html_url !== `https://github.com/${owner}/${repo}/pull/${String(number)}` ||
       pullRequest.head.ref !== metadata.head_ref ||
       pullRequest.head.ref !== metadata.branch ||
+      (publicationContext !== undefined && pullRequest.head.ref !== publicationContext.targetBranch) ||
       pullRequest.head.sha !== metadata.head_sha ||
       pullRequest.head.sha !== metadata.commit_sha ||
       pullRequestRepository(pullRequest, "head") !== metadata.head_repository ||
+      (publicationContext?.targetRepository !== undefined &&
+        pullRequestRepository(pullRequest, "head") !== publicationContext.targetRepository) ||
       pullRequest.base.ref !== baseRef ||
-      pullRequestRepository(pullRequest, "base") !== metadata.base_repository
+      pullRequestRepository(pullRequest, "base") !== metadata.base_repository ||
+      (publicationContext?.baseRepository !== undefined &&
+        pullRequestRepository(pullRequest, "base") !== publicationContext.baseRepository)
     ) continue;
     const event = pullRequest.merged_at !== null
       ? "merge"
       : pullRequest.state === "closed"
         ? "close-unmerged"
-        : undefined;
-    if (!event) continue;
+        : "publish";
+    const expected = event === "publish" ? "reviewing" : "result-ready";
     const transitionResult = await store.transition({
       issueNumber: issue.number,
-      expected: "result-ready",
+      expected,
       event,
-      metadata: {
-        pull_request_number: String(number),
-        pull_request_url: metadata.pull_request_url,
-      },
+      metadata: event === "publish"
+        ? metadata
+        : {
+          pull_request_number: String(number),
+          pull_request_url: metadata.pull_request_url,
+        },
     });
-    if (transitionResult.current !== (event === "merge" ? "delivered" : "needs-decision")) {
+    if (
+      transitionResult.current !== (
+        event === "merge" ? "delivered" : event === "close-unmerged" ? "needs-decision" : "result-ready"
+      )
+    ) {
       throw new DomainError("RUN_OUTCOME_CONFLICT", `publication reconciliation:${String(issue.number)}`);
     }
+    if (event === "publish") replays.push({ issueNumber: issue.number, metadata });
   }
+  return Object.freeze(replays);
 }
 
 const systemClock: Clock = { now: () => new Date() };
@@ -412,7 +574,7 @@ export async function runActionCommand(
       throw new DomainError("INVALID_WORKFLOW_REF", context.callerWorkflowRef);
     }
     const issue = await store.loadIssueState(issueNumber);
-    if (issue.state !== "reviewing") {
+    if (issue.state !== "reviewing" && issue.state !== "result-ready") {
       throw new DomainError("RUN_OUTCOME_CONFLICT", `publish:${issue.state}`);
     }
     if (!(await store.ownsRun(issueNumber, context.runId))) {
@@ -485,6 +647,32 @@ export async function runActionCommand(
         metadata: { reason: "publication-context" },
       });
       throw new DomainError("PUBLICATION_CONTEXT_MISMATCH", envelope.contract.work_id);
+    }
+    const recoveredMetadata = await recoverPublicationFromPullRequest(
+      octokit,
+      inputs.owner,
+      inputs.repo,
+      publicationContext,
+      inputs.artifactSha256,
+    );
+    if (recoveredMetadata !== undefined) {
+      const recoveredPublication = publicationOutcomeFromMetadata(recoveredMetadata);
+      if (recoveredPublication === undefined) {
+        throw new DomainError("RUN_OUTCOME_CONFLICT", "publication recovery outcome");
+      }
+      const recoveredTransition = await store.transition({
+        issueNumber,
+        expected: "reviewing",
+        event: "publish",
+        metadata: recoveredMetadata,
+      });
+      if (recoveredTransition.current !== "result-ready") {
+        throw new DomainError("RUN_OUTCOME_CONFLICT", "publication recovery transition");
+      }
+      return { command: "publish", publication: recoveredPublication };
+    }
+    if (issue.state !== "reviewing") {
+      throw new DomainError("RUN_OUTCOME_CONFLICT", `publish:${issue.state}`);
     }
     const publication = await publishReviewedCandidate(
       {
