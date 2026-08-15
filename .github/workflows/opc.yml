@@ -1,0 +1,27 @@
+name: OPC Unattended Delivery
+on:
+  issues:
+    types: [labeled]
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        required: true
+        type: string
+      issue_number:
+        required: false
+        type: string
+
+jobs:
+  opc:
+    if: vars.OPC_ENABLED == 'true'
+    permissions:
+      contents: write
+      issues: write
+      actions: write
+      pull-requests: write
+    uses: "devos-ing/opc-it/.github/workflows/reusable-opc.yml@0ccbaa4ce80bedd7045ec3c9acaaf11f4383b2ce"
+    with:
+      event_name: ${{ github.event_name }}
+      issue_number: ${{ inputs.issue_number || github.event.issue.number || '' }}

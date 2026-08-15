@@ -1,0 +1,16 @@
+name: OPC approved milestone
+description: Queue one immutable owner-approved milestone
+title: "[OPC] "
+labels: ["opc:needs-approval", "opc:attempt-1"]
+body:
+  - type: markdown
+    attributes:
+      value: "This Issue is a queue record. Labels are not approval; only an unedited `/opc approve sha256:...` comment by an allowlisted owner is approval."
+  - type: textarea
+    id: contract
+    attributes:
+      label: OPC Contract
+      description: Paste exactly one machine-generated contract block.
+      render: yaml opc-contract
+    validations:
+      required: true
