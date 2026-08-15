@@ -44,6 +44,13 @@ class RecordingRuntime implements InstallerRuntime {
     if (signature === "bun --version") return Promise.resolve(pass("1.3.8\n"));
     if (signature === "git --version") return Promise.resolve(pass("git version 2.51.0\n"));
     if (signature === "gh --version") return Promise.resolve(pass("gh version 2.92.0\n"));
+    if (signature.startsWith("bun dist/cli.js onboard-preview ")) {
+      return Promise.resolve(pass(JSON.stringify([
+        ".codex-pipeline.yml",
+        ".github/ISSUE_TEMPLATE/opc-work.yml",
+        ".github/workflows/opc.yml",
+      ])));
+    }
     return Promise.resolve(pass());
   }
 }
@@ -98,6 +105,17 @@ test("prepares a disabled sandbox from the pushed control repository", async () 
     controlRef: controlSha,
     output: ".opc/dev-install/devos-ing-opc-delivery-sandbox",
     enabled: false,
+    generatedFiles: [
+      ".opc/dev-install/devos-ing-opc-delivery-sandbox/.codex-pipeline.yml",
+      ".opc/dev-install/devos-ing-opc-delivery-sandbox/.github/ISSUE_TEMPLATE/opc-work.yml",
+      ".opc/dev-install/devos-ing-opc-delivery-sandbox/.github/workflows/opc.yml",
+    ],
+    nextSteps: [
+      "Review and copy the generated files into devos-ing/opc-delivery-sandbox.",
+      "Register and validate the dedicated macOS runner.",
+      "Commit the target policy with enabled: true when ready.",
+      "Set OPC_ENABLED=true explicitly only after review and runner validation.",
+    ],
   });
 
   const disableIndex = runtime.calls.findIndex(
@@ -291,6 +309,31 @@ test("keeps the sandbox disabled when rendering fails", async () => {
       ([command, args]) => command === "gh" && args.includes("true"),
     ),
   ).toBe(false);
+});
+
+test("rejects incomplete renderer output after leaving the sandbox disabled", async () => {
+  const runtime = new RecordingRuntime((command, args) =>
+    command === "bun" && args[0] === "dist/cli.js" ? pass("[]") : undefined,
+  );
+
+  const error = await installDevSandbox(
+    {
+      repository: "devos-ing/opc-delivery-sandbox",
+      approver: "0xroylee",
+      output: ".opc/dev-install/devos-ing-opc-delivery-sandbox",
+    },
+    runtime,
+  ).catch((caught: unknown) => caught);
+
+  expect(error).toMatchObject({ message: "DEV_INSTALL_RENDER_FAILED" });
+  expect(
+    runtime.calls.some(
+      ([command, args]) =>
+        command === "gh" &&
+        args.join(" ") ===
+          "variable set OPC_ENABLED --body false --repo devos-ing/opc-delivery-sandbox",
+    ),
+  ).toBe(true);
 });
 
 test("reruns deterministically without ever enabling the sandbox", async () => {

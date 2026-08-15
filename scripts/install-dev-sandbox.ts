@@ -3,7 +3,7 @@ import {
   parseGitHubRemote,
   parseGitHubRepository,
 } from "../src/domain/github-repository.js";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { execa } from "execa";
 
 export interface CommandResult {
@@ -29,7 +29,15 @@ export interface InstalledDevSandbox {
   readonly controlRef: string;
   readonly output: string;
   readonly enabled: false;
+  readonly generatedFiles: readonly string[];
+  readonly nextSteps: readonly string[];
 }
+
+const expectedGeneratedFiles = [
+  ".codex-pipeline.yml",
+  ".github/ISSUE_TEMPLATE/opc-work.yml",
+  ".github/workflows/opc.yml",
+] as const;
 
 const installOptions = new Set([
   "--repository",
@@ -217,7 +225,7 @@ export async function installDevSandbox(
     ["variable", "set", "OPC_ENABLED", "--body", "false", "--repo", input.repository],
     "DEV_INSTALL_DISABLE_FAILED",
   );
-  await runRequired(
+  const rendered = await runRequired(
     runtime,
     "bun",
     [
@@ -232,17 +240,39 @@ export async function installDevSandbox(
       "--approver",
       input.approver,
       "--output",
-      input.output,
+      outputFromRoot,
     ],
     "DEV_INSTALL_RENDER_FAILED",
   );
+  let renderedFiles: unknown;
+  try {
+    renderedFiles = JSON.parse(rendered.stdout);
+  } catch {
+    throw new Error("DEV_INSTALL_RENDER_FAILED");
+  }
+  if (
+    !Array.isArray(renderedFiles) ||
+    renderedFiles.length !== expectedGeneratedFiles.length ||
+    renderedFiles.some((file, index) => file !== expectedGeneratedFiles[index])
+  ) {
+    throw new Error("DEV_INSTALL_RENDER_FAILED");
+  }
 
   return Object.freeze({
     repository: input.repository,
     controlRepository: controlRepository.fullName,
     controlRef,
-    output: input.output,
+    output: outputFromRoot,
     enabled: false,
+    generatedFiles: Object.freeze(
+      expectedGeneratedFiles.map((file) => join(outputFromRoot, file)),
+    ),
+    nextSteps: Object.freeze([
+      `Review and copy the generated files into ${input.repository}.`,
+      "Register and validate the dedicated macOS runner.",
+      "Commit the target policy with enabled: true when ready.",
+      "Set OPC_ENABLED=true explicitly only after review and runner validation.",
+    ]),
   });
 }
 
