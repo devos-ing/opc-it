@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "dev:install": "bun run scripts/install-dev-sandbox.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "bun test",

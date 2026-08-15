@@ -9,6 +9,13 @@ export interface GitHubRepositoryIdentity {
 const ownerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
 const repositoryPattern = /^[A-Za-z0-9_.-]{1,100}$/u;
 
+export function assertGitHubLogin(value: string): string {
+  if (!ownerPattern.test(value) || value.includes("--")) {
+    throw new DomainError("INVALID_GITHUB_LOGIN", value);
+  }
+  return value;
+}
+
 export function parseGitHubRepository(value: string): GitHubRepositoryIdentity {
   const [owner, repo, extra] = value.split("/");
   if (

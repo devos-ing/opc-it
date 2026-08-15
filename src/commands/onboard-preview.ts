@@ -5,7 +5,10 @@ import { parseDocument } from "yaml";
 import { interactiveGitHubToken } from "../adapters/github/auth.js";
 import { createGitHubClient } from "../adapters/github/client.js";
 import { DomainError } from "../domain/errors.js";
-import { parseGitHubRepository } from "../domain/github-repository.js";
+import {
+  assertGitHubLogin,
+  parseGitHubRepository,
+} from "../domain/github-repository.js";
 
 export interface PreviewInput {
   readonly repository: string;
@@ -53,15 +56,6 @@ function repositoryParts(repository: string): readonly [string, string] {
   }
   assertGitHubLogin(owner);
   return [owner, repo];
-}
-
-function assertGitHubLogin(login: string): void {
-  if (
-    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(login) ||
-    login.includes("--")
-  ) {
-    throw new DomainError("INVALID_GITHUB_LOGIN", login);
-  }
 }
 
 function assertContainedOutput(cwd: string, output: string): void {
