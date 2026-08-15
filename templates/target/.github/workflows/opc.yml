@@ -21,7 +21,7 @@ jobs:
       issues: write
       actions: write
       pull-requests: write
-    uses: "{{control_owner}}/OPC/.github/workflows/reusable-opc.yml@{{control_workflow_sha}}"
+    uses: "{{control_repository}}/.github/workflows/reusable-opc.yml@{{control_workflow_sha}}"
     with:
       event_name: ${{ github.event_name }}
       issue_number: ${{ inputs.issue_number || github.event.issue.number || '' }}

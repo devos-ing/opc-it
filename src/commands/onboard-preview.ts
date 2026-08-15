@@ -5,10 +5,11 @@ import { parseDocument } from "yaml";
 import { interactiveGitHubToken } from "../adapters/github/auth.js";
 import { createGitHubClient } from "../adapters/github/client.js";
 import { DomainError } from "../domain/errors.js";
+import { parseGitHubRepository } from "../domain/github-repository.js";
 
 export interface PreviewInput {
   readonly repository: string;
-  readonly controlOwner: string;
+  readonly controlRepository: string;
   readonly controlRef: string;
   readonly approver: string;
   readonly output: string;
@@ -73,7 +74,7 @@ function assertContainedOutput(cwd: string, output: string): void {
 
 function validatePreviewInput(input: PreviewInput): void {
   repositoryParts(input.repository);
-  assertGitHubLogin(input.controlOwner);
+  parseGitHubRepository(input.controlRepository);
   assertGitHubLogin(input.approver);
   if (!/^[0-9a-f]{40}$/.test(input.controlRef)) {
     throw new DomainError("UNPINNED_CONTROL_REF", input.controlRef);
@@ -89,7 +90,7 @@ async function renderM2Templates(
     targetTemplatePaths.map(async (path) => {
       const source = await files.readTemplate(path);
       const content = source
-        .replaceAll("{{control_owner}}", input.controlOwner)
+        .replaceAll("{{control_repository}}", input.controlRepository)
         .replaceAll("{{control_workflow_sha}}", input.controlRef)
         .replaceAll("{{approver_login}}", input.approver);
       if (/{{[a-z_]+}}/.test(content)) {
@@ -112,11 +113,12 @@ export async function onboardPreview(
   ports: { readonly files: TemplateFiles; readonly repositories: RepositoryReader },
 ): Promise<readonly string[]> {
   validatePreviewInput(input);
+  const controlRepository = parseGitHubRepository(input.controlRepository);
   const repository = await ports.repositories.get(input.repository);
   if (
     !repository.private ||
     repository.fork ||
-    repository.owner !== input.controlOwner
+    repository.owner !== controlRepository.owner
   ) {
     throw new DomainError("UNTRUSTED_REPOSITORY", input.repository);
   }
@@ -201,7 +203,7 @@ function requiredOption(args: readonly string[], name: string): string {
 function parsePreviewArgs(args: readonly string[]): PreviewInput {
   return {
     repository: requiredOption(args, "--repository"),
-    controlOwner: requiredOption(args, "--control-owner"),
+    controlRepository: requiredOption(args, "--control-repository"),
     controlRef: requiredOption(args, "--control-ref"),
     approver: requiredOption(args, "--approver"),
     output: requiredOption(args, "--output"),
