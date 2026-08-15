@@ -85,6 +85,56 @@ test("parses the one-command installer interface with a contained default output
   ]) {
     expect(() => parseInstallDevSandboxArgs(args)).toThrow("DEV_INSTALL_INPUT_FAILED");
   }
+
+  expect(
+    parseInstallDevSandboxArgs([
+      "--repository",
+      "devos-ing/opc-it",
+      "--approver",
+      "0xroylee",
+      "--allow-public",
+    ]),
+  ).toEqual({
+    repository: "devos-ing/opc-it",
+    approver: "0xroylee",
+    output: ".opc/dev-install/devos-ing-opc-it",
+    allowPublic: true,
+  });
+});
+
+test("allows a public same-owner non-fork target only with explicit opt-in", async () => {
+  const runtime = new RecordingRuntime((command, args) =>
+    command === "gh" && args[0] === "repo"
+      ? pass(JSON.stringify({
+          nameWithOwner: "devos-ing/opc-it",
+          visibility: "PUBLIC",
+          isFork: false,
+          owner: { login: "devos-ing" },
+        }))
+      : undefined,
+  );
+
+  const result = await installDevSandbox(
+    {
+      repository: "devos-ing/opc-it",
+      approver: "0xroylee",
+      output: ".opc/dev-install/devos-ing-opc-it",
+      allowPublic: true,
+    },
+    runtime,
+  );
+
+  expect(result.repository).toBe("devos-ing/opc-it");
+  expect(result.enabled).toBe(false);
+  expect(runtime.calls).toContainEqual([
+    "gh",
+    ["variable", "set", "OPC_ENABLED", "--body", "false", "--repo", "devos-ing/opc-it"],
+  ]);
+  expect(
+    runtime.calls.find(
+      ([command, args]) => command === "bun" && args[0] === "dist/cli.js",
+    )?.[1],
+  ).toContain("--allow-public");
 });
 
 test("prepares a disabled sandbox from the pushed control repository", async () => {

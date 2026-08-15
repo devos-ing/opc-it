@@ -16,6 +16,7 @@ export interface PreviewInput {
   readonly controlRef: string;
   readonly approver: string;
   readonly output: string;
+  readonly allowPublic?: true;
 }
 
 export interface TemplateFiles {
@@ -110,7 +111,7 @@ export async function onboardPreview(
   const controlRepository = parseGitHubRepository(input.controlRepository);
   const repository = await ports.repositories.get(input.repository);
   if (
-    !repository.private ||
+    (!repository.private && input.allowPublic !== true) ||
     repository.fork ||
     repository.owner !== controlRepository.owner
   ) {
@@ -201,6 +202,7 @@ function parsePreviewArgs(args: readonly string[]): PreviewInput {
     controlRef: requiredOption(args, "--control-ref"),
     approver: requiredOption(args, "--approver"),
     output: requiredOption(args, "--output"),
+    ...(args.includes("--allow-public") ? { allowPublic: true as const } : {}),
   };
 }
 

@@ -8,11 +8,12 @@
 
 ```bash
 bun run dev:install -- \
-  --repository devos-ing/opc-delivery-sandbox \
-  --approver 0xroylee
+  --repository devos-ing/opc-it \
+  --approver 0xroylee \
+  --allow-public
 ```
 
-该命令从 `origin` 推导完整 Control Repository 与当前 immutable SHA，执行 install/build/typecheck/lint，将 Target Repository 的 `OPC_ENABLED` 写为 `false`，并把三份待审查文件写入 `.opc/dev-install/devos-ing-opc-delivery-sandbox/`。它不会复制或提交 Target 文件、注册 runner、启用 OPC、创建 Work Issue、push 或创建 Pull Request。完成后仍必须执行本 runbook 的 runner 检查、人工提交 Target 配置与显式 enable gate。
+该命令从 `origin` 推导完整 Control Repository 与当前 immutable SHA，执行 install/build/typecheck/lint，将 Target Repository 的 `OPC_ENABLED` 写为 `false`，并把三份待审查文件写入 `.opc/dev-install/devos-ing-opc-it/`。`--allow-public` 是公开 Target 的显式 opt-in；省略时仍要求 private。它不会复制或提交 Target 文件、注册 runner、启用 OPC、创建 Work Issue、push 或创建 Pull Request。这个公开仓库快捷方式只生成开发测试 bundle，不满足下文的 M3 private 验收；若要执行 M3 矩阵，仍须使用符合下文条件的独立 private sandbox。
 
 ## 固定版本与停止条件
 

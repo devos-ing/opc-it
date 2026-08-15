@@ -5,7 +5,7 @@ Status: Approved design
 
 ## Goal
 
-Provide one development-only command that prepares OPC and renders a safe installation bundle for a private test repository. The installer must leave execution disabled and must work when the control repository has a name other than `OPC`, including `devos-ing/opc-it`.
+Provide one development-only command that prepares OPC and renders a safe installation bundle for a test repository. The installer must leave execution disabled and must work when the control repository has a name other than `OPC`, including `devos-ing/opc-it`.
 
 ## Command
 
@@ -21,6 +21,7 @@ Optional arguments:
 
 - `--output <path>` overrides the contained default `.opc/dev-install/<owner>-<repo>`.
 - `--control-ref <40-hex-sha>` overrides the default current `HEAD`.
+- `--allow-public` explicitly permits a public target; without it, the target must be private.
 
 The script derives the control repository from the `origin` Git remote. It never accepts a branch or tag where an immutable commit SHA is required.
 
@@ -33,7 +34,7 @@ The installer performs the following steps in order:
 3. Resolve the immutable control commit, and prove that exact commit is present on `origin`.
 4. Run `bun install --frozen-lockfile`, `bun run build`, `bun run typecheck`, and `bun run lint`.
 5. Refuse to continue if those commands modify tracked control-repository files.
-6. Validate the target repository through the existing onboarding boundary: private, non-fork, and owned by the same owner as the control repository.
+6. Validate the target repository through the existing onboarding boundary: private by default (or public only with `--allow-public`), non-fork, and owned by the same owner as the control repository.
 7. Set the target repository Actions variable `OPC_ENABLED=false` before rendering any installation files.
 8. Render the target workflow, Issue template, and policy under the contained output directory.
 9. Print the exact generated paths and manual next steps.
@@ -47,7 +48,7 @@ Current rendering assumes the control repository is named `OPC`. The implementat
 - `scripts/render-control.ts` derives and validates the full repository identity from `origin` and renders Action references using it.
 - `onboard-preview` accepts `--control-repository owner/repository` instead of reconstructing `<owner>/OPC`.
 - `templates/control/reusable-opc.yml` and `templates/target/.github/workflows/opc.yml` render a full control-repository token.
-- Owner trust remains unchanged: the private target must have the same owner as the control repository.
+- Owner trust remains unchanged: every target, regardless of visibility, must have the same owner as the control repository.
 
 Repository and owner components use closed GitHub-name validation. Remote parsing supports the existing SSH and HTTPS GitHub URL forms and rejects other hosts.
 
@@ -94,10 +95,10 @@ The installer does not:
 
 ## Acceptance Criteria
 
-1. A clean, pushed `devos-ing/opc-it` checkout can render a private same-owner sandbox with one documented command.
+1. A clean, pushed `devos-ing/opc-it` checkout can render a same-owner sandbox with one documented command; a public target requires explicit `--allow-public`.
 2. Generated reusable-workflow and Action references use `devos-ing/opc-it` and immutable 40-hex commits, never `0xroylee/OPC` or a branch/tag.
 3. Once the kill-switch write succeeds, every later success or failure leaves `OPC_ENABLED=false`; a failed kill-switch write stops before rendering.
-4. Public, forked, foreign-owner, dirty, unauthenticated, unpushed-SHA, or out-of-repository output inputs fail closed.
+4. Public targets without explicit `--allow-public`, forked, foreign-owner, dirty, unauthenticated, unpushed-SHA, or out-of-repository output inputs fail closed.
 5. Tests use injected process/GitHub seams; they make no real repository changes.
 6. Typecheck, lint, installer-focused tests, onboarding/rendering contracts, build, and `git diff --check` pass.
 

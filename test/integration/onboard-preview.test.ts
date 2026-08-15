@@ -81,6 +81,27 @@ it("renders three mode-0600 templates under the contained output", async () => {
   );
 });
 
+it("renders a public same-owner target only with explicit opt-in", async () => {
+  const files = new MemoryTemplateFiles();
+  expect(
+    await onboardPreview(
+      { ...validInput, allowPublic: true },
+      {
+        files,
+        repositories: repositoryReader({
+          private: false,
+          fork: false,
+          owner: "devos-ing",
+        }),
+      },
+    ),
+  ).toEqual([
+    ".codex-pipeline.yml",
+    ".github/ISSUE_TEMPLATE/opc-work.yml",
+    ".github/workflows/opc.yml",
+  ]);
+});
+
 it.each([
   [{ ...validInput, controlRef: "main" }, { private: true, fork: false, owner: "devos-ing" }, "UNPINNED_CONTROL_REF"],
   [{ ...validInput, output: "../escape" }, { private: true, fork: false, owner: "devos-ing" }, "OUTPUT_OUTSIDE_REPOSITORY"],

@@ -21,6 +21,7 @@ export interface InstallDevSandboxInput {
   readonly approver: string;
   readonly output: string;
   readonly controlRef?: string;
+  readonly allowPublic?: true;
 }
 
 export interface InstalledDevSandbox {
@@ -39,7 +40,7 @@ const expectedGeneratedFiles = [
   ".github/workflows/opc.yml",
 ] as const;
 
-const installOptions = new Set([
+const installValueOptions = new Set([
   "--repository",
   "--approver",
   "--output",
@@ -50,12 +51,19 @@ export function parseInstallDevSandboxArgs(
   args: readonly string[],
 ): InstallDevSandboxInput {
   const values = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 2) {
+  let allowPublic = false;
+  for (let index = 0; index < args.length;) {
     const name = args[index];
+    if (name === "--allow-public") {
+      if (allowPublic) throw new Error("DEV_INSTALL_INPUT_FAILED");
+      allowPublic = true;
+      index += 1;
+      continue;
+    }
     const value = args[index + 1];
     if (
       !name ||
-      !installOptions.has(name) ||
+      !installValueOptions.has(name) ||
       values.has(name) ||
       !value ||
       value.startsWith("--")
@@ -63,6 +71,7 @@ export function parseInstallDevSandboxArgs(
       throw new Error("DEV_INSTALL_INPUT_FAILED");
     }
     values.set(name, value);
+    index += 2;
   }
 
   const repositoryValue = values.get("--repository");
@@ -89,6 +98,7 @@ export function parseInstallDevSandboxArgs(
     approver,
     output,
     ...(controlRef === undefined ? {} : { controlRef }),
+    ...(allowPublic ? { allowPublic: true as const } : {}),
   });
 }
 
@@ -212,7 +222,8 @@ export async function installDevSandbox(
   }
   if (
     targetRecord.nameWithOwner !== targetIdentity.fullName ||
-    targetRecord.visibility !== "PRIVATE" ||
+    (targetRecord.visibility !== "PRIVATE" &&
+      !(input.allowPublic === true && targetRecord.visibility === "PUBLIC")) ||
     targetRecord.isFork !== false ||
     targetRecord.owner?.login !== controlRepository.owner
   ) {
@@ -241,6 +252,7 @@ export async function installDevSandbox(
       input.approver,
       "--output",
       outputFromRoot,
+      ...(input.allowPublic === true ? ["--allow-public"] : []),
     ],
     "DEV_INSTALL_RENDER_FAILED",
   );
