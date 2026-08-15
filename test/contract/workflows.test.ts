@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
 import { trustedFailureStepNames } from "../../src/adapters/github/run-outcome.js";
 
+const controlRepository = "devos-ing/opc-it";
+
 function record(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`EXPECTED_RECORD: ${name}`);
@@ -33,7 +35,7 @@ function assertTargetCallerPermissions(workflow: Record<string, unknown>): void 
 }
 
 function pinnedControlActionSha(source: string): string {
-  const refs = [...source.matchAll(/uses:\s*["']0xroylee\/OPC@([0-9a-f]{40})["']/g)].map(
+  const refs = [...source.matchAll(/uses:\s*["']devos-ing\/opc-it@([0-9a-f]{40})["']/g)].map(
     (match) => match[1] ?? "",
   );
   expect(refs.length).toBeGreaterThan(0);
@@ -44,7 +46,7 @@ function pinnedControlActionSha(source: string): string {
 it("keeps the Target caller thin, serialized, and immutably pinned", async () => {
   const template = await readFile("templates/target/.github/workflows/opc.yml", "utf8");
   const source = template
-    .replaceAll("{{control_owner}}", "0xroylee")
+    .replaceAll("{{control_repository}}", controlRepository)
     .replaceAll("{{control_workflow_sha}}", "1".repeat(40));
   const workflow = parseStrictWorkflow(source, "target opc.yml");
   const events = record(workflow.on, "on");
@@ -52,7 +54,7 @@ it("keeps the Target caller thin, serialized, and immutably pinned", async () =>
   expect(Object.keys(events).sort()).toEqual(["issues", "schedule", "workflow_dispatch"]);
   expect(events).not.toHaveProperty("pull_request");
   expect(events).not.toHaveProperty("pull_request_target");
-  expect(source).toMatch(/uses: "0xroylee\/OPC\/.github\/workflows\/reusable-opc\.yml@1{40}"/);
+  expect(source).toMatch(/uses: "devos-ing\/opc-it\/.github\/workflows\/reusable-opc\.yml@1{40}"/);
   expect(workflow).not.toHaveProperty("concurrency");
   expect(source).not.toContain("write-all");
   expect(source).not.toMatch(/{{[a-z_]+}}/);
@@ -69,7 +71,7 @@ it("keeps the canonical control template byte-for-byte aligned with the workflow
 
   expect(
     template
-      .replaceAll("{{control_owner}}", "0xroylee")
+      .replaceAll("{{control_repository}}", controlRepository)
       .replaceAll("{{control_action_sha}}", actionSha),
   ).toBe(source);
 });
@@ -91,7 +93,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
   expect(Object.keys(events)).toEqual(["workflow_call"]);
   expect(dispatchAndClaim["runs-on"]).toBe("ubuntu-latest");
   const actionSha = pinnedControlActionSha(source);
-  expect(source).toContain(`uses: "0xroylee/OPC@${actionSha}"`);
+  expect(source).toContain(`uses: "${controlRepository}@${actionSha}"`);
   expect(
     execFileSync("git", ["show", `${actionSha}:dist/action/index.cjs`], {
       encoding: "utf8",
@@ -135,7 +137,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     (publish.steps as Record<string, unknown>[]).at(-1),
     "publish step",
   );
-  expect(publishStep.uses).toBe(`0xroylee/OPC@${actionSha}`);
+  expect(publishStep.uses).toBe(`${controlRepository}@${actionSha}`);
   expect(record(dispatchAndClaim.concurrency, "dispatch concurrency")).toEqual({
     group: "opc-control-${{ github.repository }}",
     "cancel-in-progress": false,
@@ -170,7 +172,7 @@ it("keeps the reusable control workflow permission-separated and Action-pinned",
     concludeSteps.find((step) => step.name === "Persist verified result or bounded Recovery"),
     "conclude step",
   );
-  expect(concludeStep.uses).toBe(`0xroylee/OPC@${actionSha}`);
+  expect(concludeStep.uses).toBe(`${controlRepository}@${actionSha}`);
   expect(record(concludeStep.with, "conclude.with")).toMatchObject({
     command: "complete-run",
     "payload-b64": "${{ needs.dispatch-and-claim.outputs.envelope_b64 }}",
@@ -185,5 +187,5 @@ it("uses one immutable control Action SHA for every stateful command", async () 
   const source = await readFile(".github/workflows/reusable-opc.yml", "utf8");
   const actionSha = pinnedControlActionSha(source);
   expect(source).not.toContain("uses: ./.opc-control");
-  expect(source).toContain(`uses: "0xroylee/OPC@${actionSha}"`);
+  expect(source).toContain(`uses: "${controlRepository}@${actionSha}"`);
 });
