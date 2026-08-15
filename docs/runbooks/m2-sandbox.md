@@ -43,7 +43,7 @@ rtk git status --short
 rtk bun run build
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m2-sandbox \
-  --control-owner 0xroylee \
+  --control-repository 0xroylee/OPC \
   --control-ref 796deffdc81a4212a630badea8a42d16630f1e84 \
   --approver 0xroylee \
   --output .opc/m2-sandbox-preview

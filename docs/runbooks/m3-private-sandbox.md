@@ -2,6 +2,18 @@
 
 本流程证明已批准 Work 能在专用 Mac mini 上执行并得到独立 review，同时保持 Target Repository `contents: read`。M3 到 verified Candidate Result 为止；publisher、commit、branch、Pull Request 与自动 merge 全部禁用。
 
+## 当前开发安装快捷方式
+
+从一个 clean、已推送的 `devos-ing/opc-it` checkout 执行：
+
+```bash
+bun run dev:install -- \
+  --repository devos-ing/opc-delivery-sandbox \
+  --approver 0xroylee
+```
+
+该命令从 `origin` 推导完整 Control Repository 与当前 immutable SHA，执行 install/build/typecheck/lint，将 Target Repository 的 `OPC_ENABLED` 写为 `false`，并把三份待审查文件写入 `.opc/dev-install/devos-ing-opc-delivery-sandbox/`。它不会复制或提交 Target 文件、注册 runner、启用 OPC、创建 Work Issue、push 或创建 Pull Request。完成后仍必须执行本 runbook 的 runner 检查、人工提交 Target 配置与显式 enable gate。
+
 ## 固定版本与停止条件
 
 - Control Repository：`0xroylee/OPC`（private）
@@ -51,7 +63,7 @@ rtk gh api repos/0xroylee/opc-m3-sandbox/actions/runners
 rtk gh variable set OPC_ENABLED --body false --repo 0xroylee/opc-m3-sandbox
 rtk bun dist/cli.js onboard-preview \
   --repository 0xroylee/opc-m3-sandbox \
-  --control-owner 0xroylee \
+  --control-repository 0xroylee/OPC \
   --control-ref 3bed70bfaacae34919fee03d6787043deb69d2c5 \
   --approver 0xroylee \
   --output .opc/m3-sandbox-preview
