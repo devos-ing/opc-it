@@ -429,7 +429,7 @@ export async function readDaemonConfig(pathValue: string): Promise<DaemonConfig>
   }
   const config = decodeDaemonConfig(await readFile(path, "utf8"));
   requireDaemonConfigCurrentUid(config, uid);
-  if (config.install.manifest.paths.config !== path) {
+  if (config.install.manifest.paths.daemonConfig !== path) {
     throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
   }
   return config;
@@ -441,7 +441,7 @@ export async function writeDaemonConfig(
 ): Promise<DaemonConfig> {
   const uid = currentUid();
   requireDaemonConfigCurrentUid(config, uid);
-  const path = requireDaemonConfigPath(config.install.manifest.paths.config);
+  const path = requireDaemonConfigPath(config.install.manifest.paths.daemonConfig);
   const next = enabled
     ? "activation" in config
       ? createEnabledDaemonConfig(config.activation)

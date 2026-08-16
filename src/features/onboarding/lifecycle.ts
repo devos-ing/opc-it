@@ -23,13 +23,15 @@ export interface LaunchAgentInstallManifest {
   readonly paths: {
     readonly launchAgent: string;
     readonly program: string;
-    readonly config: string;
+    readonly daemonConfig: string;
+    readonly schedulerConfig: string;
     readonly stdout: string;
     readonly stderr: string;
   };
-  readonly programArguments: readonly [string, "daemon", "--config", string];
+  readonly programArguments: readonly [string, "tick", "--config", string];
   readonly runAtLoad: true;
-  readonly keepAlive: { readonly successfulExit: false };
+  readonly startIntervalSeconds: 900;
+  readonly keepAlive: false;
   readonly enabled: false;
 }
 
@@ -163,7 +165,8 @@ function expectedInstallManifest(
 ): LaunchAgentInstallManifest {
   const currentHome = currentHomeFromOnboarding(onboarding);
   const program = `${onboarding.manifest.paths.applicationSupport}/dist/cli.js`;
-  const config = `${onboarding.manifest.paths.applicationSupport}/config.json`;
+  const daemonConfig = `${onboarding.manifest.paths.applicationSupport}/config.json`;
+  const schedulerConfig = onboarding.manifest.paths.schedulerConfig;
   return {
     version: 1,
     operation: "install",
@@ -175,13 +178,15 @@ function expectedInstallManifest(
     paths: {
       launchAgent: onboarding.manifest.paths.launchAgent,
       program,
-      config,
+      daemonConfig,
+      schedulerConfig,
       stdout: `${onboarding.manifest.paths.logs}/daemon.stdout.log`,
       stderr: `${onboarding.manifest.paths.logs}/daemon.stderr.log`,
     },
-    programArguments: [program, "daemon", "--config", config],
+    programArguments: [program, "tick", "--config", schedulerConfig],
     runAtLoad: true,
-    keepAlive: { successfulExit: false },
+    startIntervalSeconds: 900,
+    keepAlive: false,
     enabled: false,
   };
 }
@@ -222,6 +227,7 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
       "paths",
       "programArguments",
       "runAtLoad",
+      "startIntervalSeconds",
       "keepAlive",
       "enabled",
     ],
@@ -229,12 +235,7 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
   );
   const paths = exactDataRecord(
     manifest.paths,
-    ["launchAgent", "program", "config", "stdout", "stderr"],
-    "INSTALL_DIGEST_NOT_APPROVED",
-  );
-  const keepAlive = exactDataRecord(
-    manifest.keepAlive,
-    ["successfulExit"],
+    ["launchAgent", "program", "daemonConfig", "schedulerConfig", "stdout", "stderr"],
     "INSTALL_DIGEST_NOT_APPROVED",
   );
   const argv = exactFrozenStringArray(
@@ -252,7 +253,6 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     !Object.isFrozen(value) ||
     !Object.isFrozen(preview.manifest) ||
     !Object.isFrozen(manifest.paths) ||
-    !Object.isFrozen(manifest.keepAlive) ||
     typeof preview.digest !== "string" ||
     !sha256Pattern.test(preview.digest) ||
     typeof approvedDigest !== "string" ||
@@ -270,7 +270,8 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     manifest.label !== launchAgentLabel ||
     !Object.values(paths).every((path) => typeof path === "string") ||
     manifest.runAtLoad !== true ||
-    keepAlive.successfulExit !== false ||
+    manifest.startIntervalSeconds !== 900 ||
+    manifest.keepAlive !== false ||
     manifest.enabled !== false
   ) {
     return fail("INSTALL_DIGEST_NOT_APPROVED");
@@ -291,9 +292,9 @@ export function requireInstallPreview(value: unknown, approvedDigest: unknown): 
     manifest.currentHome !== expected.currentHome ||
     Object.entries(expectedPaths).some(([key, path]) => paths[key] !== path) ||
     argv[0] !== expectedPaths.program ||
-    argv[1] !== "daemon" ||
+    argv[1] !== "tick" ||
     argv[2] !== "--config" ||
-    argv[3] !== expectedPaths.config ||
+    argv[3] !== expectedPaths.schedulerConfig ||
     Object.getOwnPropertyDescriptor(Object.prototype, "toJSON") !== undefined ||
     Object.getOwnPropertyDescriptor(Array.prototype, "toJSON") !== undefined ||
     digestCanonical(preview.manifest) !== preview.digest ||

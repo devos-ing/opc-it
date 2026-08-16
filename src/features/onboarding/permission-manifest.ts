@@ -33,6 +33,7 @@ export interface PermissionManifest {
     readonly logs: string;
     readonly launchAgent: string;
     readonly codexHome: string;
+    readonly schedulerConfig: string;
   };
   readonly networkDefault: "deny";
   readonly enabled: false;
@@ -226,7 +227,10 @@ export function previewOnboarding(input: OnboardingInput): OnboardingPreview {
     version: 1,
     githubLogin: snapshot.githubLogin.toLowerCase(),
     repositories,
-    paths: { ...snapshot.paths },
+    paths: {
+      ...snapshot.paths,
+      schedulerConfig: `${snapshot.paths.applicationSupport}/local-scheduler.json`,
+    },
     networkDefault: "deny",
     enabled: false,
   };
@@ -269,6 +273,7 @@ export function validateOnboardingPreview(value: unknown): OnboardingPreview {
       "codexHome",
       "launchAgent",
       "logs",
+      "schedulerConfig",
     ]) ||
     !Object.values(snapshot.manifest.paths).every((path) => typeof path === "string") ||
     snapshot.manifest.networkDefault !== "deny" ||

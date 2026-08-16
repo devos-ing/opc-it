@@ -26,6 +26,7 @@ function onboardingPreview(digit: string) {
         logs: "/Users/roy/Library/Logs/OPC",
         launchAgent: "/Users/roy/Library/LaunchAgents/com.getsuperpower.opc.plist",
         codexHome: "/Users/roy/Library/Application Support/OPC/codex",
+        schedulerConfig: "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
       },
       networkDefault: "deny",
       enabled: false,

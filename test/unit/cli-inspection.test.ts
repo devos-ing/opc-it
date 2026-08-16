@@ -89,6 +89,7 @@ async function fixture(): Promise<{
           logs,
           launchAgent: join(root, "Library/LaunchAgents/com.getsuperpower.opc.plist"),
           codexHome: join(root, "codex"),
+          schedulerConfig: join(support, "local-scheduler.json"),
         },
         networkDefault: "deny",
         enabled: false,

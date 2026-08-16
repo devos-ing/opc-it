@@ -13,6 +13,7 @@ import type { ProductionLocalDeliveryOptions } from "../../src/cli/production/lo
 import {
   runProductionTick,
   type ProductionTickDependencies,
+  type ProductionTickFileEntry,
 } from "../../src/cli/production/tick.js";
 import { validPolicy } from "../fixtures/contracts.js";
 
@@ -54,6 +55,7 @@ interface FixtureOptions {
   readonly primaryFailure?: Error;
   readonly journalCloseFailure?: Error;
   readonly lockCloseFailure?: Error;
+  readonly invalidLogEntry?: ProductionTickFileEntry;
 }
 
 function fixture(options: FixtureOptions = {}): {
@@ -63,6 +65,8 @@ function fixture(options: FixtureOptions = {}): {
   readonly deliveries: ProductionLocalDeliveryOptions[];
   readonly enabledRuntimeRepositoryCounts: number[];
   readonly gitCalls: readonly (readonly string[])[];
+  readonly logEntries: ReadonlyMap<string, { readonly contents: string; readonly mode: number }>;
+  readonly truncatedLogs: readonly string[];
 } {
   const config = daemonConfig();
   const opened: string[] = [];
@@ -70,6 +74,17 @@ function fixture(options: FixtureOptions = {}): {
   const deliveries: ProductionLocalDeliveryOptions[] = [];
   const enabledRuntimeRepositoryCounts: number[] = [];
   const gitCalls: string[][] = [];
+  const logEntries = new Map([
+    [
+      config.install.manifest.paths.stdout,
+      { contents: "old-stdout:" + "x".repeat(1_048_576), mode: 0o600 },
+    ],
+    [
+      config.install.manifest.paths.stderr,
+      { contents: "old-stderr:" + "y".repeat(1_048_576), mode: 0o600 },
+    ],
+  ]);
+  const truncatedLogs: string[] = [];
   let installation: Awaited<ReturnType<LocalJournal["loadInstallation"]>>;
   const journal: LocalJournal = {
     loadInstallation: () => Promise.resolve(installation),
@@ -100,9 +115,27 @@ function fixture(options: FixtureOptions = {}): {
       return Promise.resolve(config);
     },
     fileSystem: {
-      inspect: () => Promise.resolve({ kind: "directory", uid: 501, mode: 0o700 }),
+      inspect(path) {
+        if (
+          path === config.install.manifest.paths.stderr &&
+          options.invalidLogEntry !== undefined
+        ) return Promise.resolve(options.invalidLogEntry);
+        const log = logEntries.get(path);
+        return Promise.resolve(
+          log === undefined
+            ? { kind: "directory", uid: 501, mode: 0o700 }
+            : { kind: "file", uid: 501, mode: log.mode },
+        );
+      },
       realpath: (path) => Promise.resolve(path),
       readFile: () => Promise.reject(new Error("INJECTED_CONFIG_LOADER_EXPECTED")),
+      truncateFile(path) {
+        const current = logEntries.get(path);
+        if (current === undefined) throw new Error("UNEXPECTED_LOG_PATH");
+        truncatedLogs.push(path);
+        logEntries.set(path, { ...current, contents: "" });
+        return Promise.resolve();
+      },
     },
     resolveCommand: (command) => Promise.resolve(`/opt/homebrew/bin/${command}`),
     runGit(_command, args) {
@@ -180,8 +213,41 @@ function fixture(options: FixtureOptions = {}): {
     deliveries,
     enabledRuntimeRepositoryCounts,
     gitCalls,
+    logEntries,
+    truncatedLogs,
   };
 }
+
+test("truncates only the private launchd logs at the beginning of each tick", async () => {
+  const testFixture = fixture({ enabled: false });
+
+  await runProductionTick(configPath, testFixture.dependencies);
+
+  expect([...testFixture.logEntries.entries()]).toEqual([
+    [`${home}/Library/Logs/OPC/daemon.stdout.log`, { contents: "", mode: 0o600 }],
+    [`${home}/Library/Logs/OPC/daemon.stderr.log`, { contents: "", mode: 0o600 }],
+  ]);
+  expect(testFixture.truncatedLogs).toEqual([
+    `${home}/Library/Logs/OPC/daemon.stdout.log`,
+    `${home}/Library/Logs/OPC/daemon.stderr.log`,
+  ]);
+});
+
+test("rejects unsafe launchd logs before truncating either file", async () => {
+  for (const invalidLogEntry of [
+    { kind: "symlink" as const, uid: 501, mode: 0o600 },
+    { kind: "file" as const, uid: 502, mode: 0o600 },
+    { kind: "file" as const, uid: 501, mode: 0o644 },
+  ]) {
+    const testFixture = fixture({ enabled: false, invalidLogEntry });
+
+    expect(
+      await runProductionTick(configPath, testFixture.dependencies)
+        .catch((error: unknown) => error),
+    ).toMatchObject({ message: "INVALID_TICK_LOG_PATH" });
+    expect(testFixture.truncatedLogs).toEqual([]);
+  }
+});
 
 test("rejects a scheduler checkout whose repository root does not match the config", async () => {
   const testFixture = fixture({ root: `${home}/Documents/other` });

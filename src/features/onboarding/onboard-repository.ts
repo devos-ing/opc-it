@@ -112,7 +112,7 @@ function requireFrozenManifest(value: unknown): PermissionManifest {
   );
   const paths = exactDataRecord(
     manifest.paths,
-    ["binary", "applicationSupport", "logs", "launchAgent", "codexHome"],
+    ["binary", "applicationSupport", "logs", "launchAgent", "codexHome", "schedulerConfig"],
     approvalFailure,
   );
   const repositories = manifest.repositories;
@@ -195,7 +195,13 @@ function approvedPreview(input: unknown): OnboardingPreview {
         fork: false,
         owner: manifest.githubLogin,
       })),
-      paths: { ...manifest.paths },
+      paths: {
+        binary: manifest.paths.binary,
+        applicationSupport: manifest.paths.applicationSupport,
+        logs: manifest.paths.logs,
+        launchAgent: manifest.paths.launchAgent,
+        codexHome: manifest.paths.codexHome,
+      },
     });
     if (canonical.digest !== preview.digest) approvalFailure();
   } catch {

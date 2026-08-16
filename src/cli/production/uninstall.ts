@@ -127,7 +127,7 @@ function requireConfigAuthority(
   const config = validateDaemonConfig(configValue);
   if (
     config.onboarding.digest !== onboarding.digest ||
-    config.install.manifest.paths.config !== configPath ||
+    config.install.manifest.paths.daemonConfig !== configPath ||
     config.install.manifest.currentUid !== uid
   ) throw new Error("UNINSTALL_CONFIG_AUTHORITY_CHANGED");
   return configAuthority(config);

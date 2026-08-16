@@ -40,11 +40,12 @@ describe("onboarding permission preview", () => {
           logs: "/Users/roy/Library/Logs/OPC",
           launchAgent: "/Users/roy/Library/LaunchAgents/com.getsuperpower.opc.plist",
           codexHome: "/Users/roy/Library/Application Support/OPC/codex",
+          schedulerConfig: "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
         },
         networkDefault: "deny",
         enabled: false,
       },
-      digest: "sha256:f67e0078d5ea5cc8732a6d19b92a759d3977b64a6d76261e04fc237103cd919f",
+      digest: "sha256:15f843bdae4d94ec4c96dee84e7963bda11b69b1680fe58449ac482c2f3e1cdd",
     });
     expect(first).not.toBeInstanceOf(Promise);
     expect(Object.isFrozen(first)).toBe(true);

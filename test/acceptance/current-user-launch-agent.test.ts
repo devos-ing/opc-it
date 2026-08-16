@@ -326,6 +326,14 @@ describe("current-user LaunchAgent lifecycle", () => {
       onboarding: onboardingPreview(),
       currentUid: 501,
     });
+    expect(installPreview.manifest.programArguments).toEqual([
+      installPreview.manifest.paths.program,
+      "tick",
+      "--config",
+      installPreview.manifest.paths.schedulerConfig,
+    ]);
+    expect(installPreview.manifest.startIntervalSeconds).toBe(900);
+    expect(installPreview.manifest.keepAlive).toBe(false);
 
     const installed = await applyInstall(
       { preview: installPreview, approvedDigest: installPreview.digest },
@@ -341,11 +349,13 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect(launchAgent.snapshot().plist).toContain(
       `${currentHome}/Library/Application Support/OPC/dist/cli.js`,
     );
-    expect(launchAgent.snapshot().plist).toContain("<string>daemon</string>");
+    expect(launchAgent.snapshot().plist).toContain("<string>tick</string>");
     expect(launchAgent.snapshot().plist).toContain("<key>RunAtLoad</key>\n    <true/>");
     expect(launchAgent.snapshot().plist).toContain(
-      "<key>SuccessfulExit</key>\n      <false/>",
+      "<key>StartInterval</key>\n    <integer>900</integer>",
     );
+    expect(launchAgent.snapshot().plist).not.toContain("KeepAlive");
+    expect(launchAgent.snapshot().plist).not.toContain("SuccessfulExit");
     expect(launchAgent.snapshot().plist).toContain("<key>Umask</key>\n    <integer>63</integer>");
     expect(launchAgent.snapshot().plist).toContain("daemon.stdout.log");
     expect(launchAgent.snapshot().plist).toContain("daemon.stderr.log");
@@ -445,7 +455,7 @@ describe("current-user LaunchAgent lifecycle", () => {
     expect(fixture.commands).toEqual([]);
     expect([...fixture.entries.keys()].filter((entry) => entry.endsWith(".plist"))).toEqual([path]);
     expect(fixture.entries.get(path)).toMatchObject({ kind: "file", uid: 501, mode: 0o600 });
-    const configPath = installPreview.manifest.paths.config;
+    const configPath = installPreview.manifest.paths.daemonConfig;
     const disabledContents = fixture.entries.get(configPath)?.contents;
     if (disabledContents === undefined) throw new Error("missing disabled config");
     const disabledConfig = decodeDaemonConfig(disabledContents);
@@ -557,7 +567,7 @@ describe("current-user LaunchAgent lifecycle", () => {
 
   test("atomic write cleans exclusive temp files and preserves primary plus cleanup failures", async () => {
     const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
-    const temporary = `${install.manifest.paths.config}.${"09".repeat(16)}.tmp`;
+    const temporary = `${install.manifest.paths.daemonConfig}.${"09".repeat(16)}.tmp`;
 
     const renameFailure = fakeFileSystem();
     const renameFileSystem: LaunchAgentFileSystem = {
@@ -705,11 +715,9 @@ describe("current-user LaunchAgent lifecycle", () => {
     const mutatedManifest = {
       ...installPreview.manifest,
       paths: { ...installPreview.manifest.paths },
-      keepAlive: { ...installPreview.manifest.keepAlive },
       programArguments: ["/bin/sh", "-c", "id", "ignored"],
     } as unknown as LaunchAgentInstallManifest;
     Object.freeze(mutatedManifest.paths);
-    Object.freeze(mutatedManifest.keepAlive);
     Object.freeze(mutatedManifest.programArguments);
     Object.freeze(mutatedManifest);
     const mutatedPreview = {
@@ -771,7 +779,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       );
       expect(fixture.operations).toContain(`remove:${receiptPath}`);
       expect(fixture.entries.get(receiptPath)).toBeUndefined();
-      expect(fixture.entries.get(preview.manifest.paths.config)?.kind).toBe("file");
+      expect(fixture.entries.get(preview.manifest.paths.daemonConfig)?.kind).toBe("file");
     }
   });
 
@@ -851,7 +859,7 @@ describe("current-user LaunchAgent lifecycle", () => {
     if (!("activation" in config)) throw new Error("expected enabled config");
     const configContents = encodeDaemonConfig(config);
     const receiptPath = `${currentHome}/Library/Application Support/OPC/uninstall-receipt.json`;
-    fixture.entries.set(preview.manifest.paths.config, {
+    fixture.entries.set(preview.manifest.paths.daemonConfig, {
       kind: "file", uid: 501, mode: 0o600, contents: configContents,
     });
     fixture.entries.set(receiptPath, {
@@ -885,12 +893,12 @@ describe("current-user LaunchAgent lifecycle", () => {
       { launchAgent: fixture.adapter },
     );
 
-    expect(fixture.entries.get(preview.manifest.paths.config)?.contents).toBe(configContents);
+    expect(fixture.entries.get(preview.manifest.paths.daemonConfig)?.contents).toBe(configContents);
     expect(fixture.entries.get(receiptPath)).toBeUndefined();
     expect(fixture.entries.get(preview.manifest.paths.launchAgent)?.kind).toBe("file");
 
     const drifted = productionAdapterFixture();
-    drifted.entries.set(preview.manifest.paths.config, {
+    drifted.entries.set(preview.manifest.paths.daemonConfig, {
       kind: "file", uid: 501, mode: 0o600, contents: configContents,
     });
     drifted.entries.set(receiptPath, {
@@ -997,9 +1005,9 @@ describe("current-user LaunchAgent lifecycle", () => {
       install,
       telegram: { userId: "42", chatId: "-101" },
     });
-    const configEntry = fixture.entries.get(install.manifest.paths.config);
+    const configEntry = fixture.entries.get(install.manifest.paths.daemonConfig);
     if (configEntry === undefined) throw new Error("missing paused fixture config");
-    fixture.entries.set(install.manifest.paths.config, {
+    fixture.entries.set(install.manifest.paths.daemonConfig, {
       ...configEntry,
       contents: encodeDaemonConfig(createPausedDaemonConfig(changed)),
     });
@@ -1056,7 +1064,8 @@ describe("current-user LaunchAgent lifecycle", () => {
       ],
       [installPreview.manifest.paths.program, { kind: "missing" }],
       [installPreview.manifest.paths.program, { kind: "file", uid: 501, mode: 0o722 }],
-      [installPreview.manifest.paths.config, { kind: "symlink", uid: 501, mode: 0o600 }],
+      [installPreview.manifest.paths.daemonConfig, { kind: "symlink", uid: 501, mode: 0o600 }],
+      [installPreview.manifest.paths.schedulerConfig, { kind: "symlink", uid: 501, mode: 0o600 }],
       [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o775 }],
       [`${currentHome}/Library/LaunchAgents`, { kind: "directory", uid: 501, mode: 0o775 }],
       [`${currentHome}/Library/Logs/OPC`, { kind: "directory", uid: 502, mode: 0o700 }],
@@ -1228,7 +1237,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       code: "LAUNCH_AGENT_BOOTSTRAP_FAILED",
       result: failedBootstrap,
     });
-    const rolledBack = normal.entries.get(installPreview.manifest.paths.config)?.contents;
+    const rolledBack = normal.entries.get(installPreview.manifest.paths.daemonConfig)?.contents;
     if (rolledBack === undefined) throw new Error("missing rollback config");
     expect(decodeDaemonConfig(rolledBack)).toMatchObject({
       enabled: false,
@@ -1237,7 +1246,7 @@ describe("current-user LaunchAgent lifecycle", () => {
     });
     expect("activation" in decodeDaemonConfig(rolledBack)).toBe(false);
 
-    const configPath = installPreview.manifest.paths.config;
+    const configPath = installPreview.manifest.paths.daemonConfig;
     const configEntry = normal.entries.get(configPath);
     if (configEntry === undefined) throw new Error("missing paused config fixture");
     normal.entries.set(configPath, {
@@ -1316,19 +1325,22 @@ describe("current-user LaunchAgent lifecycle", () => {
     const expected = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
     const forgedHome = "/tmp/roy";
     const forgedProgram = `${forgedHome}/Library/Application Support/OPC/dist/cli.js`;
-    const forgedConfig = `${forgedHome}/Library/Application Support/OPC/config.json`;
+    const forgedDaemonConfig = `${forgedHome}/Library/Application Support/OPC/config.json`;
+    const forgedSchedulerConfig =
+      `${forgedHome}/Library/Application Support/OPC/local-scheduler.json`;
     const manifest = {
       ...expected.manifest,
       currentHome: forgedHome,
       paths: {
         launchAgent: `${forgedHome}/Library/LaunchAgents/com.getsuperpower.opc.plist`,
         program: forgedProgram,
-        config: forgedConfig,
+        daemonConfig: forgedDaemonConfig,
+        schedulerConfig: forgedSchedulerConfig,
         stdout: `${forgedHome}/Library/Logs/OPC/daemon.stdout.log`,
         stderr: `${forgedHome}/Library/Logs/OPC/daemon.stderr.log`,
       },
-      programArguments: [forgedProgram, "daemon", "--config", forgedConfig],
-      keepAlive: { successfulExit: false },
+      programArguments: [forgedProgram, "tick", "--config", forgedSchedulerConfig],
+      keepAlive: false,
     } as unknown as LaunchAgentInstallManifest;
     freezeGraph(manifest);
     const forged = { manifest, digest: digestCanonical(manifest) } as InstallPreview;
@@ -1358,7 +1370,6 @@ describe("current-user LaunchAgent lifecycle", () => {
     Object.freeze(partiallyFrozen.manifest.onboarding);
     Object.freeze(partiallyFrozen.manifest.paths);
     Object.freeze(partiallyFrozen.manifest.programArguments);
-    Object.freeze(partiallyFrozen.manifest.keepAlive);
     Object.freeze(partiallyFrozen.manifest);
     Object.freeze(partiallyFrozen);
     let installed: LaunchAgentInstallManifest | undefined;
@@ -1396,9 +1407,9 @@ describe("current-user LaunchAgent lifecycle", () => {
       { launchAgent: fixture.adapter },
     );
     const activation = activationPreview(installed);
-    const entry = fixture.entries.get(install.manifest.paths.config);
+    const entry = fixture.entries.get(install.manifest.paths.daemonConfig);
     if (entry === undefined) throw new Error("missing config fixture");
-    fixture.entries.set(install.manifest.paths.config, {
+    fixture.entries.set(install.manifest.paths.daemonConfig, {
       ...entry,
       contents: '{"enabled":false}\n',
     });
@@ -1505,7 +1516,7 @@ describe("current-user LaunchAgent lifecycle", () => {
       { launchAgent: adapter },
     );
     const activation = activationPreview(installed);
-    const configPath = install.manifest.paths.config;
+    const configPath = install.manifest.paths.daemonConfig;
     const staleContents = fake.entries.get(configPath)?.contents;
     if (staleContents === undefined) throw new Error("missing stale config");
     const staleConfig = decodeDaemonConfig(staleContents);

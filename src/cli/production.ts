@@ -80,14 +80,14 @@ export function createProductionCliFactories(
   ): Promise<T> => {
     const path = `${install.manifest.onboarding.manifest.paths.applicationSupport}/approvals.sqlite`;
     return resolveTelegramLifecycleLock(install).withLock(
-      install.manifest.paths.config,
+      install.manifest.paths.daemonConfig,
       async () => {
       const current = validateDaemonConfig(
-        await resolveDaemonConfig(install.manifest.paths.config),
+        await resolveDaemonConfig(install.manifest.paths.daemonConfig),
       );
       const baseChanged =
         current.install.digest !== install.digest ||
-        current.install.manifest.paths.config !== install.manifest.paths.config ||
+        current.install.manifest.paths.daemonConfig !== install.manifest.paths.daemonConfig ||
         current.install.manifest.currentUid !== currentUid();
       const stateChanged = authority.mode === "pairing"
         ? current.enabled || "activation" in current
@@ -155,7 +155,7 @@ export function createProductionCliFactories(
   const loadCurrentConfig = async () => {
     const path = defaultDaemonConfigPath();
     const config = validateDaemonConfig(await resolveDaemonConfig(path));
-    if (config.install.manifest.paths.config !== path) {
+    if (config.install.manifest.paths.daemonConfig !== path) {
       throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
     }
     return config;

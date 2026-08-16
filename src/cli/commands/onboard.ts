@@ -82,11 +82,13 @@ const onboardingPathsSchema = objectOutput({
   logs: pathOutput,
   launchAgent: pathOutput,
   codexHome: pathOutput,
+  schedulerConfig: pathOutput,
 });
 const installPathsSchema = objectOutput({
   launchAgent: pathOutput,
   program: pathOutput,
-  config: pathOutput,
+  daemonConfig: pathOutput,
+  schedulerConfig: pathOutput,
   stdout: pathOutput,
   stderr: pathOutput,
 });
@@ -111,9 +113,10 @@ const installManifestSchema = objectOutput({
   currentUid: numberOutput,
   label: literal("com.getsuperpower.opc"),
   paths: installPathsSchema,
-  programArguments: arrayOutput(unionOutput(pathOutput, literal("daemon", "--config"))),
+  programArguments: arrayOutput(unionOutput(pathOutput, literal("tick", "--config"))),
   runAtLoad: booleanOutput,
-  keepAlive: objectOutput({ successfulExit: booleanOutput }),
+  startIntervalSeconds: numberOutput,
+  keepAlive: booleanOutput,
   enabled: booleanOutput,
 });
 function canonicalTelegramId(

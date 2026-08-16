@@ -267,6 +267,7 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
       "paths",
       "programArguments",
       "runAtLoad",
+      "startIntervalSeconds",
       "keepAlive",
       "enabled",
     ],
@@ -275,13 +276,7 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
   );
   const paths = plainDataFields(
     manifest.paths,
-    ["launchAgent", "program", "config", "stdout", "stderr"],
-    [],
-    "INVALID_LAUNCH_AGENT_MANIFEST",
-  );
-  const keepAlive = plainDataFields(
-    manifest.keepAlive,
-    ["successfulExit"],
+    ["launchAgent", "program", "daemonConfig", "schedulerConfig", "stdout", "stderr"],
     [],
     "INVALID_LAUNCH_AGENT_MANIFEST",
   );
@@ -295,7 +290,6 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
   if (
     !Object.isFrozen(value) ||
     !Object.isFrozen(manifest.paths) ||
-    !Object.isFrozen(manifest.keepAlive) ||
     manifest.version !== 1 ||
     manifest.operation !== "install" ||
     typeof manifest.onboardingDigest !== "string" ||
@@ -309,12 +303,13 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
     manifest.label !== "com.getsuperpower.opc" ||
     Object.values(paths).some((path) => typeof path !== "string") ||
     argv.length !== 4 ||
-    argv[1] !== "daemon" ||
+    argv[1] !== "tick" ||
     argv[2] !== "--config" ||
     argv[0] !== paths.program ||
-    argv[3] !== paths.config ||
+    argv[3] !== paths.schedulerConfig ||
     manifest.runAtLoad !== true ||
-    keepAlive.successfulExit !== false ||
+    manifest.startIntervalSeconds !== 900 ||
+    manifest.keepAlive !== false ||
     manifest.enabled !== false
   ) {
     throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
@@ -324,11 +319,11 @@ function snapshotInstallManifest(value: unknown): LaunchAgentInstallManifest {
     onboarding,
     paths: { ...paths },
     programArguments: [...argv],
-    keepAlive: { successfulExit: false },
+    startIntervalSeconds: 900,
+    keepAlive: false,
   } as unknown as LaunchAgentInstallManifest;
   Object.freeze(result.paths);
   Object.freeze(result.programArguments);
-  Object.freeze(result.keepAlive);
   Object.freeze(result);
   return result;
 }
@@ -399,11 +394,10 @@ ${args}
     </array>
     <key>RunAtLoad</key>
     <true/>
-    <key>KeepAlive</key>
-    <dict>
-      <key>SuccessfulExit</key>
-      <false/>
-    </dict>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
     <key>Umask</key>
     <integer>63</integer>
     <key>StandardOutPath</key>
@@ -453,11 +447,12 @@ function requireAuthority(
   const applicationSupport = `${options.currentHome}/Library/Application Support/OPC`;
   if (
     manifest.paths.program !== `${applicationSupport}/dist/cli.js` ||
-    manifest.paths.config !== `${applicationSupport}/config.json` ||
+    manifest.paths.daemonConfig !== `${applicationSupport}/config.json` ||
+    manifest.paths.schedulerConfig !== `${applicationSupport}/local-scheduler.json` ||
     manifest.paths.stdout !== `${options.currentHome}/Library/Logs/OPC/daemon.stdout.log` ||
     manifest.paths.stderr !== `${options.currentHome}/Library/Logs/OPC/daemon.stderr.log` ||
     manifest.programArguments[0] !== manifest.paths.program ||
-    manifest.programArguments[3] !== manifest.paths.config
+    manifest.programArguments[3] !== manifest.paths.schedulerConfig
   ) {
     throw new Error("INVALID_LAUNCH_AGENT_MANIFEST");
   }
@@ -465,7 +460,8 @@ function requireAuthority(
     options.currentHome,
     manifest.paths.launchAgent,
     manifest.paths.program,
-    manifest.paths.config,
+    manifest.paths.daemonConfig,
+    manifest.paths.schedulerConfig,
     manifest.paths.stdout,
     manifest.paths.stderr,
   ]) {
@@ -558,7 +554,8 @@ async function validatePathAuthority(
   }
   requirePrivateDirectory(await inspect(fileSystem, distribution), uid);
   requireExecutable(await inspect(fileSystem, manifest.paths.program), uid);
-  requireEntry(await inspect(fileSystem, manifest.paths.config), ["missing", "file"], uid);
+  requireEntry(await inspect(fileSystem, manifest.paths.daemonConfig), ["missing", "file"], uid);
+  requireEntry(await inspect(fileSystem, manifest.paths.schedulerConfig), ["missing", "file"], uid);
   requirePrivateDirectory(await inspect(fileSystem, logs), uid);
   requirePrivateDirectory(await inspect(fileSystem, opcLogs), uid);
   requireEntry(await inspect(fileSystem, manifest.paths.stdout), ["missing", "file"], uid);
@@ -590,7 +587,7 @@ async function validateUninstallTakeover(
   requireEntry(entry, ["file"], uid);
   const receipt = decodeUninstallReceipt(await fileSystem.readFile(receiptPath));
   const preview = installPreview(manifest);
-  const configEntry = await inspect(fileSystem, manifest.paths.config);
+  const configEntry = await inspect(fileSystem, manifest.paths.daemonConfig);
   const launchAgentEntry = await inspect(fileSystem, manifest.paths.launchAgent);
   if (
     receipt.currentHome !== manifest.currentHome || receipt.currentUid !== uid ||
@@ -609,7 +606,7 @@ async function validateUninstallTakeover(
     return Object.freeze({ receiptPath });
   }
   requireEntry(configEntry, ["file"], uid);
-  const configContents = await fileSystem.readFile(manifest.paths.config);
+  const configContents = await fileSystem.readFile(manifest.paths.daemonConfig);
   if (receipt.completed.stateAndLogs) {
     const disabledContents = encodeDaemonConfig(createDisabledDaemonConfig(preview));
     if (configContents !== disabledContents) throw new Error("UNINSTALL_IN_PROGRESS");
@@ -623,7 +620,7 @@ async function validateUninstallTakeover(
     config.onboarding.digest !== receipt.onboardingDigest ||
     config.install.digest !== receipt.authority.installDigest ||
     config.install.manifest.currentUid !== uid ||
-    config.install.manifest.paths.config !== manifest.paths.config ||
+    config.install.manifest.paths.daemonConfig !== manifest.paths.daemonConfig ||
     state !== receipt.authority.state || activationDigest !== receipt.authority.activationDigest
   ) {
     throw new Error("UNINSTALL_IN_PROGRESS");
@@ -748,7 +745,7 @@ async function readCurrentConfig(
   } catch (error) {
     throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED", { cause: error });
   }
-  if (config.install.manifest.paths.config !== configPath) {
+  if (config.install.manifest.paths.daemonConfig !== configPath) {
     throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
   }
   return Object.freeze({ config, contents });
@@ -868,7 +865,7 @@ export function createLaunchAgentAdapter(
       await validatePathAuthority(snapshot.fileSystem, install, snapshot.currentUid, false);
       const preview = installPreview(install);
       const disabledContents = encodeDaemonConfig(createDisabledDaemonConfig(preview));
-      await snapshot.lifecycleLock.withLock(install.paths.config, async () => {
+      await snapshot.lifecycleLock.withLock(install.paths.daemonConfig, async () => {
         const takeover = await validateUninstallTakeover(snapshot.fileSystem, install, snapshot.currentUid);
         await validatePathAuthority(
           snapshot.fileSystem,
@@ -876,11 +873,11 @@ export function createLaunchAgentAdapter(
           snapshot.currentUid,
           takeover === undefined,
         );
-        const configEntry = await inspect(snapshot.fileSystem, install.paths.config);
+        const configEntry = await inspect(snapshot.fileSystem, install.paths.daemonConfig);
         requireEntry(configEntry, ["missing", "file"], snapshot.currentUid);
         if (
           configEntry.kind === "file" &&
-          (await snapshot.fileSystem.readFile(install.paths.config)) !==
+          (await snapshot.fileSystem.readFile(install.paths.daemonConfig)) !==
             (takeover?.preservedConfigContents ?? disabledContents)
         ) {
           throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
@@ -888,7 +885,7 @@ export function createLaunchAgentAdapter(
         if (takeover?.preservedConfigContents === undefined) {
           await writeAtomic(
             snapshot.fileSystem,
-            install.paths.config,
+            install.paths.daemonConfig,
             disabledContents,
             snapshot.currentUid,
             nonce,
@@ -927,7 +924,7 @@ export function createLaunchAgentAdapter(
       await validatePathAuthority(snapshot.fileSystem, activation.install, snapshot.currentUid);
       const preview = activationPreview(activation);
       const install = installPreview(activation.install);
-      await snapshot.lifecycleLock.withLock(activation.install.paths.config, async () => {
+      await snapshot.lifecycleLock.withLock(activation.install.paths.daemonConfig, async () => {
         await validatePathAuthority(snapshot.fileSystem, activation.install, snapshot.currentUid);
         const entry = await inspect(snapshot.fileSystem, activation.install.paths.launchAgent);
         requireEntry(entry, ["file"], snapshot.currentUid);
@@ -939,7 +936,7 @@ export function createLaunchAgentAdapter(
         }
         const current = await readCurrentConfig(
           snapshot.fileSystem,
-          activation.install.paths.config,
+          activation.install.paths.daemonConfig,
           snapshot.currentUid,
         );
         requireActivationConfig(current.config, install, preview);
@@ -952,7 +949,7 @@ export function createLaunchAgentAdapter(
         try {
           await writeAtomic(
             snapshot.fileSystem,
-            activation.install.paths.config,
+            activation.install.paths.daemonConfig,
             encodeDaemonConfig(createEnabledDaemonConfig(preview)),
             snapshot.currentUid,
             nonce,
@@ -976,7 +973,7 @@ export function createLaunchAgentAdapter(
           try {
             await writeAtomic(
               snapshot.fileSystem,
-              activation.install.paths.config,
+              activation.install.paths.daemonConfig,
               encodeDaemonConfig(rollback),
               snapshot.currentUid,
               nonce,

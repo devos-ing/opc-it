@@ -68,6 +68,7 @@ function fakeOnboardingPreview(digest: string) {
         logs: "/Users/roy/Library/Logs/OPC",
         launchAgent: "/Users/roy/Library/LaunchAgents/com.getsuperpower.opc.plist",
         codexHome: "/Users/roy/Library/Application Support/OPC/codex",
+        schedulerConfig: "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
       },
       networkDefault: "deny",
       enabled: false,
@@ -324,7 +325,14 @@ describe("current-user lifecycle CLI", () => {
         ok: true,
         command: "onboard",
         result: {
-          manifest: { enabled: false, networkDefault: "deny" },
+          manifest: {
+            enabled: false,
+            networkDefault: "deny",
+            paths: {
+              schedulerConfig:
+                "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
+            },
+          },
         },
       });
       expect(result.message).toMatch(/"digest":"sha256:[a-f0-9]{64}"/);
@@ -446,6 +454,19 @@ describe("current-user lifecycle CLI", () => {
       process.env.OPC_ONBOARDING_STAGE = "install";
       const installPreview = record(json((await runCli(["onboard", "--preview"], factories)).message).result);
       if (typeof installPreview.digest !== "string") throw new Error("missing install digest");
+      const installManifest = record(installPreview.manifest);
+      const installPaths = record(installManifest.paths);
+      expect(installManifest.programArguments).toEqual([
+        installPaths.program,
+        "tick",
+        "--config",
+        installPaths.schedulerConfig,
+      ]);
+      expect(installManifest).toMatchObject({
+        runAtLoad: true,
+        startIntervalSeconds: 900,
+        keepAlive: false,
+      });
       const missingSecretInput = await runCli(
         ["onboard", "--apply", installPreview.digest],
         factories,
@@ -789,7 +810,7 @@ describe("current-user lifecycle CLI", () => {
       let opens = 0;
       const error = await runProductionDaemonRuntime(
         {
-          configPath: config.install.manifest.paths.config,
+          configPath: config.install.manifest.paths.daemonConfig,
           config,
           transitionKey: "11".repeat(32),
           keyId: "key-1",
@@ -838,7 +859,7 @@ describe("current-user lifecycle CLI", () => {
     const preparedFiles = new Set<string>();
     const error = await runProductionDaemonRuntime(
       {
-        configPath: config.install.manifest.paths.config,
+        configPath: config.install.manifest.paths.daemonConfig,
         config,
         transitionKey: "11".repeat(32),
         keyId: "key-1",
@@ -1491,7 +1512,7 @@ describe("current-user lifecycle CLI", () => {
   it("continues program and credential removal from a receipt after state removal deletes config", async () => {
     const config = disabledProductionConfig();
     const onboarding = config.onboarding;
-    const configPath = config.install.manifest.paths.config;
+    const configPath = config.install.manifest.paths.daemonConfig;
     let configExists = true;
     let receipt: UninstallReceipt | undefined;
     const removed: string[] = [];
@@ -1559,7 +1580,7 @@ describe("current-user lifecycle CLI", () => {
       const config = disabledProductionConfig();
       const onboarding = config.onboarding;
       const support = onboarding.manifest.paths.applicationSupport;
-      const configPath = config.install.manifest.paths.config;
+      const configPath = config.install.manifest.paths.daemonConfig;
       let configExists = true;
       let receipt: UninstallReceipt | undefined;
       let receiptWrites = 0;
@@ -1714,7 +1735,7 @@ describe("current-user lifecycle CLI", () => {
       validateRemovalPath: () => Promise.resolve(),
       removePath: (path: string) => {
         removed.push(path);
-        if (path === config.install.manifest.paths.config) configExists = false;
+        if (path === config.install.manifest.paths.daemonConfig) configExists = false;
         return Promise.resolve();
       },
       credentialStore: {
