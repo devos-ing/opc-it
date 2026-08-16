@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { digestCanonical } from "../../src/domain/identity.js";
 import {
   createEnabledDaemonConfig,
@@ -11,6 +13,7 @@ import type { LocalJournal } from "../../src/features/queue/index.js";
 import { ProcessLockUnavailableError } from "../../src/runtime/process-lock.js";
 import type { ProductionLocalDeliveryOptions } from "../../src/cli/production/local-delivery.js";
 import {
+  openExistingTickDatabase,
   runProductionTick,
   type ProductionTickDependencies,
   type ProductionTickFileEntry,
@@ -230,6 +233,36 @@ function fixture(options: FixtureOptions = {}): {
     },
   };
 }
+
+test("the production opener reopens both existing tick databases read/write without creating", async () => {
+  const root = await mkdtemp(join(process.cwd(), ".task-10-database-"));
+  const paths = [join(root, "state.sqlite"), join(root, "process-lock.sqlite")];
+  const missing = join(root, "missing.sqlite");
+  try {
+    for (const path of paths) new Database(path, { create: true }).close();
+
+    for (const [index, path] of paths.entries()) {
+      const database = openExistingTickDatabase(path);
+      try {
+        database.run("CREATE TABLE tick_probe (value INTEGER NOT NULL)");
+        database.run("INSERT INTO tick_probe (value) VALUES (?)", [index + 1]);
+        expect(database.query("SELECT value FROM tick_probe").get()).toEqual({
+          value: index + 1,
+        });
+      } finally {
+        database.close();
+      }
+    }
+
+    expect(() => openExistingTickDatabase(missing)).toThrow();
+    expect(await stat(missing).catch((error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error) return error.code;
+      throw error;
+    })).toBe("ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("truncates the trusted current-user logs before scheduler decoding can fail", async () => {
   const schedulerFailure = new Error("INVALID_LOCAL_SCHEDULER_CONFIG");

@@ -425,6 +425,10 @@ function repositoryLeaf(repository: string): string {
   return repository.replace("/", "--");
 }
 
+export function openExistingTickDatabase(path: string): Database {
+  return new Database(path, { readwrite: true, create: false });
+}
+
 export async function runProductionTick(
   configPath: string,
   dependencies: ProductionTickDependencies = {},
@@ -484,8 +488,7 @@ export async function runProductionTick(
   const liveCodexIdentity = resolveCodexIdentity(daemon.onboarding);
   await requireLiveIdentity(daemon.onboarding, liveGitHubIdentity, liveCodexIdentity);
   const publisherOnboarding = approvedPublisherOnboarding(daemon.onboarding, home);
-  const openDatabase = dependencies.openDatabase ??
-    ((path: string) => new Database(path, { readwrite: true, create: false }));
+  const openDatabase = dependencies.openDatabase ?? openExistingTickDatabase;
   const createJournal = dependencies.createJournal ?? createSqliteJournal;
   const createProcessLock = dependencies.createProcessLock ?? createSqliteProcessLock;
   const createDelivery = dependencies.createDelivery ??
