@@ -25,6 +25,8 @@ import {
 } from "../src/features/local-scheduler/index.js";
 
 export const devLocalSchedulerLabel = "com.getsuperpower.opc";
+export const devLocalSchedulerMigrationRepository = "devos-ing/opc-it";
+export const devLocalSchedulerMigrationRunnerName = "opc-dev-roy-arm64";
 const trustedPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 const privateDirectoryMode = 0o700;
 const privateFileMode = 0o600;
@@ -223,6 +225,8 @@ export function parseDevLocalSchedulerArgs(
     const runnerName = values.get("--runner-name") ?? "";
     const stage = values.get("--stage") ?? "";
     if (
+      repository !== devLocalSchedulerMigrationRepository ||
+      runnerName !== devLocalSchedulerMigrationRunnerName ||
       !/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u.test(runnerName) ||
       !validAbsolutePath(stage)
     ) return fail("DEV_LOCAL_SCHEDULER_INPUT_FAILED");
@@ -598,16 +602,28 @@ async function readSchedulerConfig(
   }
 }
 
-async function install(
-  input: Extract<DevLocalSchedulerInput, { readonly command: "install" }>,
+interface DevLocalSchedulerUserContext {
+  readonly home: string;
+  readonly uid: number;
+  readonly paths: DevLocalSchedulerPaths;
+}
+
+function validatedCurrentUser(
   runtime: DevLocalSchedulerRuntime,
-): Promise<DevLocalSchedulerCommandResult> {
+): DevLocalSchedulerUserContext {
   const home = runtime.currentHome();
   const uid = runtime.currentUid();
   if (!validHome(home) || !Number.isSafeInteger(uid) || uid <= 0) {
     return fail("DEV_LOCAL_SCHEDULER_ENVIRONMENT_FAILED");
   }
-  const paths = devLocalSchedulerPaths(home);
+  return Object.freeze({ home, uid, paths: devLocalSchedulerPaths(home) });
+}
+
+async function install(
+  input: Extract<DevLocalSchedulerInput, { readonly command: "install" }>,
+  runtime: DevLocalSchedulerRuntime,
+): Promise<DevLocalSchedulerCommandResult> {
+  const { home, uid, paths } = validatedCurrentUser(runtime);
   await requireCheckoutAuthority(runtime, input.checkout, home, uid);
   const tools = await resolveTools(runtime, true);
   await requireRepositoryAuthority(runtime, input.repository, input.checkout, tools);
@@ -690,12 +706,7 @@ function tickResult(value: unknown): DevLocalSchedulerTickResult {
 async function runOnce(
   runtime: DevLocalSchedulerRuntime,
 ): Promise<DevLocalSchedulerCommandResult> {
-  const home = runtime.currentHome();
-  const uid = runtime.currentUid();
-  if (!validHome(home) || !Number.isSafeInteger(uid) || uid <= 0) {
-    return fail("DEV_LOCAL_SCHEDULER_ENVIRONMENT_FAILED");
-  }
-  const paths = devLocalSchedulerPaths(home);
+  const { home, uid, paths } = validatedCurrentUser(runtime);
   const scheduler = await readSchedulerConfig(runtime, paths.config, uid);
   if (scheduler.repositories.length !== 1) return fail("DEV_LOCAL_SCHEDULER_CONFIG_FAILED");
   const configured = scheduler.repositories[0];
@@ -728,12 +739,7 @@ async function runOnce(
 async function status(
   runtime: DevLocalSchedulerRuntime,
 ): Promise<DevLocalSchedulerCommandResult> {
-  const home = runtime.currentHome();
-  const uid = runtime.currentUid();
-  if (!validHome(home) || !Number.isSafeInteger(uid) || uid <= 0) {
-    return fail("DEV_LOCAL_SCHEDULER_ENVIRONMENT_FAILED");
-  }
-  const paths = devLocalSchedulerPaths(home);
+  const { uid, paths } = validatedCurrentUser(runtime);
   const [configEntry, launchAgentEntry, lastResultEntry] = await Promise.all([
     runtime.inspect(paths.config),
     runtime.inspect(paths.launchAgent),
@@ -773,12 +779,7 @@ async function status(
 async function uninstall(
   runtime: DevLocalSchedulerRuntime,
 ): Promise<DevLocalSchedulerCommandResult> {
-  const home = runtime.currentHome();
-  const uid = runtime.currentUid();
-  if (!validHome(home) || !Number.isSafeInteger(uid) || uid <= 0) {
-    return fail("DEV_LOCAL_SCHEDULER_ENVIRONMENT_FAILED");
-  }
-  const paths = devLocalSchedulerPaths(home);
+  const { uid, paths } = validatedCurrentUser(runtime);
   const ownedFiles = [paths.launchAgent, paths.config, paths.lastResult] as const;
   for (const path of ownedFiles) {
     const entry = await runtime.inspect(path);
@@ -786,11 +787,28 @@ async function uninstall(
       return fail("DEV_LOCAL_SCHEDULER_PATH_FAILED");
     }
   }
-  const bootout = await runtime.run(
-    "/bin/launchctl",
-    ["bootout", `gui/${String(uid)}/${devLocalSchedulerLabel}`],
-  );
-  if (bootout.exitCode !== 0 && bootout.exitCode !== 113) {
+  const service = `gui/${String(uid)}/${devLocalSchedulerLabel}`;
+  let loaded: DevLocalSchedulerCommandExecutionResult;
+  try {
+    loaded = await runtime.run("/bin/launchctl", ["print", service]);
+  } catch {
+    return fail("DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED");
+  }
+  if (loaded.exitCode === 0) {
+    const opc = await resolveRequiredCommand(runtime, "opc");
+    if (!provesLoadedScheduler(loaded.stdout, uid, opc, paths)) {
+      return fail("DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED");
+    }
+    let bootout: DevLocalSchedulerCommandExecutionResult;
+    try {
+      bootout = await runtime.run("/bin/launchctl", ["bootout", service]);
+    } catch {
+      return fail("DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED");
+    }
+    if (bootout.exitCode !== 0 && bootout.exitCode !== 113) {
+      return fail("DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED");
+    }
+  } else if (loaded.exitCode !== 113) {
     return fail("DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED");
   }
   for (const path of ownedFiles) {
@@ -907,11 +925,13 @@ async function cleanupRunner(
   input: Extract<DevLocalSchedulerInput, { readonly command: "cleanup-runner" }>,
   runtime: DevLocalSchedulerRuntime,
 ): Promise<DevLocalSchedulerCommandResult> {
-  const home = runtime.currentHome();
-  const uid = runtime.currentUid();
-  if (!validHome(home) || !Number.isSafeInteger(uid) || uid <= 0) {
-    return fail("DEV_LOCAL_SCHEDULER_ENVIRONMENT_FAILED");
+  if (
+    input.repository !== devLocalSchedulerMigrationRepository ||
+    input.runnerName !== devLocalSchedulerMigrationRunnerName
+  ) {
+    return fail("DEV_LOCAL_SCHEDULER_INPUT_FAILED");
   }
+  const { home, uid } = validatedCurrentUser(runtime);
   await requireSafeRunnerStage(
     runtime,
     input.stage,
@@ -940,6 +960,14 @@ async function cleanupRunner(
     matching[0].os.toLowerCase() !== "macos"
   ) return fail("DEV_LOCAL_SCHEDULER_RUNNER_NOT_SAFE");
   const runner = matching[0];
+  await requireSafeRunnerStage(
+    runtime,
+    input.stage,
+    input.repository,
+    input.runnerName,
+    home,
+    uid,
+  );
   await required(
     runtime,
     gh,
@@ -950,6 +978,14 @@ async function cleanupRunner(
   if (after.some(({ id }) => id === runner.id)) {
     return fail("DEV_LOCAL_SCHEDULER_RUNNER_DELETE_UNCONFIRMED");
   }
+  await requireSafeRunnerStage(
+    runtime,
+    input.stage,
+    input.repository,
+    input.runnerName,
+    home,
+    uid,
+  );
   await runtime.removeTree(input.stage);
   return Object.freeze({
     command: "cleanup-runner",

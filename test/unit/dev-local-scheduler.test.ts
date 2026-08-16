@@ -41,7 +41,12 @@ class TestRuntime implements DevLocalSchedulerRuntime {
   readonly files = new Map<string, string>();
   readonly entries = new Map<string, DevLocalSchedulerFileEntry>();
   remoteRunnerPresent = true;
+  remoteRunnerLists = 0;
   bootstrapExitCode = 0;
+  launchctlState: "exact" | "foreign" | "absent" = "exact";
+  processActiveOnCheck: number | undefined;
+  processChecks = 0;
+  driftStageAfterRemoteConfirmation = false;
   tickResult = { status: "disabled", repositoriesChecked: 0 } as const;
 
   constructor() {
@@ -118,12 +123,16 @@ class TestRuntime implements DevLocalSchedulerRuntime {
     }
     if (command === "/bin/launchctl" && args[0] === "bootout") return Promise.resolve(pass());
     if (command === "/bin/launchctl" && args[0] === "print") {
+      if (this.launchctlState === "absent") {
+        return Promise.resolve({ exitCode: 113, stdout: "", stderr: "not found" });
+      }
+      const program = this.launchctlState === "foreign" ? "/tmp/foreign-opc" : "/usr/local/bin/opc";
       return Promise.resolve(pass([
         `gui/${String(uid)}/com.getsuperpower.opc = {`,
         `path = ${paths.launchAgent}`,
-        "program = /usr/local/bin/opc",
+        `program = ${program}`,
         "arguments = {",
-        "/usr/local/bin/opc",
+        program,
         "tick",
         "--config",
         paths.config,
@@ -136,9 +145,24 @@ class TestRuntime implements DevLocalSchedulerRuntime {
       return Promise.resolve(pass(`${JSON.stringify(this.tickResult)}\n`));
     }
     if (command === "/usr/bin/pgrep" && args[0] === "-f") {
-      return Promise.resolve({ exitCode: 1, stdout: "", stderr: "" });
+      this.processChecks += 1;
+      return Promise.resolve({
+        exitCode: this.processActiveOnCheck === this.processChecks ? 0 : 1,
+        stdout: "",
+        stderr: "",
+      });
     }
     if (command.endsWith("/gh") && args.join(" ") === `api repos/${repository}/actions/runners?per_page=100 --paginate --slurp`) {
+      this.remoteRunnerLists += 1;
+      if (
+        this.driftStageAfterRemoteConfirmation &&
+        this.remoteRunnerLists === 2
+      ) {
+        this.files.set(`${stage}/.runner`, JSON.stringify({
+          agentName: "foreign-runner",
+          gitHubUrl: `https://github.com/${repository}`,
+        }));
+      }
       const runners = this.remoteRunnerPresent
         ? [{ id: 42, name: runnerName, os: "macos", status: "offline", busy: false }]
         : [];
@@ -231,6 +255,24 @@ test("parses only the explicit local scheduler operations", () => {
   expect(() => parseDevLocalSchedulerArgs(["install", "--repository", repository])).toThrow(
     "DEV_LOCAL_SCHEDULER_INPUT_FAILED",
   );
+  expect(() => parseDevLocalSchedulerArgs([
+    "cleanup-runner",
+    "--repository",
+    "devos-ing/other",
+    "--runner-name",
+    runnerName,
+    "--stage",
+    stage,
+  ])).toThrow("DEV_LOCAL_SCHEDULER_INPUT_FAILED");
+  expect(() => parseDevLocalSchedulerArgs([
+    "cleanup-runner",
+    "--repository",
+    repository,
+    "--runner-name",
+    "opc-dev-other-arm64",
+    "--stage",
+    stage,
+  ])).toThrow("DEV_LOCAL_SCHEDULER_INPUT_FAILED");
 });
 
 test("install validates disabled current-user authority and writes only private scheduler files", async () => {
@@ -340,13 +382,49 @@ test("uninstall bootouts and removes scheduler-owned files without invoking Runn
 
   const result = await runDevLocalScheduler({ command: "uninstall" }, runtime);
   expect(result).toEqual({ command: "uninstall", state: "uninstalled" });
-  expect(runtime.calls).toEqual([{
-    command: "/bin/launchctl",
-    args: ["bootout", `gui/${String(uid)}/com.getsuperpower.opc`],
-  }]);
+  expect(runtime.calls).toEqual([
+    {
+      command: "/bin/launchctl",
+      args: ["print", `gui/${String(uid)}/com.getsuperpower.opc`],
+    },
+    {
+      command: "/bin/launchctl",
+      args: ["bootout", `gui/${String(uid)}/com.getsuperpower.opc`],
+    },
+  ]);
   expect(runtime.removedFiles).toEqual([paths.launchAgent, paths.config, paths.lastResult]);
   expect(commandSignatures(runtime).join("\n")).not.toContain("actions/runners");
   expect(runtime.removedTrees).toEqual([]);
+});
+
+test("uninstall refuses a foreign same-label job and skips bootout when the job is absent", async () => {
+  const foreign = new TestRuntime();
+  await runDevLocalScheduler(installInput(), foreign);
+  foreign.launchctlState = "foreign";
+  foreign.calls.length = 0;
+  await expectFailure(
+    runDevLocalScheduler({ command: "uninstall" }, foreign),
+    "DEV_LOCAL_SCHEDULER_LAUNCH_AGENT_FAILED",
+  );
+  expect(foreign.calls).toEqual([{
+    command: "/bin/launchctl",
+    args: ["print", `gui/${String(uid)}/com.getsuperpower.opc`],
+  }]);
+  expect(foreign.removedFiles).toEqual([]);
+
+  const absent = new TestRuntime();
+  await runDevLocalScheduler(installInput(), absent);
+  absent.launchctlState = "absent";
+  absent.calls.length = 0;
+  expect(await runDevLocalScheduler({ command: "uninstall" }, absent)).toEqual({
+    command: "uninstall",
+    state: "uninstalled",
+  });
+  expect(absent.calls).toEqual([{
+    command: "/bin/launchctl",
+    args: ["print", `gui/${String(uid)}/com.getsuperpower.opc`],
+  }]);
+  expect(absent.removedFiles).toEqual([paths.launchAgent, paths.config]);
 });
 
 test("uninstall refuses a replaced scheduler path before launchctl or filesystem mutation", async () => {
@@ -419,4 +497,43 @@ test("cleanup-runner fails closed before deletion for busy remote or unsafe loca
   );
   expect(foreign.removedTrees).toEqual([]);
   expect(commandSignatures(foreign).join("\n")).not.toContain("--method DELETE");
+});
+
+test("cleanup-runner rechecks process and stage identity at both destructive boundaries", async () => {
+  const newlyActive = new TestRuntime();
+  newlyActive.processActiveOnCheck = 2;
+  await expectFailure(
+    runDevLocalScheduler({ command: "cleanup-runner", repository, runnerName, stage }, newlyActive),
+    "DEV_LOCAL_SCHEDULER_RUNNER_PROCESS_ACTIVE",
+  );
+  expect(newlyActive.processChecks).toBe(2);
+  expect(commandSignatures(newlyActive).join("\n")).not.toContain("--method DELETE");
+  expect(newlyActive.removedTrees).toEqual([]);
+
+  const drifted = new TestRuntime();
+  drifted.driftStageAfterRemoteConfirmation = true;
+  await expectFailure(
+    runDevLocalScheduler({ command: "cleanup-runner", repository, runnerName, stage }, drifted),
+    "DEV_LOCAL_SCHEDULER_STAGE_NOT_SAFE",
+  );
+  expect(commandSignatures(drifted).join("\n")).toContain(
+    `--method DELETE repos/${repository}/actions/runners/42`,
+  );
+  expect(drifted.processChecks).toBe(2);
+  expect(drifted.removedTrees).toEqual([]);
+});
+
+test("cleanup-runner rejects valid but unapproved migration targets before side effects", async () => {
+  for (const input of [
+    { command: "cleanup-runner", repository: "devos-ing/other", runnerName, stage },
+    { command: "cleanup-runner", repository, runnerName: "opc-dev-other-arm64", stage },
+  ] as const) {
+    const runtime = new TestRuntime();
+    await expectFailure(
+      runDevLocalScheduler(input, runtime),
+      "DEV_LOCAL_SCHEDULER_INPUT_FAILED",
+    );
+    expect(runtime.calls).toEqual([]);
+    expect(runtime.removedTrees).toEqual([]);
+  }
 });
