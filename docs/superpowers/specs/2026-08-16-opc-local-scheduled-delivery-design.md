@@ -153,12 +153,22 @@ The first version does not create a hierarchy of Recovery Issues. Recovery is re
 
 The development installer exposes four user-facing operations:
 
-- `install`: validate dependencies, write the private current-user configuration, and install/load the user LaunchAgent.
+- `install`: validate dependencies and an existing approved disabled daemon configuration, write the explicit private current-user scheduler configuration, prove both exact configuration files, and install/load the user LaunchAgent while execution remains disabled.
 - `run-once`: execute one tick in the foreground with the same validation and lock.
 - `status`: show LaunchAgent state, current lock/attempt summary, allowlisted repositories, and last outcome without exposing secrets.
 - `uninstall`: unload and remove the LaunchAgent and OPC-owned scheduling files without deleting repositories, branches, Issues, or pull requests.
 
 The LaunchAgent runs as the current user, has no `sudo` requirement, and starts a short-lived process. Logs are bounded and stored in a private current-user OPC directory.
+
+The lifecycle is a staged authority pair. Approved onboarding writes the
+disabled daemon configuration and matching scheduler LaunchAgent plist without
+bootstrapping. The development installer does not reconstruct that authority:
+it requires the exact private current-user daemon configuration, records only
+the explicitly supplied repository/checkout mapping, and re-reads both
+canonical files before bootstrap. Activation likewise requires both files to
+match the approved onboarding repository set and exact current-user paths
+before it enables or bootstraps the same scheduler job. Missing, stale, unsafe,
+or mismatched authority fails closed; no checkout is inferred.
 
 ## Migration from the Runner Route
 

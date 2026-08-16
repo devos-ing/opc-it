@@ -4,14 +4,25 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { digestCanonical } from "../../src/domain/identity.js";
 import {
+  submitWork,
+  validateExecutionContract,
+} from "../../src/features/planning/index.js";
+import {
   createEnabledDaemonConfig,
   previewActivation,
   previewInstall,
   previewOnboarding,
 } from "../../src/features/onboarding/index.js";
-import type { LocalJournal } from "../../src/features/queue/index.js";
+import {
+  signTransition,
+  type LocalJournal,
+  type QueueRepository,
+} from "../../src/features/queue/index.js";
 import { ProcessLockUnavailableError } from "../../src/runtime/process-lock.js";
-import type { ProductionLocalDeliveryOptions } from "../../src/cli/production/local-delivery.js";
+import type {
+  ProductionLocalDeliveryDependencies,
+  ProductionLocalDeliveryOptions,
+} from "../../src/cli/production/local-delivery.js";
 import {
   openExistingTickDatabase,
   runProductionTick,
@@ -19,6 +30,9 @@ import {
   type ProductionTickFileEntry,
 } from "../../src/cli/production/tick.js";
 import { validPolicy } from "../fixtures/contracts.js";
+import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
+import { transitionKeyId } from "../../src/cli/production/shared.js";
+import type { DaemonDeliveryContext } from "../../src/runtime/run-enabled-tick.js";
 
 const home = "/Users/roy";
 const support = `${home}/Library/Application Support/OPC`;
@@ -60,6 +74,8 @@ interface FixtureOptions {
   readonly lockCloseFailure?: Error;
   readonly invalidLogEntry?: ProductionTickFileEntry;
   readonly schedulerFailure?: Error;
+  readonly schedulerDaemonConfigPath?: string;
+  readonly queue?: QueueRepository;
 }
 
 function fixture(options: FixtureOptions = {}): {
@@ -67,6 +83,7 @@ function fixture(options: FixtureOptions = {}): {
   readonly opened: string[];
   readonly closed: string[];
   readonly deliveries: ProductionLocalDeliveryOptions[];
+  readonly deliveryDependencies: readonly (ProductionLocalDeliveryDependencies | undefined)[];
   readonly enabledRuntimeRepositoryCounts: number[];
   readonly gitCalls: readonly (readonly string[])[];
   readonly logEntries: ReadonlyMap<string, { readonly contents: string; readonly mode: number }>;
@@ -77,6 +94,7 @@ function fixture(options: FixtureOptions = {}): {
   const opened: string[] = [];
   const closed: string[] = [];
   const deliveries: ProductionLocalDeliveryOptions[] = [];
+  const deliveryDependencies: (ProductionLocalDeliveryDependencies | undefined)[] = [];
   const enabledRuntimeRepositoryCounts: number[] = [];
   const gitCalls: string[][] = [];
   const logEntries = new Map([
@@ -112,7 +130,7 @@ function fixture(options: FixtureOptions = {}): {
         version: 1,
         interval_minutes: 15,
         max_concurrency: 1,
-        daemon_config_path: daemonConfigPath,
+        daemon_config_path: options.schedulerDaemonConfigPath ?? daemonConfigPath,
         repositories: [{
           github: repository,
           checkout,
@@ -178,7 +196,7 @@ function fixture(options: FixtureOptions = {}): {
       write: () => Promise.resolve(),
       remove: () => Promise.resolve(),
     }),
-    queue: () => ({}) as never,
+    queue: () => options.queue ?? ({} as never),
     openDatabase(path) {
       opened.push(path);
       const name = path.endsWith("state.sqlite") ? "journal" : "lock";
@@ -201,8 +219,9 @@ function fixture(options: FixtureOptions = {}): {
         return Promise.resolve({ ownerId, release: () => Promise.resolve() });
       },
     }),
-    createDelivery(deliveryOptions) {
+    createDelivery(deliveryOptions, runtimeDependencies?: ProductionLocalDeliveryDependencies) {
       deliveries.push(deliveryOptions);
+      deliveryDependencies.push(runtimeDependencies);
       return {} as never;
     },
     runEnabledTick(input) {
@@ -224,6 +243,7 @@ function fixture(options: FixtureOptions = {}): {
     opened,
     closed,
     deliveries,
+    deliveryDependencies,
     enabledRuntimeRepositoryCounts,
     gitCalls,
     logEntries,
@@ -319,6 +339,19 @@ test("rejects a scheduler checkout whose repository root does not match the conf
   expect(testFixture.opened).toEqual([]);
 });
 
+test("rejects a scheduler daemon path outside the exact current-user authority before reading it", async () => {
+  const testFixture = fixture({
+    schedulerDaemonConfigPath: `${support}/other-config.json`,
+  });
+
+  expect(
+    await runProductionTick(configPath, testFixture.dependencies)
+      .catch((error: unknown) => error),
+  ).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+  expect(testFixture.daemonLoads).toBe(0);
+  expect(testFixture.opened).toEqual([]);
+});
+
 test("does not construct delivery authority for a disabled scheduler repository", async () => {
   const testFixture = fixture({ enabled: false });
 
@@ -374,6 +407,177 @@ test("runs one idle tick with policy, Recovery, and transition verification auth
   expect(Object.values(testFixture.deliveries[0]?.verificationKeys ?? {})).toEqual([
     transitionKey,
   ]);
+});
+
+test("wires a current-Issue approval and signed-lease revalidator into every production delivery", async () => {
+  const memory = createInMemoryGitHub({ now: () => "2026-08-16T00:00:00.000Z" });
+  const contract = validateExecutionContract({
+    version: 2,
+    work_id: "production-revalidation",
+    repository,
+    base_sha: "b".repeat(40),
+    target_branch: "codex/issue-1",
+    milestone: "Production authority revalidation",
+    goal: "Revalidate the current Issue before publication",
+    acceptance: [{ id: "AC-1", statement: "authority stays current", evidence: "unit" }],
+    paths: validPolicy.paths,
+    commands: {
+      bootstrap: validPolicy.commands.bootstrap,
+      test: "bun test",
+      evidence: validPolicy.commands.evidence,
+    },
+    limits: { timeout_minutes: 30, attempts: 3 },
+    capabilities: {
+      network: { mode: "deny", allow_domains: [] },
+      host_directories: { readable: [], writable: [] },
+      other: [],
+    },
+    codex: {
+      executor: { profile: "opc-executor", model: "gpt-5.6", effort: "high" },
+      reviewer: { profile: "opc-reviewer", model: "gpt-5.6", effort: "high" },
+    },
+  });
+  const submitted = await submitWork(contract, memory);
+  const installation = { id: "tick-fixture-id", keyId: transitionKeyId(transitionKey) };
+  const approval = signTransition({
+    version: 1,
+    installation_id: installation.id,
+    key_id: installation.keyId,
+    issue_number: submitted.number,
+    work_id: submitted.workId,
+    from: "awaiting-approval",
+    event: "approve",
+    to: "ready",
+    occurred_at: "2026-08-16T00:00:00.100Z",
+    metadata: {
+      approval_nonce: "approval_nonce_000000000000",
+      plan_digest: submitted.digest,
+      approval_actor: "42",
+    },
+  }, transitionKey);
+  const claim = signTransition({
+    version: 1,
+    installation_id: installation.id,
+    key_id: installation.keyId,
+    issue_number: submitted.number,
+    work_id: submitted.workId,
+    from: "ready",
+    event: "claim",
+    to: "claimed",
+    occurred_at: "2026-08-16T00:00:01.000Z",
+    metadata: {
+      claimed_at: "2026-08-16T00:00:01.000Z",
+      lease_expires_at: "2026-08-16T00:30:01.000Z",
+      lease_id: "production-lease",
+      plan_digest: submitted.digest,
+    },
+  }, transitionKey);
+  await memory.appendTransition(repository, submitted.number, JSON.stringify(approval));
+  await memory.appendTransition(repository, submitted.number, JSON.stringify(claim));
+  await memory.setStateLabel(repository, submitted.number, "opc:claimed");
+
+  let drift:
+    | "none"
+    | "missing"
+    | "repository"
+    | "number"
+    | "work-id"
+    | "digest"
+    | "body"
+    | "approval"
+    | "lease" = "none";
+  const findCalls: Array<readonly [string, string]> = [];
+  const currentQueue: QueueRepository = Object.freeze({
+    ...memory,
+    async findWork(targetRepository: string, workId: string) {
+      findCalls.push([targetRepository, workId]);
+      const issue = await memory.findWork(targetRepository, workId);
+      if (drift === "missing") return undefined;
+      if (issue === undefined) return undefined;
+      if (drift === "repository") return Object.freeze({ ...issue, repository: "roy/other" });
+      if (drift === "number") return Object.freeze({ ...issue, number: issue.number + 1 });
+      if (drift === "work-id") return Object.freeze({ ...issue, workId: "other-work" });
+      if (drift === "digest") {
+        return Object.freeze({ ...issue, digest: `sha256:${"f".repeat(64)}` });
+      }
+      return drift === "body"
+        ? Object.freeze({ ...issue, body: `${issue.body} edited` })
+        : issue;
+    },
+    async listTransitions(targetRepository: string, issueNumber: number) {
+      const transitions = await memory.listTransitions(targetRepository, issueNumber);
+      if (drift !== "approval" && drift !== "lease") return transitions;
+      return transitions.map((transition) => {
+        const parsed = JSON.parse(transition.record) as typeof approval;
+        if (drift === "approval" && parsed.payload.event === "approve") {
+          return {
+            ...transition,
+            record: JSON.stringify(signTransition({
+              ...parsed.payload,
+              metadata: { ...parsed.payload.metadata, approval_actor: "43" },
+            }, transitionKey)),
+          };
+        }
+        if (drift === "lease" && parsed.payload.event === "claim") {
+          return {
+            ...transition,
+            record: JSON.stringify(signTransition({
+              ...parsed.payload,
+              metadata: { ...parsed.payload.metadata, lease_id: "stale-lease" },
+            }, transitionKey)),
+          };
+        }
+        return transition;
+      });
+    },
+  });
+  const testFixture = fixture({ queue: currentQueue });
+  await runProductionTick(configPath, testFixture.dependencies);
+  const revalidate = testFixture.deliveryDependencies[0]?.revalidate;
+  expect(revalidate).toBeFunction();
+  if (revalidate === undefined) throw new Error("missing production revalidator");
+  const context: DaemonDeliveryContext = Object.freeze({
+    repository,
+    issueNumber: submitted.number,
+    rootIssueNumber: submitted.number,
+    workId: submitted.workId,
+    rootWorkId: submitted.workId,
+    attempt: 1,
+    contract,
+    contractDigest: submitted.digest as `sha256:${string}`,
+    approvedPolicyDigest: digestCanonical(validPolicy),
+    claim,
+    deadlineEpochMs: Date.parse("2026-08-16T00:30:01.000Z"),
+    signal: new AbortController().signal,
+  });
+  for (const boundary of ["start", "run", "result", "publish", "terminal"] as const) {
+    expect(await revalidate(boundary, context)).toEqual({
+      enabled: true,
+      policyDigest: digestCanonical(validPolicy),
+      baseSha: contract.base_sha,
+      contractDigest: context.contractDigest,
+      repositoryAllowed: true,
+      leaseActive: true,
+      claim,
+    });
+  }
+  expect(findCalls).toEqual(Array.from({ length: 5 }, () => [repository, submitted.workId]));
+
+  for (drift of [
+    "missing",
+    "repository",
+    "number",
+    "work-id",
+    "digest",
+    "body",
+    "approval",
+    "lease",
+  ] as const) {
+    expect(
+      await revalidate("publish", context).catch((error: unknown) => error),
+      drift,
+    ).toMatchObject({ message: "CURRENT_ISSUE_AUTHORITY_CHANGED" });
+  }
 });
 
 test("binds policy authority to the resolved committed HEAD object", async () => {

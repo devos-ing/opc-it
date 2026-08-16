@@ -93,6 +93,17 @@ interface FakeEntry extends LaunchAgentFileEntry {
 }
 
 function fakeFileSystem() {
+  const schedulerConfig = `${JSON.stringify({
+    version: 1,
+    interval_minutes: 15,
+    max_concurrency: 1,
+    daemon_config_path: `${currentHome}/Library/Application Support/OPC/config.json`,
+    repositories: [{
+      github: "roy/opc",
+      checkout: `${currentHome}/Documents/ChatGPT/OPC`,
+      enabled: true,
+    }],
+  })}\n`;
   const entries = new Map<string, FakeEntry>([
     [currentHome, { kind: "directory", uid: 501, mode: 0o755 }],
     [`${currentHome}/Library`, { kind: "directory", uid: 501, mode: 0o755 }],
@@ -106,6 +117,10 @@ function fakeFileSystem() {
     [`${currentHome}/Library/Logs`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/Logs/OPC`, { kind: "directory", uid: 501, mode: 0o700 }],
     [`${currentHome}/Library/LaunchAgents`, { kind: "directory", uid: 501, mode: 0o755 }],
+    [
+      `${currentHome}/Library/Application Support/OPC/local-scheduler.json`,
+      { kind: "file", uid: 501, mode: 0o600, contents: schedulerConfig },
+    ],
   ]);
   const operations: string[] = [];
   const fileSystem: LaunchAgentFileSystem = {
@@ -530,6 +545,103 @@ describe("current-user LaunchAgent lifecycle", () => {
       activation,
     });
     expect(enabledContents).toBe(encodeDaemonConfig(enabledConfig));
+  });
+
+  test("production activation rejects a missing or mismatched scheduler authority before bootstrap", async () => {
+    const cases: readonly [string, string | undefined][] = [
+      ["missing", undefined],
+      ["wrong daemon", JSON.stringify({
+        version: 1,
+        interval_minutes: 15,
+        max_concurrency: 1,
+        daemon_config_path: `${currentHome}/Library/Application Support/OPC/other.json`,
+        repositories: [{
+          github: "roy/opc",
+          checkout: `${currentHome}/Documents/ChatGPT/OPC`,
+          enabled: true,
+        }],
+      })],
+      ["wrong repository", JSON.stringify({
+        version: 1,
+        interval_minutes: 15,
+        max_concurrency: 1,
+        daemon_config_path: `${currentHome}/Library/Application Support/OPC/config.json`,
+        repositories: [{
+          github: "roy/other",
+          checkout: `${currentHome}/Documents/ChatGPT/OPC`,
+          enabled: true,
+        }],
+      })],
+    ];
+    for (const [name, contents] of cases) {
+      const fixture = productionAdapterFixture();
+      const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+      await applyInstall(
+        { preview: install, approvedDigest: install.digest },
+        { launchAgent: fixture.adapter },
+      );
+      if (contents === undefined) {
+        fixture.entries.delete(install.manifest.paths.schedulerConfig);
+      } else {
+        fixture.entries.set(install.manifest.paths.schedulerConfig, {
+          kind: "file",
+          uid: 501,
+          mode: 0o600,
+          contents: `${contents}\n`,
+        });
+      }
+
+      const error = await activate(
+        {
+          preview: activationPreview(install),
+          approvedDigest: activationPreview(install).digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((caught: unknown) => caught);
+      expect(error, name).toMatchObject({
+        message: "LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED",
+      });
+      expect(fixture.commands, name).toEqual([]);
+      expect(decodeDaemonConfig(
+        fixture.entries.get(install.manifest.paths.daemonConfig)?.contents ?? "",
+      ).enabled, name).toBe(false);
+    }
+  });
+
+  test("production activation re-reads the exact enabled daemon authority before bootstrap", async () => {
+    const daemonPath = `${currentHome}/Library/Application Support/OPC/config.json`;
+    let daemonRenames = 0;
+    const fixture = productionAdapterFixture(exclusiveLifecycleLock(), (fileSystem) => {
+      const rename = fileSystem.rename.bind(fileSystem);
+      const readFile = fileSystem.readFile.bind(fileSystem);
+      fileSystem.rename = async (from, to) => {
+        await rename(from, to);
+        if (to === daemonPath) daemonRenames += 1;
+      };
+      fileSystem.readFile = (path) =>
+        path === daemonPath && daemonRenames >= 2
+          ? Promise.resolve("{}\n")
+          : readFile(path);
+    });
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    const activation = activationPreview(install);
+
+    expect(
+      await activate(
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "DAEMON_CONFIG_AUTHORITY_CHANGED" });
+    expect(fixture.commands.some(({ args }) => args[0] === "bootstrap")).toBeFalse();
   });
 
   test("creates a missing LaunchAgents directory privately and rejects post-create drift", async () => {

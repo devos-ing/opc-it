@@ -40,6 +40,7 @@ import {
 } from "../../src/features/queue/index.js";
 import {
   createProductionLocalDelivery,
+  type ProductionLocalDeliveryDependencies,
   type ProductionLocalDeliveryOptions,
 } from "../../src/cli/production/local-delivery.js";
 import {
@@ -154,6 +155,7 @@ interface AcceptanceFixture {
   readonly sourceMutations: () => number;
   readonly lockAcquisitions: () => number;
   readonly lockReleases: () => number;
+  readonly pullRequestReconciliations: () => number;
   runTick(): ReturnType<typeof runProductionTick>;
   holdProcessLock(): Promise<void>;
   cleanup(): Promise<void>;
@@ -272,7 +274,11 @@ async function createAcceptanceFixture(
     event: "approve",
     to: "ready",
     occurred_at: "2026-08-16T00:00:01.000Z",
-    metadata: { plan_digest: submitted.digest },
+    metadata: {
+      approval_nonce: "approval_nonce_000000000000",
+      plan_digest: submitted.digest,
+      approval_actor: "42",
+    },
   }, transitionKey)));
   await queue.setStateLabel(repository, submitted.number, "opc:ready");
 
@@ -314,6 +320,7 @@ async function createAcceptanceFixture(
 
   const remote: FakeRemote = { branches: [], commits: [], pullRequests: [], commitMessage: "" };
   let crashPending = options.crashPoint;
+  let pullRequestReconciliations = 0;
   const publisherSandbox = createFakeSandboxAdapter(async (request) => {
     if (request.command.endsWith("/gh")) {
       const endpoint = request.args.find((argument) => argument.startsWith("repos/"));
@@ -349,6 +356,7 @@ async function createAcceptanceFixture(
         return pass(JSON.stringify({ default_branch: "main" }));
       }
       if (endpoint?.startsWith(`repos/${repository}/pulls/`) === true) {
+        pullRequestReconciliations += 1;
         const number = Number(endpoint.slice(`repos/${repository}/pulls/`.length));
         const pullRequest = remote.pullRequests.find((candidate) => candidate.number === number);
         return pullRequest === undefined
@@ -443,7 +451,10 @@ async function createAcceptanceFixture(
         },
       });
     },
-    createDelivery(productionOptions: ProductionLocalDeliveryOptions) {
+    createDelivery(
+      productionOptions: ProductionLocalDeliveryOptions,
+      productionDependencies?: ProductionLocalDeliveryDependencies,
+    ) {
       const deliveryDependencies: DeliveryDependencies = {
         gate: Object.freeze({
           revalidate: () => Promise.reject(new Error("UNBOUND_ACCEPTANCE_GATE")),
@@ -498,6 +509,9 @@ async function createAcceptanceFixture(
         reviewerSchemaPath: join(root, "reviewer-output.schema.json"),
       }, {
         now: () => activeTickEpochMs,
+        ...(productionDependencies?.revalidate === undefined
+          ? {}
+          : { revalidate: productionDependencies.revalidate }),
         loadRepositoryPolicy: () => Promise.resolve(approvedPolicy),
         currentBaseSha: () => Promise.resolve(baseSha),
         codegraph: {
@@ -536,6 +550,7 @@ async function createAcceptanceFixture(
     sourceMutations: () => sourceMutations,
     lockAcquisitions: () => lockAcquisitions,
     lockReleases: () => lockReleases,
+    pullRequestReconciliations: () => pullRequestReconciliations,
     async runTick() {
       activeTickEpochMs = nextTickEpochMs;
       nextTickEpochMs += 1_000;
@@ -623,6 +638,13 @@ test("one local scheduled tick delivers Issue 42 once and a retry only repairs p
     expect(fixture.events.indexOf("codegraph:prepare"))
       .toBeLessThan(fixture.events.indexOf("codex:execute"));
     expect(fixture.codex.executeRequests).toHaveLength(1);
+    const implementRequest = fixture.codex.executeRequests[0];
+    if (implementRequest === undefined) throw new Error("MISSING_IMPLEMENT_REQUEST");
+    const implementPrompt = JSON.parse(implementRequest.prompt) as {
+      readonly context: { readonly codegraph: { readonly markdown: string } };
+    };
+    expect(implementPrompt.context.codegraph.markdown)
+      .toBe("# CodeGraph context for Issue 42");
     expect(fixture.codex.reviewRequests).toHaveLength(1);
     expect(fixture.remote.branches).toEqual(["codex/issue-42"]);
     expect(fixture.remote.commits).toHaveLength(1);
@@ -634,9 +656,11 @@ test("one local scheduled tick delivers Issue 42 once and a retry only repairs p
     expect(fixture.remote.pullRequests[0]?.body).toContain("Human merge required.");
     expect(fixture.lockAcquisitions()).toBe(1);
     expect(fixture.lockReleases()).toBe(1);
+    expect(fixture.pullRequestReconciliations()).toBe(0);
 
     await fixture.queue.setStateLabel(repository, fixture.issueNumber, "opc:reviewing");
     const callsBeforeRetry = fixture.events.filter((event) => event.startsWith("codex:")).length;
+    const reconciliationsBeforeRetry = fixture.pullRequestReconciliations();
     expect(await fixture.runTick()).toEqual({ status: "worked", repositoriesChecked: 1 });
 
     expect(fixture.events.filter((event) => event.startsWith("codex:"))).toHaveLength(
@@ -645,6 +669,7 @@ test("one local scheduled tick delivers Issue 42 once and a retry only repairs p
     expect(fixture.remote.branches).toEqual(["codex/issue-42"]);
     expect(fixture.remote.commits).toHaveLength(1);
     expect(fixture.remote.pullRequests).toHaveLength(1);
+    expect(fixture.pullRequestReconciliations() - reconciliationsBeforeRetry).toBe(1);
     expect((await fixture.queue.findWork(repository, fixture.workId))?.stateLabel)
       .toBe("opc:result-ready");
     expect(fixture.lockAcquisitions()).toBe(2);

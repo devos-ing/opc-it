@@ -19,6 +19,7 @@ export {
 } from "./approval-tick.js";
 export {
   consumeApprovalReplies,
+  isExactApprovalAuthority,
   type ConsumeApprovalInput,
 } from "./consume-approval.js";
 export { flushApprovalOutbox, flushApprovalTransitions } from "./outbox.js";

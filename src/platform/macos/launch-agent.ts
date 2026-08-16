@@ -24,6 +24,7 @@ import type {
 } from "../../adapters/local/process-runner.js";
 import { digestCanonical } from "../../domain/identity.js";
 import type { LifecycleConfigLock } from "./lifecycle-config-lock.js";
+import { validateLocalSchedulerConfig } from "../../features/local-scheduler/index.js";
 import { decodeUninstallReceipt } from "./uninstall-receipt.js";
 
 export interface LaunchAgentFileEntry {
@@ -751,6 +752,33 @@ async function readCurrentConfig(
   return Object.freeze({ config, contents });
 }
 
+async function requireCurrentSchedulerConfig(
+  fileSystem: LaunchAgentFileSystem,
+  install: LaunchAgentInstallManifest,
+  uid: number,
+): Promise<void> {
+  const path = install.paths.schedulerConfig;
+  try {
+    requireEntry(await inspect(fileSystem, path), ["file"], uid);
+    const contents = await fileSystem.readFile(path);
+    if (Buffer.byteLength(contents, "utf8") > 1_048_576) {
+      throw new Error("oversized scheduler config");
+    }
+    const scheduler = validateLocalSchedulerConfig(JSON.parse(contents) as unknown);
+    const configuredRepositories = scheduler.repositories.map(({ github }) => github);
+    const approvedRepositories = install.onboarding.manifest.repositories;
+    if (
+      scheduler.daemon_config_path !== install.paths.daemonConfig ||
+      configuredRepositories.length !== approvedRepositories.length ||
+      configuredRepositories.some((repository, index) => repository !== approvedRepositories[index])
+    ) {
+      throw new Error("scheduler authority mismatch");
+    }
+  } catch (error) {
+    throw new Error("LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED", { cause: error });
+  }
+}
+
 function requireActivationConfig(
   current: DaemonConfig,
   install: InstallPreview,
@@ -940,6 +968,11 @@ export function createLaunchAgentAdapter(
           snapshot.currentUid,
         );
         requireActivationConfig(current.config, install, preview);
+        await requireCurrentSchedulerConfig(
+          snapshot.fileSystem,
+          activation.install,
+          snapshot.currentUid,
+        );
         const alreadyLoaded = await isAlreadyLoaded(
           snapshot.run,
           activation.install,
@@ -947,12 +980,26 @@ export function createLaunchAgentAdapter(
           trustedPath,
         );
         try {
+          const enabledContents = encodeDaemonConfig(createEnabledDaemonConfig(preview));
           await writeAtomic(
             snapshot.fileSystem,
             activation.install.paths.daemonConfig,
-            encodeDaemonConfig(createEnabledDaemonConfig(preview)),
+            enabledContents,
             snapshot.currentUid,
             nonce,
+          );
+          const enabled = await readCurrentConfig(
+            snapshot.fileSystem,
+            activation.install.paths.daemonConfig,
+            snapshot.currentUid,
+          );
+          if (enabled.contents !== enabledContents) {
+            throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+          }
+          await requireCurrentSchedulerConfig(
+            snapshot.fileSystem,
+            activation.install,
+            snapshot.currentUid,
           );
           if (alreadyLoaded) return;
           const result = await snapshot.run({

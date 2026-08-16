@@ -819,9 +819,11 @@ async function publishRehashedTree(input: {
     if (!(await verifyRemoteCommit(existingCommit))) contractViolation("publisher branch collision");
     return publishedOutcome(existingCommit, true);
   }
+  await revalidate?.();
   await git.runSuccessfully(["config", "--local", "user.name", onboarding.manifest.author.name]);
   await git.runSuccessfully(["config", "--local", "user.email", onboarding.manifest.author.email]);
   const baseDate = await git.runSuccessfully(["show", "-s", "--format=%cI", contract.base_sha]);
+  await revalidate?.();
   const commitSha = await git.runSuccessfully(
     ["commit-tree", treeSha, "-p", contract.base_sha],
     `${message}\n`,

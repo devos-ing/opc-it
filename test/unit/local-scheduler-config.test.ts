@@ -22,6 +22,9 @@ test("snapshots one canonical allowlisted repository", () => {
 test.each([
   { ...valid, max_concurrency: 2 },
   { ...valid, interval_minutes: 5 },
+  { ...valid, daemon_config_path: "Library/Application Support/OPC/config.json" },
+  { ...valid, daemon_config_path: "/Users/roy/Library/Application Support/OPC/../OPC/config.json" },
+  { ...valid, daemon_config_path: "/Users/roy/Library/Application Support/OPC/config.json\n" },
   { ...valid, repositories: [{ ...valid.repositories[0], checkout: "./OPC" }] },
   { ...valid, repositories: [{ ...valid.repositories[0], github: "devos-ing" }] },
   { ...valid, repositories: [...valid.repositories, ...valid.repositories] },

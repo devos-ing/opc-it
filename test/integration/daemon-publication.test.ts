@@ -367,7 +367,7 @@ test("rejects a non-canonical target branch before any side effect", async () =>
   expect(error).toMatchObject({ code: "CONTRACT_VIOLATION" });
 });
 
-test("final publication revalidation blocks drift before push and before PR", async () => {
+test("final publication revalidation blocks drift before commit-tree, push, and PR", async () => {
   let firstCalls = 0;
   const beforeCommit = await publicationFixture({
     revalidate: () => {
@@ -377,7 +377,8 @@ test("final publication revalidation blocks drift before push and before PR", as
   });
   try {
     await beforeCommit.publisher.publish(beforeCommit.candidate).catch(() => undefined);
-    expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("commit-tree"))).toBeTrue();
+    expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("config"))).toBeFalse();
+    expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("commit-tree"))).toBeFalse();
     expect(beforeCommit.sandbox.requests.some(({ args }) => args.includes("push"))).toBeFalse();
     expect(beforeCommit.pullRequests).toHaveLength(0);
     expect(firstCalls).toBeGreaterThan(0);
@@ -385,20 +386,41 @@ test("final publication revalidation blocks drift before push and before PR", as
     await beforeCommit.cleanup();
   }
 
-  let calls = 0;
-  const afterPush = await publicationFixture({
+  let beforePushCalls = 0;
+  const beforePush = await publicationFixture({
     revalidate: () => {
-      calls += 1;
-      return calls >= 2 ? Promise.reject(new Error("BASE_DRIFT")) : Promise.resolve();
+      beforePushCalls += 1;
+      return beforePushCalls >= 3
+        ? Promise.reject(new Error("BASE_DRIFT"))
+        : Promise.resolve();
     },
   });
   try {
-    await afterPush.publisher.publish(afterPush.candidate).catch(() => undefined);
-    expect(afterPush.sandbox.requests.some(({ args }) => args.includes("push"))).toBeTrue();
-    expect(afterPush.sandbox.requests.some(({ command, args }) => command === "/opt/homebrew/bin/gh" && args.includes("POST"))).toBeFalse();
-    expect(afterPush.pullRequests).toHaveLength(0);
+    await beforePush.publisher.publish(beforePush.candidate).catch(() => undefined);
+    expect(beforePush.sandbox.requests.some(({ args }) => args.includes("commit-tree"))).toBeTrue();
+    expect(beforePush.sandbox.requests.some(({ args }) => args.includes("push"))).toBeFalse();
   } finally {
-    await afterPush.cleanup();
+    await beforePush.cleanup();
+  }
+
+  let beforePullRequestCalls = 0;
+  const beforePullRequest = await publicationFixture({
+    revalidate: () => {
+      beforePullRequestCalls += 1;
+      return beforePullRequestCalls >= 5
+        ? Promise.reject(new Error("BASE_DRIFT"))
+        : Promise.resolve();
+    },
+  });
+  try {
+    await beforePullRequest.publisher.publish(beforePullRequest.candidate)
+      .catch(() => undefined);
+    expect(beforePullRequest.sandbox.requests.some(({ args }) => args.includes("push"))).toBeTrue();
+    expect(beforePullRequest.sandbox.requests.some(({ command, args }) =>
+      command === "/opt/homebrew/bin/gh" && args.includes("POST"))).toBeFalse();
+    expect(beforePullRequest.pullRequests).toHaveLength(0);
+  } finally {
+    await beforePullRequest.cleanup();
   }
 });
 

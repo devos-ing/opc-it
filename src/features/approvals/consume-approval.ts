@@ -89,11 +89,6 @@ function validateSignedApprovalRecord(
     ],
     "INVALID_APPROVAL_TRANSITION_RECORD",
   );
-  const metadata = exactOwnData(
-    payload.metadata,
-    ["approval_nonce", "plan_digest", "approval_actor"],
-    "INVALID_APPROVAL_TRANSITION_RECORD",
-  );
   if (
     signed.hmac_sha256 === undefined ||
     typeof signed.hmac_sha256 !== "string" ||
@@ -103,18 +98,60 @@ function validateSignedApprovalRecord(
     payload.key_id !== expected.keyId ||
     payload.issue_number !== expected.issueNumber ||
     payload.work_id !== expected.workId ||
-    payload.from !== "awaiting-approval" ||
-    payload.event !== "approve" ||
-    payload.to !== "ready" ||
     payload.occurred_at !== expected.occurredAt ||
-    metadata.approval_nonce !== expected.nonce ||
-    metadata.plan_digest !== expected.digest ||
-    metadata.approval_actor !== expected.actor ||
+    !isExactApprovalAuthority(payload, {
+      nonce: expected.nonce,
+      digest: expected.digest,
+      actor: expected.actor,
+    }) ||
     canonicalize(parsed) !== value
   ) {
     throw new Error("INVALID_APPROVAL_TRANSITION_RECORD");
   }
   return value;
+}
+
+export function isExactApprovalAuthority(
+  value: unknown,
+  expected: {
+    readonly digest: string;
+    readonly actor: string;
+    readonly nonce?: string;
+  },
+): boolean {
+  try {
+    const payload = exactOwnData(
+      value,
+      [
+        "version",
+        "installation_id",
+        "key_id",
+        "issue_number",
+        "work_id",
+        "from",
+        "event",
+        "to",
+        "occurred_at",
+        "metadata",
+      ],
+      "INVALID_APPROVAL_TRANSITION_RECORD",
+    );
+    const metadata = exactOwnData(
+      payload.metadata,
+      ["approval_nonce", "plan_digest", "approval_actor"],
+      "INVALID_APPROVAL_TRANSITION_RECORD",
+    );
+    return payload.from === "awaiting-approval" &&
+      payload.event === "approve" &&
+      payload.to === "ready" &&
+      typeof metadata.approval_nonce === "string" &&
+      /^[A-Za-z0-9_-]{16,55}$/u.test(metadata.approval_nonce) &&
+      (expected.nonce === undefined || metadata.approval_nonce === expected.nonce) &&
+      metadata.plan_digest === expected.digest &&
+      metadata.approval_actor === expected.actor;
+  } catch {
+    return false;
+  }
 }
 
 export async function consumeApprovalReplies(

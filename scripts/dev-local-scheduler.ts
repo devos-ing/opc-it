@@ -23,6 +23,11 @@ import {
   type LocalSchedulerConfig,
   type LocalSchedulerRepository,
 } from "../src/features/local-scheduler/index.js";
+import {
+  decodeDaemonConfig,
+  encodeDaemonConfig,
+  type DaemonConfig,
+} from "../src/features/onboarding/index.js";
 
 export const devLocalSchedulerLabel = "com.getsuperpower.opc";
 export const devLocalSchedulerMigrationRepository = "devos-ing/opc-it";
@@ -331,9 +336,80 @@ async function ensureOwnedDirectory(
   ) return fail("DEV_LOCAL_SCHEDULER_PATH_FAILED");
 }
 
+async function requireDaemonConfigAuthority(
+  runtime: DevLocalSchedulerRuntime,
+  paths: DevLocalSchedulerPaths,
+  home: string,
+  uid: number,
+  repository: string,
+  opc: string,
+): Promise<{ readonly config: DaemonConfig; readonly contents: string }> {
+  if (!privateFile(await runtime.inspect(paths.daemonConfig), uid)) {
+    return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
+  }
+  let contents: string;
+  let config: DaemonConfig;
+  try {
+    contents = await runtime.readFile(paths.daemonConfig);
+    if (Buffer.byteLength(contents) > maximumOutputBytes) {
+      return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
+    }
+    config = decodeDaemonConfig(contents);
+  } catch {
+    return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
+  }
+  const install = config.install.manifest;
+  const onboarding = config.onboarding.manifest;
+  if (
+    encodeDaemonConfig(config) !== contents ||
+    config.enabled ||
+    install.currentHome !== home ||
+    install.currentUid !== uid ||
+    install.paths.daemonConfig !== paths.daemonConfig ||
+    install.paths.schedulerConfig !== paths.config ||
+    install.paths.launchAgent !== paths.launchAgent ||
+    install.paths.stdout !== paths.stdout ||
+    install.paths.stderr !== paths.stderr ||
+    install.paths.program !== opc ||
+    onboarding.paths.applicationSupport !== paths.applicationSupport ||
+    onboarding.paths.logs !== dirname(paths.stdout) ||
+    onboarding.paths.launchAgent !== paths.launchAgent ||
+    !onboarding.repositories.includes(repository)
+  ) {
+    return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
+  }
+  return Object.freeze({ config, contents });
+}
+
 function plainRecord(value: unknown, code: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return fail(code);
   return value as Record<string, unknown>;
+}
+
+function exactRecord(
+  value: unknown,
+  keys: readonly string[],
+  code: string,
+): Readonly<Record<string, unknown>> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype ||
+    Reflect.ownKeys(value).length !== keys.length
+  ) return fail(code);
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      return fail(code);
+    }
+    result[key] = descriptor.value;
+  }
+  if (Reflect.ownKeys(value).some((key) => typeof key !== "string" || !keys.includes(key))) {
+    return fail(code);
+  }
+  return Object.freeze(result);
 }
 
 function parseJson(value: string, code: string): unknown {
@@ -626,6 +702,14 @@ async function install(
   const { home, uid, paths } = validatedCurrentUser(runtime);
   await requireCheckoutAuthority(runtime, input.checkout, home, uid);
   const tools = await resolveTools(runtime, true);
+  const approvedDaemon = await requireDaemonConfigAuthority(
+    runtime,
+    paths,
+    home,
+    uid,
+    input.repository,
+    tools.opc,
+  );
   await requireRepositoryAuthority(runtime, input.repository, input.checkout, tools);
   await requireDisabledControls(runtime, input.repository, input.checkout, tools);
   await requireCodeGraph(runtime, input.checkout, tools.codegraph);
@@ -653,6 +737,21 @@ async function install(
     renderSchedulerLaunchAgent(tools.opc, input.checkout, paths),
     privateFileMode,
   );
+  const currentDaemon = await requireDaemonConfigAuthority(
+    runtime,
+    paths,
+    home,
+    uid,
+    input.repository,
+    tools.opc,
+  );
+  const currentScheduler = await readSchedulerConfig(runtime, paths.config, uid);
+  if (
+    currentDaemon.contents !== approvedDaemon.contents ||
+    JSON.stringify(currentScheduler) !== JSON.stringify(config)
+  ) {
+    return fail("DEV_LOCAL_SCHEDULER_CONFIG_FAILED");
+  }
   let bootstrap: DevLocalSchedulerCommandExecutionResult;
   try {
     bootstrap = await runtime.run(
@@ -688,7 +787,11 @@ async function install(
 }
 
 function tickResult(value: unknown): DevLocalSchedulerTickResult {
-  const result = plainRecord(value, "DEV_LOCAL_SCHEDULER_TICK_FAILED");
+  const result = exactRecord(
+    value,
+    ["status", "repositoriesChecked"],
+    "DEV_LOCAL_SCHEDULER_TICK_FAILED",
+  );
   if (
     !["disabled", "busy", "idle", "worked"].includes(String(result.status)) ||
     typeof result.repositoriesChecked !== "number" ||
@@ -701,6 +804,18 @@ function tickResult(value: unknown): DevLocalSchedulerTickResult {
     status: result.status as DevLocalSchedulerTickResult["status"],
     repositoriesChecked: result.repositoriesChecked,
   });
+}
+
+function tickCliResult(value: unknown): DevLocalSchedulerTickResult {
+  const envelope = exactRecord(
+    value,
+    ["ok", "command", "result"],
+    "DEV_LOCAL_SCHEDULER_TICK_FAILED",
+  );
+  if (envelope.ok !== true || envelope.command !== "tick") {
+    return fail("DEV_LOCAL_SCHEDULER_TICK_FAILED");
+  }
+  return tickResult(envelope.result);
 }
 
 async function runOnce(
@@ -718,7 +833,7 @@ async function runOnce(
   await requireRepositoryAuthority(runtime, configured.github, configured.checkout, tools);
   await requireDisabledControls(runtime, configured.github, configured.checkout, tools);
   await requireCodeGraph(runtime, configured.checkout, tools.codegraph);
-  const result = tickResult(parseJson(
+  const result = tickCliResult(parseJson(
     (await required(
       runtime,
       tools.opc,

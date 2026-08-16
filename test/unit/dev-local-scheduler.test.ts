@@ -1,4 +1,11 @@
 import { expect, test } from "bun:test";
+import { runCli } from "../../src/cli/main.js";
+import {
+  createDisabledDaemonConfig,
+  encodeDaemonConfig,
+  previewInstall,
+  previewOnboarding,
+} from "../../src/features/onboarding/index.js";
 import {
   devLocalSchedulerPaths,
   parseDevLocalSchedulerArgs,
@@ -15,6 +22,24 @@ const checkout = `${home}/Documents/ChatGPT/OPC`;
 const stage = `${home}/.local/share/opc/.dev-runner-stage-dunpcS`;
 const runnerName = "opc-dev-roy-arm64";
 const paths = devLocalSchedulerPaths(home);
+
+function approvedDaemonConfigContents(): string {
+  const onboarding = previewOnboarding({
+    githubLogin: "devos-ing",
+    currentHome: home,
+    repositories: [{ name: repository, private: true, fork: false, owner: "devos-ing" }],
+    paths: {
+      binary: `${home}/.local/bin/opc`,
+      applicationSupport: paths.applicationSupport,
+      logs: `${home}/Library/Logs/OPC`,
+      launchAgent: paths.launchAgent,
+      codexHome: `${paths.applicationSupport}/codex`,
+    },
+  });
+  return encodeDaemonConfig(createDisabledDaemonConfig(
+    previewInstall({ onboarding, currentUid: uid }),
+  ));
+}
 
 interface Call {
   readonly command: string;
@@ -48,6 +73,11 @@ class TestRuntime implements DevLocalSchedulerRuntime {
   processChecks = 0;
   driftStageAfterRemoteConfirmation = false;
   tickResult = { status: "disabled", repositoriesChecked: 0 } as const;
+  tickEnvelope: unknown = {
+    ok: true,
+    command: "tick",
+    result: this.tickResult,
+  };
 
   constructor() {
     for (const path of [
@@ -67,6 +97,8 @@ class TestRuntime implements DevLocalSchedulerRuntime {
       agentName: runnerName,
       gitHubUrl: `https://github.com/${repository}`,
     }));
+    this.entries.set(paths.daemonConfig, { kind: "file", uid, mode: 0o600 });
+    this.files.set(paths.daemonConfig, approvedDaemonConfigContents());
   }
 
   currentHome(): string {
@@ -79,7 +111,9 @@ class TestRuntime implements DevLocalSchedulerRuntime {
 
   resolveCommand(command: string): Promise<string> {
     this.events.push(`resolve:${command}`);
-    return Promise.resolve(`/usr/local/bin/${command}`);
+    return Promise.resolve(
+      command === "opc" ? `${paths.applicationSupport}/dist/cli.js` : `/usr/local/bin/${command}`,
+    );
   }
 
   run(command: string, args: readonly string[]): Promise<{
@@ -126,7 +160,9 @@ class TestRuntime implements DevLocalSchedulerRuntime {
       if (this.launchctlState === "absent") {
         return Promise.resolve({ exitCode: 113, stdout: "", stderr: "not found" });
       }
-      const program = this.launchctlState === "foreign" ? "/tmp/foreign-opc" : "/usr/local/bin/opc";
+      const program = this.launchctlState === "foreign"
+        ? "/tmp/foreign-opc"
+        : `${paths.applicationSupport}/dist/cli.js`;
       return Promise.resolve(pass([
         `gui/${String(uid)}/com.getsuperpower.opc = {`,
         `path = ${paths.launchAgent}`,
@@ -141,8 +177,11 @@ class TestRuntime implements DevLocalSchedulerRuntime {
         "last exit code = 0",
       ].join("\n")));
     }
-    if (command.endsWith("/opc") && args.join(" ") === `tick --config ${paths.config}`) {
-      return Promise.resolve(pass(`${JSON.stringify(this.tickResult)}\n`));
+    if (
+      (command.endsWith("/opc") || command === `${paths.applicationSupport}/dist/cli.js`) &&
+      args.join(" ") === `tick --config ${paths.config}`
+    ) {
+      return Promise.resolve(pass(`${JSON.stringify(this.tickEnvelope)}\n`));
     }
     if (command === "/usr/bin/pgrep" && args[0] === "-f") {
       this.processChecks += 1;
@@ -184,6 +223,7 @@ class TestRuntime implements DevLocalSchedulerRuntime {
   }
 
   readFile(path: string): Promise<string> {
+    this.events.push(`read:${path}`);
     const value = this.files.get(path);
     return value === undefined ? Promise.reject(new Error("ENOENT")) : Promise.resolve(value);
   }
@@ -195,6 +235,7 @@ class TestRuntime implements DevLocalSchedulerRuntime {
   }
 
   writeFile(path: string, contents: string, mode: number): Promise<void> {
+    this.events.push(`write:${path}`);
     this.writes.push({ path, contents, mode });
     this.files.set(path, contents);
     this.entries.set(path, { kind: "file", uid, mode });
@@ -299,7 +340,7 @@ test("install validates disabled current-user authority and writes only private 
     repositories: [{ github: repository, checkout, enabled: true }],
   });
   expect(runtime.files.get(paths.launchAgent)).toContain("<integer>900</integer>");
-  expect(runtime.files.get(paths.launchAgent)).toContain(`/usr/local/bin/opc`);
+  expect(runtime.files.get(paths.launchAgent)).toContain(`${paths.applicationSupport}/dist/cli.js`);
   expect(runtime.calls).toContainEqual({
     command: "/bin/launchctl",
     args: ["bootstrap", `gui/${String(uid)}`, paths.launchAgent],
@@ -311,6 +352,41 @@ test("install validates disabled current-user authority and writes only private 
   expect(serialized).not.toContain("CODEX_API_KEY");
   expect(serialized).not.toContain("GH_TOKEN");
   expect(runtime.calls.some(({ command }) => command === "sudo" || command.endsWith("/sudo"))).toBe(false);
+  const bootstrap = runtime.events.indexOf(
+    `run:/bin/launchctl:bootstrap gui/${String(uid)} ${paths.launchAgent}`,
+  );
+  expect(runtime.events.lastIndexOf(`read:${paths.daemonConfig}`)).toBeLessThan(bootstrap);
+  expect(runtime.events.lastIndexOf(`read:${paths.config}`)).toBeLessThan(bootstrap);
+});
+
+test("install requires the exact private approved daemon authority before scheduler mutation", async () => {
+  const cases: readonly [string, (runtime: TestRuntime) => void][] = [
+    ["missing", (runtime) => {
+      runtime.entries.delete(paths.daemonConfig);
+      runtime.files.delete(paths.daemonConfig);
+    }],
+    ["wrong-owner", (runtime) => {
+      runtime.entries.set(paths.daemonConfig, { kind: "file", uid: 502, mode: 0o600 });
+    }],
+    ["open-mode", (runtime) => {
+      runtime.entries.set(paths.daemonConfig, { kind: "file", uid, mode: 0o644 });
+    }],
+    ["malformed", (runtime) => {
+      runtime.files.set(paths.daemonConfig, "{}\n");
+    }],
+  ];
+  for (const [name, corrupt] of cases) {
+    const runtime = new TestRuntime();
+    corrupt(runtime);
+    await expectFailure(
+      runDevLocalScheduler(installInput(), runtime),
+      "DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED",
+    );
+    expect(runtime.writes, name).toEqual([]);
+    expect(commandSignatures(runtime), name).not.toContain(
+      `/bin/launchctl bootstrap gui/${String(uid)} ${paths.launchAgent}`,
+    );
+  }
 });
 
 test("install is idempotent when the exact current-user scheduler job is already loaded", async () => {
@@ -345,12 +421,62 @@ test("run-once performs the final disabled and CodeGraph checks before the share
   const variableCheck = events.indexOf(`run:/usr/local/bin/gh:variable get OPC_ENABLED --repo ${repository}`);
   const policyCheck = events.indexOf(`run:/usr/local/bin/git:-C ${checkout} show HEAD:.codex-pipeline.yml`);
   const graphCheck = events.indexOf(`run:/usr/local/bin/codegraph:status --json ${checkout}`);
-  const tick = events.indexOf(`run:/usr/local/bin/opc:tick --config ${paths.config}`);
+  const tick = events.indexOf(
+    `run:${paths.applicationSupport}/dist/cli.js:tick --config ${paths.config}`,
+  );
   expect(variableCheck).toBeGreaterThan(-1);
   expect(policyCheck).toBeGreaterThan(variableCheck);
   expect(graphCheck).toBeGreaterThan(policyCheck);
   expect(tick).toBeGreaterThan(graphCheck);
   expect(events.slice(graphCheck + 1, tick)).toEqual([]);
+});
+
+test("run-once decodes the exact JSON envelope produced by the real tick CLI composition", async () => {
+  const runtime = new TestRuntime();
+  await runDevLocalScheduler(installInput(), runtime);
+  const baseRun = runtime.run.bind(runtime);
+  runtime.run = async (command, args) => {
+    if (
+      (command.endsWith("/opc") || command === `${paths.applicationSupport}/dist/cli.js`) &&
+      args.join(" ") === `tick --config ${paths.config}`
+    ) {
+      const cli = await runCli(["tick", "--config", paths.config], {
+        tick: () => ({
+          run(configPath) {
+            expect(configPath).toBe(paths.config);
+            return Promise.resolve(runtime.tickResult);
+          },
+        }),
+      });
+      return pass(`${cli.message}\n`);
+    }
+    return baseRun(command, args);
+  };
+
+  expect(await runDevLocalScheduler({ command: "run-once" }, runtime)).toEqual({
+    command: "run-once",
+    result: runtime.tickResult,
+  });
+});
+
+test("run-once rejects bare, open, or malformed tick CLI envelopes", async () => {
+  const invalidEnvelopes = [
+    { status: "disabled", repositoriesChecked: 0 },
+    { ok: false, command: "tick", result: { status: "disabled", repositoriesChecked: 0 } },
+    { ok: true, command: "status", result: { status: "disabled", repositoriesChecked: 0 } },
+    { ok: true, command: "tick", result: { status: "disabled", repositoriesChecked: 0 }, extra: true },
+    { ok: true, command: "tick", result: { status: "disabled", repositoriesChecked: 0, extra: true } },
+  ];
+  for (const tickEnvelope of invalidEnvelopes) {
+    const runtime = new TestRuntime();
+    await runDevLocalScheduler(installInput(), runtime);
+    runtime.tickEnvelope = tickEnvelope;
+
+    await expectFailure(
+      runDevLocalScheduler({ command: "run-once" }, runtime),
+      "DEV_LOCAL_SCHEDULER_TICK_FAILED",
+    );
+  }
 });
 
 test("status exposes scheduler metadata without returning file contents or credentials", async () => {

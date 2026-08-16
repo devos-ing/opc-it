@@ -3,15 +3,24 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { posix } from "node:path";
 import { Database } from "bun:sqlite";
+import { canonicalize } from "json-canonicalize";
 import { runBounded } from "../../adapters/local/process-runner.js";
 import type { RepositoryPolicy } from "../../domain/contracts.js";
 import { parseGitHubRemote } from "../../domain/github-repository.js";
 import { digestCanonical } from "../../domain/identity.js";
 import { parseRepositoryPolicyYaml } from "../../domain/validation.js";
 import {
+  isExactApprovalAuthority,
+} from "../../features/approvals/index.js";
+import {
   snapshotApprovedPublisherOnboarding,
   type ApprovedPublisherOnboarding,
+  type DeliveryRevalidation,
 } from "../../features/delivery/index.js";
+import {
+  decodeWorkBody,
+  encodeWorkBody,
+} from "../../features/planning/index.js";
 import {
   validateLocalSchedulerConfig,
   type LocalSchedulerRepository,
@@ -24,9 +33,12 @@ import {
   type GitHubIdentity,
   type OnboardingPreview,
 } from "../../features/onboarding/index.js";
-import type {
-  LocalJournal,
-  QueueRepository,
+import {
+  deriveRecoveryWorkId,
+  readTrustedTimeline,
+  signTransition,
+  type LocalJournal,
+  type QueueRepository,
 } from "../../features/queue/index.js";
 import { createSqliteJournal } from "../../platform/journal/sqlite-journal-adapter.js";
 import { createSqliteProcessLock } from "../../platform/lock/sqlite-process-lock-adapter.js";
@@ -34,6 +46,7 @@ import { createDeliveryLoop } from "../../runtime/delivery-loop.js";
 import type { ProcessLock } from "../../runtime/process-lock.js";
 import {
   runEnabledTick,
+  type DaemonDeliveryContext,
   type EnabledDeliveryRuntime,
   type EnabledRepositoryRuntime,
   type RunEnabledTickInput,
@@ -41,7 +54,10 @@ import {
 } from "../../runtime/run-enabled-tick.js";
 import { runScheduledTick } from "../../runtime/run-scheduled-tick.js";
 import type { TickCommandResult } from "../commands/tick.js";
-import { createProductionLocalDelivery } from "./local-delivery.js";
+import {
+  createProductionLocalDelivery,
+  type ProductionLocalDeliveryDependencies,
+} from "./local-delivery.js";
 import {
   truncatePrivateTickLogs,
   type PrivateTickLogPaths,
@@ -90,6 +106,7 @@ export interface ProductionTickDependencies {
   readonly createProcessLock?: (database: Database) => ProcessLock;
   readonly createDelivery?: (
     options: Parameters<typeof createProductionLocalDelivery>[0],
+    dependencies?: ProductionLocalDeliveryDependencies,
   ) => EnabledDeliveryRuntime;
   readonly runEnabledTick?: (input: RunEnabledTickInput) => Promise<RunEnabledTickResult>;
   readonly now?: () => Date;
@@ -425,6 +442,118 @@ function repositoryLeaf(repository: string): string {
   return repository.replace("/", "--");
 }
 
+async function revalidateCurrentIssueAuthority(input: {
+  readonly context: DaemonDeliveryContext;
+  readonly github: QueueRepository;
+  readonly verificationKeys: Readonly<Record<string, string>>;
+  readonly signingKey: string;
+  readonly approvalActor: string;
+  readonly policyDigest: DeliveryRevalidation["policyDigest"];
+  readonly now: () => Date;
+}): Promise<DeliveryRevalidation> {
+  const changed = (): never => {
+    throw new Error("CURRENT_ISSUE_AUTHORITY_CHANGED");
+  };
+  try {
+    const issue = await input.github.findWork(
+      input.context.repository,
+      input.context.workId,
+    );
+    if (
+      issue === undefined ||
+      issue.repository !== input.context.repository ||
+      issue.number !== input.context.issueNumber ||
+      issue.workId !== input.context.workId ||
+      issue.digest !== input.context.contractDigest ||
+      issue.body !== encodeWorkBody(input.context.contract, input.context.contractDigest)
+    ) return changed();
+    const decoded = decodeWorkBody(issue.body);
+    if (
+      decoded.digest !== input.context.contractDigest ||
+      decoded.contract.repository !== input.context.repository ||
+      decoded.contract.work_id !== input.context.rootWorkId ||
+      canonicalize(decoded.contract) !== canonicalize(input.context.contract)
+    ) return changed();
+    const timeline = readTrustedTimeline(
+      await input.github.listTransitions(input.context.repository, issue.number),
+      input.verificationKeys,
+      { issueNumber: issue.number, workId: issue.workId },
+      issue.digest,
+    );
+    if (
+      timeline.leaseAuthority === undefined ||
+      canonicalize(signTransition(timeline.leaseAuthority.payload, input.signingKey)) !==
+        canonicalize(input.context.claim)
+    ) return changed();
+
+    const approvals = timeline.accepted.filter(({ payload }) => payload.event === "approve");
+    for (let attempt = input.context.attempt - 1; attempt >= 1; attempt -= 1) {
+      const workId = attempt === 1
+        ? input.context.rootWorkId
+        : deriveRecoveryWorkId(input.context.rootWorkId, attempt);
+      const predecessor = await input.github.findWork(input.context.repository, workId);
+      if (
+        predecessor === undefined ||
+        predecessor.repository !== input.context.repository ||
+        predecessor.workId !== workId ||
+        (attempt === 1 && predecessor.number !== input.context.rootIssueNumber)
+      ) return changed();
+      const predecessorBody = decodeWorkBody(predecessor.body);
+      if (
+        predecessorBody.digest !== predecessor.digest ||
+        predecessorBody.contract.repository !== input.context.repository ||
+        predecessorBody.contract.work_id !== input.context.rootWorkId ||
+        predecessor.body !== encodeWorkBody(predecessorBody.contract, predecessor.digest)
+      ) return changed();
+      const predecessorTimeline = readTrustedTimeline(
+        await input.github.listTransitions(
+          input.context.repository,
+          predecessor.number,
+        ),
+        input.verificationKeys,
+        { issueNumber: predecessor.number, workId: predecessor.workId },
+        predecessor.digest,
+      );
+      approvals.push(...predecessorTimeline.accepted.filter(
+        ({ payload }) => payload.event === "approve",
+      ));
+    }
+    const approval = approvals.toSorted(
+      (left, right) => left.commentId - right.commentId,
+    ).at(-1);
+    if (
+      approval === undefined ||
+      !isExactApprovalAuthority(approval.payload, {
+        digest: input.context.contractDigest,
+        actor: input.approvalActor,
+      })
+    ) return changed();
+    const leaseExpiresAt = timeline.leaseAuthority.payload.metadata.lease_expires_at;
+    const currentTime = Date.prototype.getTime.call(input.now());
+    if (
+      typeof leaseExpiresAt !== "string" ||
+      !Number.isFinite(currentTime) ||
+      Date.parse(leaseExpiresAt) <= currentTime ||
+      input.context.signal.aborted
+    ) return changed();
+    return Object.freeze({
+      enabled: true,
+      policyDigest: input.policyDigest,
+      baseSha: input.context.contract.base_sha,
+      contractDigest: input.context.contractDigest,
+      repositoryAllowed: true,
+      leaseActive: true,
+      claim: input.context.claim,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "CURRENT_ISSUE_AUTHORITY_CHANGED"
+    ) throw error;
+    return changed();
+  }
+}
+
 export function openExistingTickDatabase(path: string): Database {
   return new Database(path, { readwrite: true, create: false });
 }
@@ -448,8 +577,12 @@ export async function runProductionTick(
   const loadScheduler = dependencies.loadSchedulerConfig ??
     ((path: string) => readSchedulerConfig(path, uid, fileSystem));
   const scheduler = validateLocalSchedulerConfig(await loadScheduler(configPath));
+  const daemonConfigPath = `${authority.support}/config.json`;
+  if (scheduler.daemon_config_path !== daemonConfigPath) {
+    throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+  }
   const loadDaemon = dependencies.loadDaemonConfig ?? readDaemonConfig;
-  const daemon = validateDaemonConfig(await loadDaemon(scheduler.daemon_config_path));
+  const daemon = validateDaemonConfig(await loadDaemon(daemonConfigPath));
   const home = daemon.install.manifest.currentHome;
   const support = daemon.onboarding.manifest.paths.applicationSupport;
   if (
@@ -492,8 +625,10 @@ export async function runProductionTick(
   const createJournal = dependencies.createJournal ?? createSqliteJournal;
   const createProcessLock = dependencies.createProcessLock ?? createSqliteProcessLock;
   const createDelivery = dependencies.createDelivery ??
-    ((options: Parameters<typeof createProductionLocalDelivery>[0]) =>
-      createProductionLocalDelivery(options));
+    ((
+      options: Parameters<typeof createProductionLocalDelivery>[0],
+      deliveryDependencies?: ProductionLocalDeliveryDependencies,
+    ) => createProductionLocalDelivery(options, deliveryDependencies));
   const runEnabled = dependencies.runEnabledTick ?? runEnabledTick;
   const resolveCredentials = dependencies.credentials ?? credentials;
   const resolveQueue = dependencies.queue ?? queue;
@@ -545,6 +680,8 @@ export async function runProductionTick(
         }
         const verificationKeys = Object.freeze({ [keyId]: transitionKey });
         const github = resolveQueue(daemon.onboarding);
+        if (!daemon.enabled) throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+        const approvalActor = daemon.activation.manifest.telegram.userId;
         const repositoryRuntimes: EnabledRepositoryRuntime[] = authorities.map((authority) => {
           if (commands === undefined) throw new Error("LOCAL_SCHEDULER_COMMANDS_MISSING");
           const delivery = createDelivery({
@@ -560,6 +697,22 @@ export async function runProductionTick(
             approvedPolicy: authority.policy,
             approvedPolicyDigest: authority.policyDigest,
             verificationKeys,
+          }, {
+            revalidate: async (_boundary, context) => {
+              const revalidation = await revalidateCurrentIssueAuthority({
+                context,
+                github,
+                verificationKeys,
+                signingKey: transitionKey,
+                approvalActor,
+                policyDigest: authority.policyDigest,
+                now,
+              });
+              if (!(await currentDaemon()).enabled) {
+                throw new Error("CURRENT_ISSUE_AUTHORITY_CHANGED");
+              }
+              return revalidation;
+            },
           });
           return Object.freeze({
             repository: authority.configured.github,

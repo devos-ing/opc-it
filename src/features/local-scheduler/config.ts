@@ -47,6 +47,14 @@ function invalid(): never {
 
 export function validateLocalSchedulerConfig(input: unknown): LocalSchedulerConfig {
   const parsed = localSchedulerValidator(input) ? input : invalid();
+  if (
+    !posix.isAbsolute(parsed.daemon_config_path) ||
+    posix.normalize(parsed.daemon_config_path) !== parsed.daemon_config_path ||
+    parsed.daemon_config_path.length > 4_096 ||
+    /[\0\r\n]/u.test(parsed.daemon_config_path)
+  ) {
+    invalid();
+  }
   const repositories = parsed.repositories.map((repository) => Object.freeze({ ...repository }));
   let names: readonly string[];
   try {
