@@ -166,9 +166,10 @@ bootstrapping. The development installer does not reconstruct that authority:
 it requires the exact private current-user daemon configuration, records only
 the explicitly supplied repository/checkout mapping, and re-reads both
 canonical files before bootstrap. Activation likewise requires both files to
-match the approved onboarding repository set and exact current-user paths
+match the exact approved onboarding repository set, the explicit canonical
+current-user checkout mapping, and the enabled scheduler state immediately
 before it enables or bootstraps the same scheduler job. Missing, stale, unsafe,
-or mismatched authority fails closed; no checkout is inferred.
+subset, superset, or mismatched authority fails closed; no checkout is inferred.
 
 ## Migration from the Runner Route
 

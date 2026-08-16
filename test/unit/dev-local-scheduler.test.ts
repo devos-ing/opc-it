@@ -23,11 +23,18 @@ const stage = `${home}/.local/share/opc/.dev-runner-stage-dunpcS`;
 const runnerName = "opc-dev-roy-arm64";
 const paths = devLocalSchedulerPaths(home);
 
-function approvedDaemonConfigContents(): string {
+function approvedDaemonConfigContents(
+  repositories: readonly string[] = [repository],
+): string {
   const onboarding = previewOnboarding({
     githubLogin: "devos-ing",
     currentHome: home,
-    repositories: [{ name: repository, private: true, fork: false, owner: "devos-ing" }],
+    repositories: repositories.map((name) => ({
+      name,
+      private: true,
+      fork: false,
+      owner: "devos-ing",
+    })),
     paths: {
       binary: `${home}/.local/bin/opc`,
       applicationSupport: paths.applicationSupport,
@@ -387,6 +394,23 @@ test("install requires the exact private approved daemon authority before schedu
       `/bin/launchctl bootstrap gui/${String(uid)} ${paths.launchAgent}`,
     );
   }
+});
+
+test("install rejects an extra daemon repository omitted by the singleton scheduler", async () => {
+  const runtime = new TestRuntime();
+  runtime.files.set(paths.daemonConfig, approvedDaemonConfigContents([
+    repository,
+    "devos-ing/other-private-app",
+  ]));
+
+  await expectFailure(
+    runDevLocalScheduler(installInput(), runtime),
+    "DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED",
+  );
+  expect(runtime.writes).toEqual([]);
+  expect(commandSignatures(runtime)).not.toContain(
+    `/bin/launchctl bootstrap gui/${String(uid)} ${paths.launchAgent}`,
+  );
 });
 
 test("install is idempotent when the exact current-user scheduler job is already loaded", async () => {

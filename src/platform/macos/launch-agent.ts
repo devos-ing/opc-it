@@ -24,7 +24,12 @@ import type {
 } from "../../adapters/local/process-runner.js";
 import { digestCanonical } from "../../domain/identity.js";
 import type { LifecycleConfigLock } from "./lifecycle-config-lock.js";
-import { validateLocalSchedulerConfig } from "../../features/local-scheduler/index.js";
+import {
+  requireExactLocalSchedulerAuthority,
+  validateLocalSchedulerConfig,
+  type LocalSchedulerConfig,
+  type LocalSchedulerRepository,
+} from "../../features/local-scheduler/index.js";
 import { decodeUninstallReceipt } from "./uninstall-receipt.js";
 
 export interface LaunchAgentFileEntry {
@@ -756,7 +761,8 @@ async function requireCurrentSchedulerConfig(
   fileSystem: LaunchAgentFileSystem,
   install: LaunchAgentInstallManifest,
   uid: number,
-): Promise<void> {
+  expectedRepositories?: readonly LocalSchedulerRepository[],
+): Promise<LocalSchedulerConfig> {
   const path = install.paths.schedulerConfig;
   try {
     requireEntry(await inspect(fileSystem, path), ["file"], uid);
@@ -765,15 +771,13 @@ async function requireCurrentSchedulerConfig(
       throw new Error("oversized scheduler config");
     }
     const scheduler = validateLocalSchedulerConfig(JSON.parse(contents) as unknown);
-    const configuredRepositories = scheduler.repositories.map(({ github }) => github);
-    const approvedRepositories = install.onboarding.manifest.repositories;
-    if (
-      scheduler.daemon_config_path !== install.paths.daemonConfig ||
-      configuredRepositories.length !== approvedRepositories.length ||
-      configuredRepositories.some((repository, index) => repository !== approvedRepositories[index])
-    ) {
-      throw new Error("scheduler authority mismatch");
-    }
+    return requireExactLocalSchedulerAuthority(scheduler, {
+      currentHome: install.currentHome,
+      daemonConfigPath: install.paths.daemonConfig,
+      approvedRepositories: install.onboarding.manifest.repositories,
+      repositories: expectedRepositories ?? scheduler.repositories,
+      repositoryEnabled: true,
+    });
   } catch (error) {
     throw new Error("LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED", { cause: error });
   }
@@ -968,7 +972,7 @@ export function createLaunchAgentAdapter(
           snapshot.currentUid,
         );
         requireActivationConfig(current.config, install, preview);
-        await requireCurrentSchedulerConfig(
+        const approvedScheduler = await requireCurrentSchedulerConfig(
           snapshot.fileSystem,
           activation.install,
           snapshot.currentUid,
@@ -978,6 +982,21 @@ export function createLaunchAgentAdapter(
           activation.install,
           home,
           trustedPath,
+        );
+        const beforeEnable = await readCurrentConfig(
+          snapshot.fileSystem,
+          activation.install.paths.daemonConfig,
+          snapshot.currentUid,
+        );
+        requireActivationConfig(beforeEnable.config, install, preview);
+        if (beforeEnable.contents !== current.contents) {
+          throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
+        }
+        await requireCurrentSchedulerConfig(
+          snapshot.fileSystem,
+          activation.install,
+          snapshot.currentUid,
+          approvedScheduler.repositories,
         );
         try {
           const enabledContents = encodeDaemonConfig(createEnabledDaemonConfig(preview));
@@ -1000,6 +1019,7 @@ export function createLaunchAgentAdapter(
             snapshot.fileSystem,
             activation.install,
             snapshot.currentUid,
+            approvedScheduler.repositories,
           );
           if (alreadyLoaded) return;
           const result = await snapshot.run({

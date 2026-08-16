@@ -57,10 +57,11 @@ LaunchAgent plist; it does not bootstrap the job. `dev:local install` then
 requires that exact daemon authority, writes only the explicit repository and
 checkout mapping supplied on the command line, and re-reads both canonical
 configuration files before bootstrapping the still-disabled job. Activation
-again proves the same daemon configuration, scheduler configuration, approved
-repository order, plist, UID, and current-user paths before enabling or
-bootstrapping. A missing or mismatched half of this authority pair fails closed;
-neither lifecycle guesses a checkout or repository mapping.
+again proves the same daemon configuration, exact approved repository set,
+explicit canonical checkout mapping, enabled repository state, plist, UID, and
+current-user paths immediately before enabling and before bootstrapping. A
+missing or mismatched half of this authority pair fails closed; neither
+lifecycle guesses a checkout or accepts a repository subset or superset.
 
 `status` reports the configured LaunchAgent and allowlisted repository without
 secrets. `uninstall` removes scheduler-owned state only. Neither `install` nor

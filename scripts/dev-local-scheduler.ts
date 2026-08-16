@@ -19,6 +19,7 @@ import {
   parseGitHubRepository,
 } from "../src/domain/github-repository.js";
 import {
+  requireExactLocalSchedulerAuthority,
   validateLocalSchedulerConfig,
   type LocalSchedulerConfig,
   type LocalSchedulerRepository,
@@ -341,7 +342,7 @@ async function requireDaemonConfigAuthority(
   paths: DevLocalSchedulerPaths,
   home: string,
   uid: number,
-  repository: string,
+  scheduler: LocalSchedulerConfig,
   opc: string,
 ): Promise<{ readonly config: DaemonConfig; readonly contents: string }> {
   if (!privateFile(await runtime.inspect(paths.daemonConfig), uid)) {
@@ -373,9 +374,19 @@ async function requireDaemonConfigAuthority(
     install.paths.program !== opc ||
     onboarding.paths.applicationSupport !== paths.applicationSupport ||
     onboarding.paths.logs !== dirname(paths.stdout) ||
-    onboarding.paths.launchAgent !== paths.launchAgent ||
-    !onboarding.repositories.includes(repository)
+    onboarding.paths.launchAgent !== paths.launchAgent
   ) {
+    return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
+  }
+  try {
+    requireExactLocalSchedulerAuthority(scheduler, {
+      currentHome: home,
+      daemonConfigPath: paths.daemonConfig,
+      approvedRepositories: onboarding.repositories,
+      repositories: scheduler.repositories,
+      repositoryEnabled: true,
+    });
+  } catch {
     return fail("DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED");
   }
   return Object.freeze({ config, contents });
@@ -701,13 +712,24 @@ async function install(
 ): Promise<DevLocalSchedulerCommandResult> {
   const { home, uid, paths } = validatedCurrentUser(runtime);
   await requireCheckoutAuthority(runtime, input.checkout, home, uid);
+  const config = validateLocalSchedulerConfig({
+    version: 1,
+    interval_minutes: 15,
+    max_concurrency: 1,
+    daemon_config_path: paths.daemonConfig,
+    repositories: [{
+      github: input.repository,
+      checkout: input.checkout,
+      enabled: true,
+    }],
+  });
   const tools = await resolveTools(runtime, true);
   const approvedDaemon = await requireDaemonConfigAuthority(
     runtime,
     paths,
     home,
     uid,
-    input.repository,
+    config,
     tools.opc,
   );
   await requireRepositoryAuthority(runtime, input.repository, input.checkout, tools);
@@ -720,17 +742,6 @@ async function install(
   await requirePrivateFileIfPresent(runtime, paths.config, uid);
   await requirePrivateFileIfPresent(runtime, paths.launchAgent, uid);
 
-  const config = validateLocalSchedulerConfig({
-    version: 1,
-    interval_minutes: 15,
-    max_concurrency: 1,
-    daemon_config_path: paths.daemonConfig,
-    repositories: [{
-      github: input.repository,
-      checkout: input.checkout,
-      enabled: true,
-    }],
-  });
   await runtime.writeFile(paths.config, `${JSON.stringify(config, null, 2)}\n`, privateFileMode);
   await runtime.writeFile(
     paths.launchAgent,
@@ -742,10 +753,21 @@ async function install(
     paths,
     home,
     uid,
-    input.repository,
+    config,
     tools.opc,
   );
   const currentScheduler = await readSchedulerConfig(runtime, paths.config, uid);
+  try {
+    requireExactLocalSchedulerAuthority(currentScheduler, {
+      currentHome: home,
+      daemonConfigPath: paths.daemonConfig,
+      approvedRepositories: currentDaemon.config.onboarding.manifest.repositories,
+      repositories: config.repositories,
+      repositoryEnabled: true,
+    });
+  } catch {
+    return fail("DEV_LOCAL_SCHEDULER_CONFIG_FAILED");
+  }
   if (
     currentDaemon.contents !== approvedDaemon.contents ||
     JSON.stringify(currentScheduler) !== JSON.stringify(config)

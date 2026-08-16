@@ -45,13 +45,18 @@ function activationPreview(install: InstallPreview) {
   return previewActivation({ install, telegram: telegramIdentity() });
 }
 
-function onboardingPreview() {
+function onboardingPreview(
+  repositories: readonly string[] = ["roy/opc"],
+) {
   return previewOnboarding({
     githubLogin: "roy",
     currentHome,
-    repositories: [
-      { name: "roy/opc", private: true, fork: false, owner: "roy" },
-    ],
+    repositories: repositories.map((name) => ({
+      name,
+      private: true,
+      fork: false,
+      owner: "roy",
+    })),
     paths: {
       binary: `${currentHome}/.local/bin/opc`,
       applicationSupport: `${currentHome}/Library/Application Support/OPC`,
@@ -550,7 +555,7 @@ describe("current-user LaunchAgent lifecycle", () => {
   test("production activation rejects a missing or mismatched scheduler authority before bootstrap", async () => {
     const cases: readonly [string, string | undefined][] = [
       ["missing", undefined],
-      ["wrong daemon", JSON.stringify({
+      ["daemon path drift", JSON.stringify({
         version: 1,
         interval_minutes: 15,
         max_concurrency: 1,
@@ -569,6 +574,17 @@ describe("current-user LaunchAgent lifecycle", () => {
         repositories: [{
           github: "roy/other",
           checkout: `${currentHome}/Documents/ChatGPT/OPC`,
+          enabled: true,
+        }],
+      })],
+      ["checkout outside current user", JSON.stringify({
+        version: 1,
+        interval_minutes: 15,
+        max_concurrency: 1,
+        daemon_config_path: `${currentHome}/Library/Application Support/OPC/config.json`,
+        repositories: [{
+          github: "roy/opc",
+          checkout: "/tmp/opc",
           enabled: true,
         }],
       })],
@@ -607,6 +623,118 @@ describe("current-user LaunchAgent lifecycle", () => {
         fixture.entries.get(install.manifest.paths.daemonConfig)?.contents ?? "",
       ).enabled, name).toBe(false);
     }
+  });
+
+  test("production activation rejects a missing scheduler repository before enabling", async () => {
+    const fixture = productionAdapterFixture();
+    const install = previewInstall({
+      onboarding: onboardingPreview(["roy/opc", "roy/other-private-app"]),
+      currentUid: 501,
+    });
+    await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    const activation = activationPreview(install);
+
+    expect(
+      await activate(
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED" });
+    expect(fixture.commands).toEqual([]);
+    expect(decodeDaemonConfig(
+      fixture.entries.get(install.manifest.paths.daemonConfig)?.contents ?? "",
+    ).enabled).toBeFalse();
+  });
+
+  test("production activation rejects same-repository checkout drift before enabling", async () => {
+    const schedulerPath = `${currentHome}/Library/Application Support/OPC/local-scheduler.json`;
+    let schedulerReads = 0;
+    const fixture = productionAdapterFixture(exclusiveLifecycleLock(), (fileSystem) => {
+      const readFile = fileSystem.readFile.bind(fileSystem);
+      fileSystem.readFile = async (path) => {
+        if (path !== schedulerPath || ++schedulerReads === 1) return readFile(path);
+        return `${JSON.stringify({
+          version: 1,
+          interval_minutes: 15,
+          max_concurrency: 1,
+          daemon_config_path: `${currentHome}/Library/Application Support/OPC/config.json`,
+          repositories: [{
+            github: "roy/opc",
+            checkout: `${currentHome}/Documents/ChatGPT/Other`,
+            enabled: true,
+          }],
+        })}\n`;
+      };
+    });
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    const activation = activationPreview(install);
+
+    expect(
+      await activate(
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED" });
+    expect(fixture.commands.some(({ args }) => args[0] === "bootstrap")).toBeFalse();
+    expect(decodeDaemonConfig(
+      fixture.entries.get(install.manifest.paths.daemonConfig)?.contents ?? "",
+    ).enabled).toBeFalse();
+  });
+
+  test("production activation rejects scheduler enabled-state drift before enabling", async () => {
+    const fixture = productionAdapterFixture();
+    const install = previewInstall({ onboarding: onboardingPreview(), currentUid: 501 });
+    await applyInstall(
+      { preview: install, approvedDigest: install.digest },
+      { launchAgent: fixture.adapter },
+    );
+    fixture.entries.set(install.manifest.paths.schedulerConfig, {
+      kind: "file",
+      uid: 501,
+      mode: 0o600,
+      contents: `${JSON.stringify({
+        version: 1,
+        interval_minutes: 15,
+        max_concurrency: 1,
+        daemon_config_path: install.manifest.paths.daemonConfig,
+        repositories: [{
+          github: "roy/opc",
+          checkout: `${currentHome}/Documents/ChatGPT/OPC`,
+          enabled: false,
+        }],
+      })}\n`,
+    });
+    const activation = activationPreview(install);
+
+    expect(
+      await activate(
+        {
+          preview: activation,
+          approvedDigest: activation.digest,
+          currentTelegram: telegramIdentity(),
+        },
+        { launchAgent: fixture.adapter },
+      ).catch((error: unknown) => error),
+    ).toMatchObject({ message: "LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED" });
+    expect(fixture.commands.some(({ args }) => args[0] === "bootstrap")).toBeFalse();
+    expect(decodeDaemonConfig(
+      fixture.entries.get(install.manifest.paths.daemonConfig)?.contents ?? "",
+    ).enabled).toBeFalse();
   });
 
   test("production activation re-reads the exact enabled daemon authority before bootstrap", async () => {

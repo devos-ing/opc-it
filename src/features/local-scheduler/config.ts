@@ -17,6 +17,14 @@ export interface LocalSchedulerConfig {
   readonly repositories: readonly LocalSchedulerRepository[];
 }
 
+export interface LocalSchedulerAuthorityExpectation {
+  readonly currentHome: string;
+  readonly daemonConfigPath: string;
+  readonly approvedRepositories: readonly string[];
+  readonly repositories: readonly LocalSchedulerRepository[];
+  readonly repositoryEnabled: boolean;
+}
+
 const LocalSchedulerRepositorySchema = Type.Object(
   {
     github: Type.String(),
@@ -72,4 +80,50 @@ export function validateLocalSchedulerConfig(input: unknown): LocalSchedulerConf
     }
   }
   return Object.freeze({ ...parsed, repositories: Object.freeze(repositories) });
+}
+
+export function requireExactLocalSchedulerAuthority(
+  input: unknown,
+  expectation: LocalSchedulerAuthorityExpectation,
+): LocalSchedulerConfig {
+  const config = validateLocalSchedulerConfig(input);
+  let approved: readonly string[];
+  try {
+    approved = expectation.approvedRepositories.map(
+      (repository) => validateQueueRepository(repository).canonical,
+    );
+  } catch {
+    throw new TypeError("LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED");
+  }
+  const configured = config.repositories.map(({ github }) => github);
+  const configuredSorted = configured.toSorted();
+  const approvedSorted = approved.toSorted();
+  const expectedByRepository = new Map(
+    expectation.repositories.map((repository) => [repository.github, repository]),
+  );
+  if (
+    !posix.isAbsolute(expectation.currentHome) ||
+    posix.normalize(expectation.currentHome) !== expectation.currentHome ||
+    expectation.currentHome === "/" ||
+    config.daemon_config_path !== expectation.daemonConfigPath ||
+    new Set(approved).size !== approved.length ||
+    approved.length !== configured.length ||
+    approvedSorted.some((repository, index) => repository !== configuredSorted[index]) ||
+    expectedByRepository.size !== configured.length ||
+    config.repositories.some((repository) => {
+      const expected = expectedByRepository.get(repository.github);
+      return expected === undefined ||
+        expected.checkout !== repository.checkout ||
+        expected.enabled !== repository.enabled ||
+        repository.enabled !== expectation.repositoryEnabled ||
+        repository.checkout.length > 4_096 ||
+        /[\0\r\n]/u.test(repository.checkout) ||
+        !repository.checkout.startsWith(`${expectation.currentHome}/`);
+    }) ||
+    new Set(config.repositories.map(({ checkout }) => checkout)).size !==
+      config.repositories.length
+  ) {
+    throw new TypeError("LOCAL_SCHEDULER_CONFIG_AUTHORITY_CHANGED");
+  }
+  return config;
 }
