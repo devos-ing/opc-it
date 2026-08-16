@@ -525,6 +525,7 @@ export async function resumePublishedResult(
           });
           return;
         }
+        return;
       }
     }
     await recheckDeliveryBoundary(configured, delivery, "publish", context);

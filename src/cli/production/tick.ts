@@ -485,7 +485,7 @@ export async function runProductionTick(
   await requireLiveIdentity(daemon.onboarding, liveGitHubIdentity, liveCodexIdentity);
   const publisherOnboarding = approvedPublisherOnboarding(daemon.onboarding, home);
   const openDatabase = dependencies.openDatabase ??
-    ((path: string) => new Database(path, { create: false }));
+    ((path: string) => new Database(path, { readwrite: true, create: false }));
   const createJournal = dependencies.createJournal ?? createSqliteJournal;
   const createProcessLock = dependencies.createProcessLock ?? createSqliteProcessLock;
   const createDelivery = dependencies.createDelivery ??

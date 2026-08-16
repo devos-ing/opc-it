@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prove the current-user scheduler and its immutable Actions delivery path under real macOS failure conditions, while keeping activation disabled until one approved private repository is explicitly selected.
+> **Superseded scheduling note (2026-08-16):** The GitHub Actions cron/reusable-workflow and self-hosted Runner route described historically below has been removed. Current delivery is `macOS LaunchAgent -> opc tick -> GitHub Issue queue -> CodeGraph -> local Codex implement -> independent local Codex review -> evidence -> commit/push/one PR -> human merge`.
 
-**Architecture:** GitHub's native cron invokes the immutable target/control workflows, which own claim, execution, review, publication, and merge reconciliation. The daemon remains a local current-user control plane and does not dispatch scheduled Actions runs. Acceptance evidence is produced by a non-destructive wizard and stored as a signed manifest; activation remains a separate local permission digest.
+**Goal:** Prove the current-user local scheduled-delivery path under macOS failure conditions while keeping enablement subject to explicit repository policy.
+
+**Current architecture:** A private current-user LaunchAgent invokes one short-lived `opc tick` every 900 seconds. The tick holds one exclusive process lock, handles at most one Issue, requires CodeGraph before source mutation, uses independent local Codex implementation and review requests, collects fixed evidence, and gives only the publisher commit/push/PR authority. Exact publication is reused after crashes and merge remains human-only. GitHub Actions is not required.
 
 **Tech Stack:** Bun/TypeScript, launchd, `gh`, Codex CLI, Telegram, macOS sandbox, private GitHub sandbox repository.
 
@@ -17,7 +19,7 @@
 - Create `test/acceptance/daemon-crash-matrix.test.ts`, `daemon-security-matrix.test.ts`, and `daemon-real-flow.test.ts`.
 - Create `docs/runbooks/current-user-daemon.md` and `scripts/render-daemon-assets.ts`.
 - Create `templates/macos/com.getsuperpower.opc.plist` and sandbox profile templates.
-- Keep `.github/workflows/reusable-opc.yml` and `templates/control/reusable-opc.yml` as the reviewed Actions delivery path; remove only local self-upgrade commands/adapters/tests and their native transaction surfaces.
+- The historical Actions workflow files and self-hosted Runner execution surface are removed. The retained remote Runner and staging directory remain untouched unless separately approved for explicit cleanup.
 - Modify `scripts/build.ts`, `package.json`, old runbook, ADR index, and the v2 spec status.
 
 ### Task 1: Lock crash, race, sleep, and security acceptance
@@ -45,15 +47,33 @@ Task 1 evidence (2026-08-12): initial RED was `0 pass / 1 fail / 1 error` per mi
 
 The former local self-upgrade scope is superseded by the approved [scheduled delivery rescope design](../specs/2026-08-14-opc-scheduled-delivery-rescope-design.md) and its [implementation plan](2026-08-14-opc-scheduled-delivery-rescope.md).
 
-Task 2 retains the existing approved-work delivery flow: scheduled trigger, trusted queue claim, isolated development-agent execution, fixed verification, independent review, one publisher commit/branch/pull request on success, and no repository write on failure. Local binary or CLI replacement, daemon replacement, SQLite migration shims, filesystem snapshots, rollback transactions, upgrade fencing, receipts, and automatic runtime restoration are removed from this task and are not supported behavior.
+Task 2 retains the existing approved-work delivery flow through the current local scheduler: LaunchAgent tick, trusted Issue claim, CodeGraph, isolated local development-agent execution, fixed verification, independent local review, one publisher commit/branch/pull request on success, and no repository write on failure. Local binary or CLI replacement, daemon replacement, SQLite migration shims, filesystem snapshots, rollback transactions, upgrade fencing, receipts, and automatic runtime restoration are removed from this task and are not supported behavior.
+
+Current-user operations are:
+
+```bash
+bun run dev:local -- install --repository devos-ing/opc-it --checkout /absolute/private/checkout
+bun run dev:local -- run-once
+bun run dev:local -- status
+bun run dev:local -- uninstall
+```
+
+Runner cleanup is separate and never automatic:
+
+```bash
+bun run dev:local -- cleanup-runner \
+  --repository devos-ing/opc-it \
+  --runner-name opc-dev-roy-arm64 \
+  --stage /Users/roy/.local/share/opc/.dev-runner-stage-dunpcS
+```
 
 ### Task 3: Remove the superseded local self-upgrade runtime after parity
 
 **Files:** Remove the local self-upgrade files listed by the scheduled-delivery rescope; modify build/package/docs; create `test/contract/no-self-upgrade.test.ts`.
 
-- [ ] Write a failing contract asserting no production CLI/source exposes `opc upgrade`, upgrade-health fencing/receipts, upgrade-rollback, native self-upgrade transactions, or filesystem restoration; assert the reviewed Actions workflow and CLI build remain.
+- [ ] Write a failing contract asserting no production CLI/source exposes `opc upgrade`, upgrade-health fencing/receipts, upgrade-rollback, native self-upgrade transactions, filesystem restoration, or a GitHub Actions/self-hosted Runner delivery route; assert the CLI build remains.
 - [ ] Run `rtk bun test test/contract/no-self-upgrade.test.ts`; expect failures naming the superseded local surfaces.
-- [ ] Delete only code proven replaced by the scheduled-delivery rescope. Keep Action commands/adapters required by the immutable workflow; build the reviewed CLI/Action artifact and mark obsolete local-upgrade runbooks superseded.
+- [ ] Delete only code proven replaced by the scheduled-delivery rescope; build the reviewed CLI artifact and mark obsolete local-upgrade and Actions-runner instructions superseded.
 - [ ] Run lint, typecheck, all tests, build, dependency install with frozen lockfile, and `rtk rg` for the forbidden legacy literals; every gate exits 0 except the final literal search, which exits 1 with no matches.
 - [ ] Commit `refactor: remove superseded Actions runner`.
 

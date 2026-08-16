@@ -1,34 +1,36 @@
 # OPC Task 2 Scheduled Delivery Rescope
 
-- Status: approved for implementation
+- Status: implemented; scheduling architecture superseded by local delivery on 2026-08-16
 - Date: 2026-08-14
 - Supersedes: M5 Task 2 local self-upgrade scope
 - Reuses: [OPC unattended delivery design](2026-08-08-opc-unattended-delivery-design.md)
 
 ## Decision
 
-Task 2 will implement the existing approved-work delivery flow:
+Task 2 implements the approved-work delivery flow:
 
-`scheduled trigger -> trusted queue -> development agent -> verification -> commit -> push -> pull request`
+`macOS LaunchAgent -> opc tick -> GitHub Issue queue -> CodeGraph -> local Codex implement -> independent local Codex review -> evidence -> commit/push/PR -> human merge`
 
 Task 2 will not implement or retain local OPC self-upgrade behavior. Binary and CLI replacement, daemon upgrade fencing, upgrade receipts, native SQLite migration shims, filesystem snapshots, and automatic restoration of the installed OPC runtime are outside this task.
 
-## Architecture
+## Current architecture
 
-GitHub's native cron invokes the immutable target `opc.yml`; its reusable control workflow performs reconciliation/claim, execution, review, and publication. Repository operators and workflows with `issues:write` are the trusted queue writers. The local runtime authority is separate from the Actions path; no workflow receives a local key and no daemon dispatch adapter is part of the scheduled path. Reconciliation accepts an immutable `github-actions[bot]` publication comment only when its exact PR identity and lifecycle fields match the canonical repository, branch, commit, and Work metadata; the author string alone is not authority.
+A private current-user LaunchAgent invokes one short-lived `opc tick` every 900 seconds. The local scheduler configuration is closed, private, canonical, and serial: it allowlists exact repositories, sets `max_concurrency=1`, and each invocation acquires one SQLite exclusive process lock before doing at most one delivery.
 
-The Actions route records publication as an immutable trusted-writer record. A failure before the publisher is called has zero commit, push, or pull-request side effects. A crash after any publication side effect is recovered by the coarse lease retry and the publisher's exact branch/PR reconciliation, which reuses the existing pull request rather than creating a duplicate.
+GitHub Issues are the trusted queue and lifecycle journal. The tick reconciles and claims one approved Issue, requires a healthy CodeGraph before any source edit, passes the CodeGraph context to a local Codex implementation request, executes fixed evidence, and sends the candidate to a separate read-only local Codex review request.
 
 The claimed task runs in an isolated worktree through the existing development-agent execution boundary. The agent may edit only contract-approved paths and cannot commit, push, or create a pull request directly. The orchestrator runs the fixed evidence commands and independent result review.
 
-Only the publisher receives repository write authority. After every gate passes, it creates the delivery commit, pushes the deterministic delivery branch, and creates at most one pull request for the Work Issue. Human merge remains the delivery boundary.
+Only the publisher receives repository write authority. After every gate passes, it creates the delivery commit, pushes the deterministic `codex/issue-<number>` branch, and creates at most one pull request for the Work Issue. A crash after push or pull-request creation is recovered by exact branch/commit/PR reconciliation; the retry never reruns Codex and never duplicates publication. Human merge remains the delivery boundary and auto-merge is forbidden.
+
+The earlier GitHub-native cron, reusable workflow, and self-hosted Runner execution route is superseded and removed. GitHub Actions is not required for scheduling or delivery. The retained remote Runner registration and staging directory are not scheduler state and remain untouched unless the operator separately invokes the explicit guarded cleanup command.
 
 ## Data flow
 
-1. GitHub's native cron (or an issue label event) invokes the target workflow.
-2. The reusable workflow validates repository policy, queue order, and lease state, then claims one eligible Work or Recovery Issue.
-3. The development agent produces a candidate diff and evidence in an isolated worktree.
-4. Fixed verification commands and an independent read-only review run against the candidate while Work remains `reviewing`.
+1. The current-user LaunchAgent starts `opc tick` every 900 seconds; the one-shot process lock rejects overlap.
+2. The tick validates global enablement, the private scheduler allowlist, committed repository policy, identities, queue order, and lease state, then claims at most one eligible Work or Recovery Issue.
+3. CodeGraph must be healthy before the local development agent produces a candidate diff in an isolated worktree.
+4. Fixed evidence commands and an independent read-only local Codex review run against the candidate while Work remains `reviewing`.
 5. On success, the publisher creates one commit, branch, and pull request, then appends one immutable trusted-writer `reviewing -> result-ready` transition with exact PR metadata.
 6. A failure before the publisher call has zero commit, push, or pull-request side effects. If publication already occurred and the run crashes, the next coarse scheduled tick reuses the exact branch and pull request.
 
@@ -40,7 +42,27 @@ Only the publisher receives repository write authority. After every gate passes,
 - Base or policy drift stops publication and moves the task to reapproval; it does not silently rebase or widen authority.
 - OPC never merges the pull request automatically.
 
-Every stateful command in the reusable control workflow (claim, reconcile, conclude, and publish) uses the same literal 40-hex control Action implementation SHA. The renderer resolves that SHA from the control commit; after the final implementation commit, the release pin is regenerated from that commit before rollout.
+Every publication mutation revalidates global enablement, repository policy and allowlist, approval, lease, base SHA, and policy digest. The local transition key never enters a workflow or Codex request.
+
+## Local operations
+
+```bash
+bun run dev:local -- install --repository devos-ing/opc-it --checkout /absolute/private/checkout
+bun run dev:local -- run-once
+bun run dev:local -- status
+bun run dev:local -- uninstall
+```
+
+`status` reports the configured LaunchAgent and repository without secrets.
+Install and uninstall never clean a retained Runner. Cleanup is a separate,
+explicit command and is never automatic:
+
+```bash
+bun run dev:local -- cleanup-runner \
+  --repository devos-ing/opc-it \
+  --runner-name opc-dev-roy-arm64 \
+  --stage /Users/roy/.local/share/opc/.dev-runner-stage-dunpcS
+```
 
 ## Removal scope
 

@@ -497,10 +497,10 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
 
   expect({ deliveries, publicationCalls, commits, pushes, affectedChecks }).toEqual({
     deliveries: 1,
-    publicationCalls: 3,
+    publicationCalls: 2,
     commits: 1,
     pushes: 1,
-    affectedChecks: 4,
+    affectedChecks: 3,
   });
   expect((await github.findWork(contract.repository, contract.work_id))?.stateLabel)
     .toBe("opc:result-ready");
