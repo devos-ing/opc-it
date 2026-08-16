@@ -4,7 +4,7 @@ export const validPolicy: RepositoryPolicy = {
   version: 1,
   enabled: true,
   approvers: ["roy"],
-  runner: { labels: ["self-hosted", "macOS", "ARM64", "opc"] },
+  execution: { mode: "local", max_concurrency: 1 },
   limits: { timeout_minutes: 90, max_attempts: 3, evidence_bundle_mb: 100 },
   paths: { writable: ["src/**", "tests/**"], forbidden: [".github/**", ".env*"] },
   commands: {

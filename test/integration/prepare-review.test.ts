@@ -27,7 +27,7 @@ async function candidateFixture(evidenceStatus: "pass" | "fail" = "pass"): Promi
     version: 1,
     enabled: true,
     approvers: ["roy"],
-    runner: { labels: ["self-hosted", "macOS", "ARM64", "opc"] },
+    execution: { mode: "local", max_concurrency: 1 },
     limits: { timeout_minutes: 1, max_attempts: 1, evidence_bundle_mb: 1 },
     paths: { writable: ["src/**"], forbidden: [".github/**"] },
     commands: {

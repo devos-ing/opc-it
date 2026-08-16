@@ -9,7 +9,13 @@ export const RepositoryPolicySchema = Type.Object(
     version: Type.Literal(1),
     enabled: Type.Boolean(),
     approvers: Type.Array(NonEmpty, { minItems: 1, uniqueItems: true }),
-    runner: Type.Object({ labels: Type.Array(NonEmpty, { minItems: 1, uniqueItems: true }) }),
+    execution: Type.Object(
+      {
+        mode: Type.Literal("local"),
+        max_concurrency: Type.Literal(1),
+      },
+      { additionalProperties: false },
+    ),
     limits: Type.Object({
       timeout_minutes: Type.Integer({ minimum: 1, maximum: 90 }),
       max_attempts: Type.Integer({ minimum: 1, maximum: 3 }),
