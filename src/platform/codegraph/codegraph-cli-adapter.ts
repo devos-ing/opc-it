@@ -110,8 +110,8 @@ export function createCodeGraphCliAdapter(options: {
       result.exitCode !== 0 ||
       typeof result.stdout !== "string" ||
       typeof result.stderr !== "string" ||
-      Buffer.byteLength(result.stdout) > processOutputLimitBytes ||
-      Buffer.byteLength(result.stderr) > processOutputLimitBytes
+      Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) >
+        processOutputLimitBytes
     ) {
       return throwPreflightFailure();
     }
@@ -121,7 +121,11 @@ export function createCodeGraphCliAdapter(options: {
   return Object.freeze({
     async prepare(repositoryPath: string, task: string): Promise<CodeGraphContext> {
       const repository = requireAbsoluteCommandPath(repositoryPath, preflightFailure);
-      if (task.trim().length === 0 || task.includes("\0")) {
+      if (
+        task.trim().length === 0 ||
+        task.includes("\0") ||
+        task.startsWith("-")
+      ) {
         return throwPreflightFailure();
       }
 

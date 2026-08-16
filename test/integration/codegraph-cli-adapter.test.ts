@@ -131,6 +131,20 @@ it("fails closed when process output exceeds one MiB", async () => {
   await expectPreflightFailure(adapter.prepare(repositoryPath, issueGoal));
 });
 
+it("fails closed when combined process output exceeds one MiB", async () => {
+  const stream = "x".repeat(614_400);
+  const adapter = createCodeGraphCliAdapter({
+    command,
+    run: queuedRunner([
+      { ...passed(stream), stderr: stream },
+      passed(healthyStatus()),
+      passed("# Code Context"),
+    ]),
+  });
+
+  await expectPreflightFailure(adapter.prepare(repositoryPath, issueGoal));
+});
+
 it("fails closed when accepted context exceeds 256 KiB", async () => {
   const adapter = createCodeGraphCliAdapter({
     command,
@@ -151,6 +165,17 @@ it("never returns empty CodeGraph context as healthy", async () => {
   });
 
   await expectPreflightFailure(adapter.prepare(repositoryPath, issueGoal));
+});
+
+it("rejects an option-like task before invoking CodeGraph", async () => {
+  const requests: CommandRequest[] = [];
+  const adapter = createCodeGraphCliAdapter({
+    command,
+    run: queuedRunner([], requests),
+  });
+
+  await expectPreflightFailure(adapter.prepare(repositoryPath, "--help"));
+  expect(requests).toEqual([]);
 });
 
 it("returns repository-relative affected tests from bounded JSON output", async () => {
