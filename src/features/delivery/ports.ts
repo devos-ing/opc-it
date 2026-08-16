@@ -320,3 +320,9 @@ export type PublicationOutcome =
 export interface Publisher {
   publish(candidate: VerifiedCandidate): Promise<PublicationOutcome>;
 }
+
+export interface PublicationReconciler {
+  reconcile(
+    publication: Extract<PublicationOutcome, { readonly status: "published" }>,
+  ): Promise<"open" | "merged" | "closed">;
+}

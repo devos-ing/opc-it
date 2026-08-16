@@ -10,6 +10,7 @@ import {
   type CommandResult,
   type ApprovedPublisherOnboarding,
   type PublicationOutcome,
+  type PublicationReconciler,
   type Publisher,
   type SandboxRunner,
   type VerifiedCandidate,
@@ -369,6 +370,107 @@ function parsePullRequestResponse(stdout: string, repository: string): PullReque
     contractViolation("publisher pull request response");
   }
   return parsePullRequest(parsed, repository);
+}
+
+function parseReconciledPullRequest(
+  stdout: string,
+  repository: string,
+): PullRequestRecord & {
+  readonly state: "open" | "closed";
+  readonly mergedAt: string | null;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    contractViolation("publisher pull request response");
+  }
+  const pullRequest = parsePullRequest(parsed, repository);
+  const state = pullRequestField(parsed, "state");
+  const mergedAt = pullRequestField(parsed, "merged_at");
+  if (
+    (state !== "open" && state !== "closed") ||
+    (mergedAt !== null && (
+      typeof mergedAt !== "string" ||
+      mergedAt.length === 0 ||
+      mergedAt.includes("\0") ||
+      Number.isNaN(Date.parse(mergedAt))
+    )) ||
+    (state === "open" && mergedAt !== null)
+  ) {
+    contractViolation("publisher pull request response");
+  }
+  return Object.freeze({
+    ...pullRequest,
+    state,
+    mergedAt,
+  });
+}
+
+function snapshotPublishedPublication(
+  value: unknown,
+): Extract<PublicationOutcome, { readonly status: "published" }> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    types.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    contractViolation("publisher publication identity");
+  }
+  const expectedKeys = [
+    "status",
+    "branch",
+    "commitSha",
+    "treeSha",
+    "reused",
+    "pullRequestNumber",
+    "pullRequestUrl",
+    "pullRequestReused",
+  ] as const;
+  if (
+    Reflect.ownKeys(value).length !== expectedKeys.length ||
+    Reflect.ownKeys(value).some((key) =>
+      typeof key !== "string" || !expectedKeys.includes(key as typeof expectedKeys[number])
+    )
+  ) {
+    contractViolation("publisher publication identity");
+  }
+  const fields: Record<string, unknown> = {};
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      contractViolation("publisher publication identity");
+    }
+    fields[key] = descriptor.value;
+  }
+  if (
+    fields.status !== "published" ||
+    typeof fields.branch !== "string" ||
+    typeof fields.commitSha !== "string" ||
+    !shaPattern.test(fields.commitSha) ||
+    typeof fields.treeSha !== "string" ||
+    !shaPattern.test(fields.treeSha) ||
+    typeof fields.reused !== "boolean" ||
+    typeof fields.pullRequestNumber !== "number" ||
+    !Number.isSafeInteger(fields.pullRequestNumber) ||
+    fields.pullRequestNumber <= 0 ||
+    typeof fields.pullRequestUrl !== "string" ||
+    typeof fields.pullRequestReused !== "boolean"
+  ) {
+    contractViolation("publisher publication identity");
+  }
+  return Object.freeze({
+    status: "published",
+    branch: fields.branch,
+    commitSha: fields.commitSha,
+    treeSha: fields.treeSha,
+    reused: fields.reused,
+    pullRequestNumber: fields.pullRequestNumber,
+    pullRequestUrl: fields.pullRequestUrl,
+    pullRequestReused: fields.pullRequestReused,
+  });
 }
 
 function parseDefaultBranch(stdout: string): string {
@@ -762,7 +864,9 @@ async function publishRehashedTree(input: {
   return publishedOutcome(commitSha, false);
 }
 
-export function createPublisherAdapter(options: PublisherAdapterOptions): Publisher {
+export function createPublisherAdapter(
+  options: PublisherAdapterOptions,
+): Publisher & PublicationReconciler {
   const contract =
     ("version" in options.contract)
       ? validateExecutionContract(options.contract)
@@ -788,8 +892,62 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
     }
     return current;
   };
+  const environmentBase = Object.freeze({
+    PATH: trustedPath,
+    GH_CONFIG_DIR: onboarding.manifest.githubConfigDirectory,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    LC_ALL: "C",
+    ...(options.githubToken === undefined ? {} : { GH_TOKEN: options.githubToken }),
+  });
 
-  return Object.freeze({
+  const createGhClient = (
+    cwd: string,
+    readable: readonly string[],
+    writable: readonly string[],
+  ): PublisherGhClient => {
+    const invoke = async (args: readonly string[], input?: string): Promise<CommandResult> => {
+      const current = currentTime();
+      if (current >= options.deadlineEpochMs) {
+        contractViolation("publisher absolute deadline");
+      }
+      const result = snapshotPublisherCommandResult(await options.sandbox.run({
+        role: "publisher",
+        command: ghPath,
+        args,
+        cwd,
+        env: environmentBase,
+        readable,
+        readOnly: Object.freeze([onboarding.manifest.githubConfigDirectory]),
+        writable,
+        network: { mode: "github-https", host: "github.com", port: 443 },
+        deadlineEpochMs: options.deadlineEpochMs,
+        ...(input === undefined ? {} : { input }),
+      }));
+      if (currentTime() >= options.deadlineEpochMs && result.status !== "timeout") {
+        contractViolation("publisher absolute deadline");
+      }
+      if (
+        Buffer.byteLength(result.stdout) > maximumOutputBytes ||
+        Buffer.byteLength(result.stderr) > maximumOutputBytes
+      ) {
+        contractViolation("publisher command output");
+      }
+      return result;
+    };
+    return Object.freeze({
+      invoke,
+      async runSuccessfully(args: readonly string[], input?: string): Promise<string> {
+        const result = await invoke(args, input);
+        if (result.status !== "pass" || result.exitCode !== 0) {
+          contractViolation(`publisher gh command ${args.at(-1) ?? "unknown"}`);
+        }
+        return result.stdout.trimEnd();
+      },
+    });
+  };
+
+  const adapter: Publisher & PublicationReconciler = Object.freeze({
     async publish(candidateInput: VerifiedCandidate) {
       const candidate = snapshotVerifiedCandidate(candidateInput);
       if (
@@ -814,14 +972,6 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         locations.gitDirectory,
         locations.commonDirectory,
       ]);
-      const environmentBase = Object.freeze({
-        PATH: trustedPath,
-        GH_CONFIG_DIR: onboarding.manifest.githubConfigDirectory,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_TERMINAL_PROMPT: "0",
-        LC_ALL: "C",
-        ...(options.githubToken === undefined ? {} : { GH_TOKEN: options.githubToken }),
-      });
       const gitPrefix = Object.freeze([
         "-C",
         locations.worktree,
@@ -872,43 +1022,8 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         return result.stdout.trimEnd();
       };
 
-      const invokeGh = async (args: readonly string[], input?: string): Promise<CommandResult> => {
-        const current = currentTime();
-        if (current >= options.deadlineEpochMs) {
-          contractViolation("publisher absolute deadline");
-        }
-        const result = snapshotPublisherCommandResult(await options.sandbox.run({
-          role: "publisher",
-          command: ghPath,
-          args,
-          cwd: locations.worktree,
-          env: environmentBase,
-          readable,
-          readOnly: Object.freeze([onboarding.manifest.githubConfigDirectory]),
-          writable,
-          network: { mode: "github-https", host: "github.com", port: 443 },
-          deadlineEpochMs: options.deadlineEpochMs,
-          ...(input === undefined ? {} : { input }),
-        }));
-        if (currentTime() >= options.deadlineEpochMs && result.status !== "timeout") {
-          contractViolation("publisher absolute deadline");
-        }
-        if (Buffer.byteLength(result.stdout) > maximumOutputBytes || Buffer.byteLength(result.stderr) > maximumOutputBytes) {
-          contractViolation("publisher command output");
-        }
-        return result;
-      };
-
-      const runGhSuccessfully = async (args: readonly string[], input?: string): Promise<string> => {
-        const result = await invokeGh(args, input);
-        if (result.status !== "pass" || result.exitCode !== 0) {
-          contractViolation(`publisher gh command ${args.at(-1) ?? "unknown"}`);
-        }
-        return result.stdout.trimEnd();
-      };
-
       const git: PublisherGitClient = { invoke, runSuccessfully: runGitSuccessfully };
-      const gh: PublisherGhClient = { invoke: invokeGh, runSuccessfully: runGhSuccessfully };
+      const gh = createGhClient(locations.worktree, readable, writable);
       const treeSha = await rehashCandidateTree({ candidate, contract, locations, git });
       return publishRehashedTree({
         candidate,
@@ -923,5 +1038,52 @@ export function createPublisherAdapter(options: PublisherAdapterOptions): Publis
         gh,
       });
     },
+
+    async reconcile(
+      publicationInput: Extract<PublicationOutcome, { readonly status: "published" }>,
+    ) {
+      const publication = snapshotPublishedPublication(publicationInput);
+      if (
+        publication.branch !== contract.target_branch ||
+        publication.pullRequestUrl !==
+          `https://github.com/${contract.repository}/pull/${String(publication.pullRequestNumber)}`
+      ) {
+        contractViolation("publisher publication identity");
+      }
+      const gh = createGhClient(
+        onboarding.manifest.githubConfigDirectory,
+        Object.freeze([onboarding.manifest.githubConfigDirectory]),
+        Object.freeze([]),
+      );
+      const defaultBranch = parseDefaultBranch(await gh.runSuccessfully([
+        "api",
+        "--method",
+        "GET",
+        `repos/${contract.repository}`,
+      ]));
+      const pullRequest = parseReconciledPullRequest(
+        await gh.runSuccessfully([
+          "api",
+          "--method",
+          "GET",
+          `repos/${contract.repository}/pulls/${String(publication.pullRequestNumber)}`,
+        ]),
+        contract.repository,
+      );
+      if (
+        pullRequest.number !== publication.pullRequestNumber ||
+        pullRequest.url !== publication.pullRequestUrl ||
+        pullRequest.headRef !== contract.target_branch ||
+        pullRequest.headSha !== publication.commitSha ||
+        pullRequest.headRepository !== contract.repository ||
+        pullRequest.baseRepository !== contract.repository ||
+        pullRequest.baseRef !== defaultBranch
+      ) {
+        contractViolation("publisher pull request identity");
+      }
+      if (pullRequest.state === "open") return "open";
+      return pullRequest.mergedAt === null ? "closed" : "merged";
+    },
   });
+  return adapter;
 }

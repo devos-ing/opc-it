@@ -30,6 +30,7 @@ export type {
   FrozenWorkspace,
   ApprovedPublisherOnboarding,
   PublicationOutcome,
+  PublicationReconciler,
   Publisher,
   PublisherOnboardingManifest,
   VerifiedCandidate,

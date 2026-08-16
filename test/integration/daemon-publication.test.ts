@@ -36,6 +36,8 @@ interface Fixture {
     readonly html_url: string;
     readonly title?: string;
     readonly body?: string;
+    state?: "open" | "closed";
+    merged_at?: string | null;
     readonly head: {
       readonly ref: string;
       readonly sha: string;
@@ -43,6 +45,7 @@ interface Fixture {
     };
     readonly base: {
       readonly ref: string;
+      readonly sha?: string;
       readonly repo: { readonly full_name: string };
     };
   }>;
@@ -159,8 +162,10 @@ async function publicationFixture(options: {
             html_url: `https://github.com/acme/app/pull/${String(pullRequests.length + 1)}`,
             title,
             body,
+            state: "open" as const,
+            merged_at: null,
             head: { ref: head, sha: fixtureCommitSha, repo: { full_name: "acme/app" } },
-            base: { ref: base, repo: { full_name: "acme/app" } },
+            base: { ref: base, sha: baseSha, repo: { full_name: "acme/app" } },
           };
           pullRequests.push(pullRequest);
           return { status: "pass", exitCode: 0, stdout: JSON.stringify(pullRequest), stderr: "", durationMs: 1 };
@@ -173,6 +178,22 @@ async function publicationFixture(options: {
             stderr: "",
             durationMs: 1,
           };
+        }
+        const pullRequestPath = request.args.find((argument) =>
+          /^repos\/acme\/app\/pulls\/[1-9][0-9]*$/u.test(argument)
+        );
+        if (pullRequestPath !== undefined) {
+          const number = Number(pullRequestPath.slice("repos/acme/app/pulls/".length));
+          const pullRequest = pullRequests.find((candidate) => candidate.number === number);
+          return pullRequest === undefined
+            ? { status: "fail", exitCode: 1, stdout: "", stderr: "missing", durationMs: 1 }
+            : {
+                status: "pass",
+                exitCode: 0,
+                stdout: JSON.stringify(pullRequest),
+                stderr: "",
+                durationMs: 1,
+              };
         }
         return {
           status: "pass",
@@ -300,6 +321,26 @@ test("publishes one commit with the approved identity and exact candidate tree",
       request.readOnly[0] === request.env.GH_CONFIG_DIR &&
       request.network !== "deny"
     )).toBeTrue();
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reconciles the exact published pull request as open, merged, or closed", async () => {
+  const fixture = await publicationFixture();
+  try {
+    const publication = await fixture.publisher.publish(fixture.candidate);
+    if (publication.status !== "published") throw new Error("expected published result");
+    expect(await fixture.publisher.reconcile(publication)).toBe("open");
+
+    const pullRequest = fixture.pullRequests[0];
+    if (pullRequest === undefined) throw new Error("expected pull request");
+    pullRequest.state = "closed";
+    pullRequest.merged_at = "2026-08-16T01:02:03Z";
+    expect(await fixture.publisher.reconcile(publication)).toBe("merged");
+
+    pullRequest.merged_at = null;
+    expect(await fixture.publisher.reconcile(publication)).toBe("closed");
   } finally {
     await fixture.cleanup();
   }
