@@ -56,6 +56,7 @@ interface FixtureOptions {
   readonly journalCloseFailure?: Error;
   readonly lockCloseFailure?: Error;
   readonly invalidLogEntry?: ProductionTickFileEntry;
+  readonly schedulerFailure?: Error;
 }
 
 function fixture(options: FixtureOptions = {}): {
@@ -67,6 +68,7 @@ function fixture(options: FixtureOptions = {}): {
   readonly gitCalls: readonly (readonly string[])[];
   readonly logEntries: ReadonlyMap<string, { readonly contents: string; readonly mode: number }>;
   readonly truncatedLogs: readonly string[];
+  readonly daemonLoads: number;
 } {
   const config = daemonConfig();
   const opened: string[] = [];
@@ -85,6 +87,7 @@ function fixture(options: FixtureOptions = {}): {
     ],
   ]);
   const truncatedLogs: string[] = [];
+  let daemonLoads = 0;
   let installation: Awaited<ReturnType<LocalJournal["loadInstallation"]>>;
   const journal: LocalJournal = {
     loadInstallation: () => Promise.resolve(installation),
@@ -96,8 +99,12 @@ function fixture(options: FixtureOptions = {}): {
     saveCursor: () => Promise.resolve(),
   };
   const dependencies: ProductionTickDependencies = {
+    currentHome: () => home,
     loadSchedulerConfig(path) {
       expect(path).toBe(configPath);
+      if (options.schedulerFailure !== undefined) {
+        return Promise.reject(options.schedulerFailure);
+      }
       return Promise.resolve({
         version: 1,
         interval_minutes: 15,
@@ -111,6 +118,7 @@ function fixture(options: FixtureOptions = {}): {
       });
     },
     loadDaemonConfig(path) {
+      daemonLoads += 1;
       expect(path).toBe(daemonConfigPath);
       return Promise.resolve(config);
     },
@@ -129,13 +137,15 @@ function fixture(options: FixtureOptions = {}): {
       },
       realpath: (path) => Promise.resolve(path),
       readFile: () => Promise.reject(new Error("INJECTED_CONFIG_LOADER_EXPECTED")),
-      truncateFile(path) {
+    },
+    truncateLogs(paths) {
+      for (const path of paths) {
         const current = logEntries.get(path);
         if (current === undefined) throw new Error("UNEXPECTED_LOG_PATH");
         truncatedLogs.push(path);
         logEntries.set(path, { ...current, contents: "" });
-        return Promise.resolve();
-      },
+      }
+      return Promise.resolve();
     },
     resolveCommand: (command) => Promise.resolve(`/opt/homebrew/bin/${command}`),
     runGit(_command, args) {
@@ -215,8 +225,26 @@ function fixture(options: FixtureOptions = {}): {
     gitCalls,
     logEntries,
     truncatedLogs,
+    get daemonLoads() {
+      return daemonLoads;
+    },
   };
 }
+
+test("truncates the trusted current-user logs before scheduler decoding can fail", async () => {
+  const schedulerFailure = new Error("INVALID_LOCAL_SCHEDULER_CONFIG");
+  const testFixture = fixture({ schedulerFailure });
+
+  expect(
+    await runProductionTick(configPath, testFixture.dependencies)
+      .catch((error: unknown) => error),
+  ).toBe(schedulerFailure);
+  expect([...testFixture.logEntries.values()]).toEqual([
+    { contents: "", mode: 0o600 },
+    { contents: "", mode: 0o600 },
+  ]);
+  expect(testFixture.daemonLoads).toBe(0);
+});
 
 test("truncates only the private launchd logs at the beginning of each tick", async () => {
   const testFixture = fixture({ enabled: false });

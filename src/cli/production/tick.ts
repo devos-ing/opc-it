@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { posix } from "node:path";
 import { Database } from "bun:sqlite";
 import { runBounded } from "../../adapters/local/process-runner.js";
@@ -43,6 +43,10 @@ import { runScheduledTick } from "../../runtime/run-scheduled-tick.js";
 import type { TickCommandResult } from "../commands/tick.js";
 import { createProductionLocalDelivery } from "./local-delivery.js";
 import {
+  truncatePrivateTickLogs,
+  type PrivateTickLogPaths,
+} from "./private-tick-logs.js";
+import {
   codexIdentity,
   credentials,
   currentUid,
@@ -62,7 +66,6 @@ export interface ProductionTickFileSystem {
   inspect(path: string): Promise<ProductionTickFileEntry>;
   realpath(path: string): Promise<string>;
   readFile(path: string): Promise<string>;
-  truncateFile(path: string, uid: number): Promise<void>;
 }
 
 export interface ProductionTickDependencies {
@@ -70,6 +73,8 @@ export interface ProductionTickDependencies {
   readonly loadDaemonConfig?: (path: string) => Promise<unknown>;
   readonly fileSystem?: ProductionTickFileSystem;
   readonly currentUid?: () => number;
+  readonly currentHome?: () => string;
+  readonly truncateLogs?: (paths: PrivateTickLogPaths, uid: number) => Promise<void>;
   readonly resolveCommand?: (command: "codegraph" | "codex" | "git" | "gh") => Promise<string>;
   readonly runGit?: (
     command: string,
@@ -118,22 +123,6 @@ const nodeTickFileSystem: ProductionTickFileSystem = Object.freeze({
   },
   realpath,
   readFile: (path: string) => readFile(path, "utf8"),
-  async truncateFile(path: string, uid: number): Promise<void> {
-    const file = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
-    try {
-      const before = await file.stat();
-      if (!before.isFile() || before.uid !== uid || (before.mode & 0o777) !== 0o600) {
-        throw new Error("INVALID_TICK_LOG_PATH");
-      }
-      await file.truncate(0);
-      const after = await file.stat();
-      if (!after.isFile() || after.uid !== uid || (after.mode & 0o777) !== 0o600) {
-        throw new Error("INVALID_TICK_LOG_PATH");
-      }
-    } finally {
-      await file.close();
-    }
-  },
 });
 
 function validAbsolutePath(path: string): boolean {
@@ -156,29 +145,50 @@ function requirePrivateFile(
   ) throw new Error(code);
 }
 
-async function truncatePrivateTickLogs(
+async function validateAndTruncatePrivateTickLogs(
   fileSystem: ProductionTickFileSystem,
-  daemon: DaemonConfig,
+  truncateLogs: NonNullable<ProductionTickDependencies["truncateLogs"]>,
+  paths: PrivateTickLogPaths,
   uid: number,
 ): Promise<void> {
-  const logs = daemon.onboarding.manifest.paths.logs;
-  const paths = [
-    daemon.install.manifest.paths.stdout,
-    daemon.install.manifest.paths.stderr,
-  ] as const;
-  if (
-    paths[0] !== `${logs}/daemon.stdout.log` ||
-    paths[1] !== `${logs}/daemon.stderr.log`
-  ) throw new Error("INVALID_TICK_LOG_PATH");
   const entries = await Promise.all(paths.map((path) => fileSystem.inspect(path)));
   if (entries.some(
     (entry) => entry.kind !== "file" || entry.uid !== uid || entry.mode !== 0o600,
   )) throw new Error("INVALID_TICK_LOG_PATH");
-  for (const path of paths) await fileSystem.truncateFile(path, uid);
+  await truncateLogs(paths, uid);
   const truncatedEntries = await Promise.all(paths.map((path) => fileSystem.inspect(path)));
   if (truncatedEntries.some(
     (entry) => entry.kind !== "file" || entry.uid !== uid || entry.mode !== 0o600,
   )) throw new Error("INVALID_TICK_LOG_PATH");
+}
+
+interface TickPathAuthority {
+  readonly home: string;
+  readonly support: string;
+  readonly logs: readonly [string, string];
+}
+
+function requireTickPathAuthority(configPath: string, home: string): TickPathAuthority {
+  if (
+    !validAbsolutePath(home) ||
+    home.split("/").length !== 3 ||
+    !home.startsWith("/Users/") ||
+    home === "/Users/." ||
+    home === "/Users/.." ||
+    home.toLowerCase() === "/users/opc-runner"
+  ) throw new Error("INVALID_TICK_ARGUMENTS");
+  const support = `${home}/Library/Application Support/OPC`;
+  if (configPath !== `${support}/local-scheduler.json`) {
+    throw new Error("INVALID_TICK_ARGUMENTS");
+  }
+  return Object.freeze({
+    home,
+    support,
+    logs: Object.freeze([
+      `${home}/Library/Logs/OPC/daemon.stdout.log`,
+      `${home}/Library/Logs/OPC/daemon.stderr.log`,
+    ] as const),
+  });
 }
 
 async function readSchedulerConfig(
@@ -421,8 +431,16 @@ export async function runProductionTick(
 ): Promise<TickCommandResult> {
   if (!validAbsolutePath(configPath)) throw new Error("INVALID_TICK_ARGUMENTS");
   const fileSystem = dependencies.fileSystem ?? nodeTickFileSystem;
+  const readHome = dependencies.currentHome ?? (() => userInfo().homedir);
+  const authority = requireTickPathAuthority(configPath, readHome());
   const readUid = dependencies.currentUid ?? currentUid;
   const uid = readUid();
+  await validateAndTruncatePrivateTickLogs(
+    fileSystem,
+    dependencies.truncateLogs ?? truncatePrivateTickLogs,
+    authority.logs,
+    uid,
+  );
   const loadScheduler = dependencies.loadSchedulerConfig ??
     ((path: string) => readSchedulerConfig(path, uid, fileSystem));
   const scheduler = validateLocalSchedulerConfig(await loadScheduler(configPath));
@@ -431,11 +449,13 @@ export async function runProductionTick(
   const home = daemon.install.manifest.currentHome;
   const support = daemon.onboarding.manifest.paths.applicationSupport;
   if (
+    home !== authority.home ||
+    support !== authority.support ||
     daemon.install.manifest.currentUid !== uid ||
     daemon.install.manifest.paths.daemonConfig !== scheduler.daemon_config_path ||
-    configPath !== `${support}/local-scheduler.json`
+    daemon.install.manifest.paths.stdout !== authority.logs[0] ||
+    daemon.install.manifest.paths.stderr !== authority.logs[1]
   ) throw new Error("DAEMON_CONFIG_AUTHORITY_CHANGED");
-  await truncatePrivateTickLogs(fileSystem, daemon, uid);
   const enabledRepositories = scheduler.repositories.filter(({ enabled }) => enabled);
   const approvedRepositories = new Set(daemon.onboarding.manifest.repositories);
   if (enabledRepositories.some(({ github }) => !approvedRepositories.has(github))) {
