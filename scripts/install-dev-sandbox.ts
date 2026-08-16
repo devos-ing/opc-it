@@ -281,9 +281,9 @@ export async function installDevSandbox(
     ),
     nextSteps: Object.freeze([
       `Review and copy the generated files into ${input.repository}.`,
-      "Register and validate the dedicated macOS runner.",
-      "Commit the target policy with enabled: true when ready.",
-      "Set OPC_ENABLED=true explicitly only after review and runner validation.",
+      "Keep OPC_ENABLED=false and .codex-pipeline.yml enabled: false.",
+      `Install the current-user scheduler with \`bun run dev:local -- install --repository ${input.repository} --checkout <exact-checkout-path>\`.`,
+      "Runner cleanup is a separate explicit migration operation and never runs during scheduler install or uninstall.",
     ]),
   });
 }

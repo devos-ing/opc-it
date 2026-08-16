@@ -162,9 +162,9 @@ test("prepares a disabled sandbox from the pushed control repository", async () 
     ],
     nextSteps: [
       "Review and copy the generated files into devos-ing/opc-delivery-sandbox.",
-      "Register and validate the dedicated macOS runner.",
-      "Commit the target policy with enabled: true when ready.",
-      "Set OPC_ENABLED=true explicitly only after review and runner validation.",
+      "Keep OPC_ENABLED=false and .codex-pipeline.yml enabled: false.",
+      "Install the current-user scheduler with `bun run dev:local -- install --repository devos-ing/opc-delivery-sandbox --checkout <exact-checkout-path>`.",
+      "Runner cleanup is a separate explicit migration operation and never runs during scheduler install or uninstall.",
     ],
   });
 

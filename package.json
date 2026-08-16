@@ -12,6 +12,7 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "dev:install": "bun run scripts/install-dev-sandbox.ts",
+    "dev:local": "bun run scripts/dev-local-scheduler.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "bun test",
