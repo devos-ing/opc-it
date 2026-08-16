@@ -23,10 +23,12 @@ import {
   validRecoveryPolicyCeiling,
   validV2Contract,
 } from "../fixtures/v2-contract.js";
-import type { Sha256 } from "../../src/domain/identity.js";
+import { digestCanonical, type Sha256 } from "../../src/domain/identity.js";
 import { leaseHeartbeatIntervalMilliseconds } from "../../src/runtime/lease-heartbeat.js";
 import { createLeaseMutationCoordinator } from "../../src/runtime/lease-mutation-coordinator.js";
 import { assertExactLifecycleReplay } from "../../src/runtime/delivery-lifecycle-authority.js";
+import { createProductionLocalDelivery } from "../../src/cli/production/local-delivery.js";
+import { validPolicy } from "../fixtures/contracts.js";
 
 function deepFreeze<Value>(value: Value): Value {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
@@ -286,6 +288,10 @@ test("an initial heartbeat failure removes the parent abort listener", async () 
 });
 
 test("a push-before-terminal crash resumes without duplicating the attempt, commit, or push", async () => {
+  const contract = deepFreeze({
+    ...validV2Contract,
+    target_branch: "codex/issue-1",
+  });
   const memory = createInMemoryGitHub({ now: () => "2026-08-11T01:00:00.000Z" });
   let failVerifyAppend = true;
   const github: QueueRepository = {
@@ -299,10 +305,10 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
       return memory.appendTransition(repository, issueNumber, record);
     },
   };
-  const submitted = await submitWork(validV2Contract, github);
+  const submitted = await submitWork(contract, github);
   const signingKey = "delivery-loop-secret";
   const installation = Object.freeze({ id: "delivery-loop", keyId: "delivery-key" });
-  await github.appendTransition(validV2Contract.repository, submitted.number, JSON.stringify(signTransition({
+  await github.appendTransition(contract.repository, submitted.number, JSON.stringify(signTransition({
     version: 1,
     installation_id: installation.id,
     key_id: installation.keyId,
@@ -314,11 +320,12 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
     occurred_at: "2026-08-11T01:00:01.000Z",
     metadata: { plan_digest: submitted.digest },
   }, signingKey)));
-  await github.setStateLabel(validV2Contract.repository, submitted.number, "opc:ready");
+  await github.setStateLabel(contract.repository, submitted.number, "opc:ready");
   let deliveries = 0;
   let publicationCalls = 0;
   let commits = 0;
   let pushes = 0;
+  let affectedChecks = 0;
   let terminalChecks = 0;
   let pullRequestStatus: "open" | "merged" | "closed" = "open";
   let runtimeNow = Date.parse("2026-08-11T01:00:02.000Z");
@@ -326,10 +333,10 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
     status: "result-ready",
     manifest: {
       kind: "CandidateResult",
-      work_id: validV2Contract.work_id,
+      work_id: contract.work_id,
       attempt: 1,
       approval_digest: submitted.digest as Sha256,
-      base_sha: validV2Contract.base_sha,
+      base_sha: contract.base_sha,
       artifact_sha256: `sha256:${"b".repeat(64)}`,
       changes: [],
       evidence: [{
@@ -360,23 +367,79 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
   expect(() => encodeVerifiedCandidateJournal(oversizedCandidate)).toThrow(
     "verified candidate journal size",
   );
-  const repository: EnabledRepositoryRuntime = {
-    repository: validV2Contract.repository,
-    isEnabled: () => Promise.resolve(true),
-    github,
-    journal: createInMemoryJournal(),
-    installation,
-    signingKey,
+  const approvedPolicy = deepFreeze(structuredClone(validPolicy));
+  const approvedPolicyDigest = digestCanonical(approvedPolicy);
+  const onboardingManifest = deepFreeze({
+    version: 1 as const,
+    githubLogin: "roy",
+    repositories: [contract.repository],
+    author: { name: "OPC Publisher", email: "opc@example.invalid" },
+    githubConfigDirectory: "/tmp/opc-delivery-loop-gh",
+  });
+  const delivery = createProductionLocalDelivery({
+    repository: contract.repository,
+    checkout: "/tmp/opc-delivery-loop-checkout",
+    worktreeRoot: "/tmp/opc-delivery-loop-worktrees",
+    bundleRoot: "/tmp/opc-delivery-loop-bundles",
+    codexHome: "/tmp/opc-delivery-loop-codex",
+    executorSchemaPath: "/tmp/opc-delivery-loop-executor.json",
+    reviewerSchemaPath: "/tmp/opc-delivery-loop-reviewer.json",
+    commands: {
+      codegraph: "/opt/homebrew/bin/codegraph",
+      codex: "/opt/homebrew/bin/codex",
+      git: "/usr/bin/git",
+      gh: "/opt/homebrew/bin/gh",
+    },
+    onboarding: Object.freeze({
+      manifest: onboardingManifest,
+      digest: digestCanonical(onboardingManifest),
+    }),
+    approvedPolicyDigest,
+    recoveryPolicyCeiling: validRecoveryPolicyCeiling,
     verificationKeys: { [installation.keyId]: signingKey },
-    createLeaseId: () => "delivery-loop-lease",
-    delivery: {
-      approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
-      now: () => runtimeNow,
-      runDelivery: () => {
-        deliveries += 1;
-        return Promise.resolve(candidate as DeliveryOutcome);
+  }, {
+    now: () => runtimeNow,
+    loadRepositoryPolicy: () => Promise.resolve(approvedPolicy),
+    currentBaseSha: () => Promise.resolve(contract.base_sha),
+    revalidate: (boundary, context) => {
+      if (boundary === "terminal") {
+        terminalChecks += 1;
+        if (terminalChecks === 1) return Promise.reject(new Error("CRASH_AFTER_PUSH"));
+      }
+      return Promise.resolve({
+        enabled: true,
+        policyDigest: context.approvedPolicyDigest,
+        baseSha: context.contract.base_sha,
+        contractDigest: context.contractDigest,
+        repositoryAllowed: true,
+        leaseActive: true,
+        claim: context.claim,
+      });
+    },
+    codegraph: {
+      prepare: () => Promise.resolve({
+        indexedFiles: 1,
+        indexedNodes: 1,
+        markdown: "# Code Context",
+      }),
+      affected: () => {
+        affectedChecks += 1;
+        return Promise.resolve([]);
       },
+    },
+    createDeliveryDependencies: () => Promise.resolve({
+      sandbox: {
+        run: () => Promise.reject(new Error("INERT_SANDBOX_MUST_NOT_RUN")),
+      },
+    } as never),
+    createPublisherSandbox: () => Promise.resolve({
+      run: () => Promise.reject(new Error("INERT_SANDBOX_MUST_NOT_RUN")),
+    }),
+    executeDelivery: () => {
+      deliveries += 1;
+      return Promise.resolve(candidate as DeliveryOutcome);
+    },
+    createPublisher: () => Object.freeze({
       publish: () => {
         publicationCalls += 1;
         if (publicationCalls === 1) {
@@ -384,8 +447,8 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
           pushes += 1;
         }
         return Promise.resolve({
-          status: "published",
-          branch: validV2Contract.target_branch,
+          status: "published" as const,
+          branch: contract.target_branch,
           commitSha: "b".repeat(40),
           treeSha: "c".repeat(40),
           reused: publicationCalls > 1,
@@ -394,23 +457,19 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
           pullRequestReused: publicationCalls > 1,
         });
       },
-      reconcilePublication: () => Promise.resolve(pullRequestStatus),
-      revalidate: (boundary, context) => {
-        if (boundary === "terminal") {
-          terminalChecks += 1;
-          if (terminalChecks === 1) return Promise.reject(new Error("CRASH_AFTER_PUSH"));
-        }
-        return Promise.resolve({
-          enabled: true,
-          policyDigest: context.approvedPolicyDigest,
-          baseSha: context.contract.base_sha,
-          contractDigest: context.contractDigest,
-          repositoryAllowed: true,
-          leaseActive: true,
-          claim: context.claim,
-        });
-      },
-    },
+      reconcile: () => Promise.resolve(pullRequestStatus),
+    }),
+  });
+  const repository: EnabledRepositoryRuntime = {
+    repository: contract.repository,
+    isEnabled: () => Promise.resolve(true),
+    github,
+    journal: createInMemoryJournal(),
+    installation,
+    signingKey,
+    verificationKeys: { [installation.keyId]: signingKey },
+    createLeaseId: () => "delivery-loop-lease",
+    delivery,
   };
 
   const crash = await runEnabledTick({
@@ -436,13 +495,14 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
     repositories: [repository],
   });
 
-  expect({ deliveries, publicationCalls, commits, pushes }).toEqual({
+  expect({ deliveries, publicationCalls, commits, pushes, affectedChecks }).toEqual({
     deliveries: 1,
     publicationCalls: 3,
     commits: 1,
     pushes: 1,
+    affectedChecks: 4,
   });
-  expect((await github.findWork(validV2Contract.repository, validV2Contract.work_id))?.stateLabel)
+  expect((await github.findWork(contract.repository, contract.work_id))?.stateLabel)
     .toBe("opc:result-ready");
   pullRequestStatus = "merged";
   runtimeNow = Date.parse("2026-08-11T01:00:06.000Z");
@@ -450,10 +510,10 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
     now: new Date("2026-08-11T01:00:06.000Z"),
     repositories: [repository],
   });
-  expect((await github.findWork(validV2Contract.repository, validV2Contract.work_id))?.stateLabel)
+  expect((await github.findWork(contract.repository, contract.work_id))?.stateLabel)
     .toBe("opc:delivered");
   const heartbeat = (await github.listTransitions(
-    validV2Contract.repository,
+    contract.repository,
     submitted.number,
   )).map(({ record }) => verifyTransition(JSON.parse(record) as unknown, {
     [installation.keyId]: signingKey,
@@ -468,8 +528,8 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
       plan_digest: submitted.digest,
     },
   });
-  expect((await github.listJournalCandidates(validV2Contract.repository)).issues).toHaveLength(1);
-  expect((await submitWork(validV2Contract, github)).number).toBe(submitted.number);
+  expect((await github.listJournalCandidates(contract.repository)).issues).toHaveLength(1);
+  expect((await submitWork(contract, github)).number).toBe(submitted.number);
 });
 
 test("a crash after Work Failure resumes one canonical Recovery without rerunning the attempt", async () => {

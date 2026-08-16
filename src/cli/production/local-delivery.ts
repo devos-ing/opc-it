@@ -31,6 +31,7 @@ import {
   DeliveryContractViolation,
   runDelivery,
   snapshotApprovedPublisherOnboarding,
+  snapshotVerifiedCandidate,
   type ApprovedPublisherOnboarding,
   type CodexAttemptManifest,
   type DeliveryDependencies,
@@ -117,11 +118,6 @@ interface BoundaryInspection {
   readonly revalidation: DeliveryRevalidation;
 }
 
-interface PreparedPublication {
-  readonly contractDigest: Sha256;
-  readonly publisher: PublisherWithReconciler;
-}
-
 function snapshotVerificationKeys(
   value: unknown,
 ): Readonly<Record<string, string>> {
@@ -202,12 +198,21 @@ function affectedTestsCovered(
     .filter((evidence) => passedEvidence.has(evidence.id))
     .map((evidence) => evidence.run);
   if (executedCommands.includes(context.contract.commands.test)) return true;
-  return tests.every((test) =>
-    executedCommands.some((commandText) => {
-      const command = parseApprovedCommand(commandText);
-      return command.command === test || command.args.includes(test);
-    })
-  );
+  const approvedTest = parseApprovedCommand(context.contract.commands.test);
+  const affectedTests = new Set(tests);
+  const targetedRuns = executedCommands.flatMap((commandText) => {
+    const command = parseApprovedCommand(commandText);
+    if (
+      command.command !== approvedTest.command ||
+      command.args.length <= approvedTest.args.length ||
+      approvedTest.args.some((argument, index) => command.args[index] !== argument)
+    ) {
+      return [];
+    }
+    const targets = command.args.slice(approvedTest.args.length);
+    return targets.every((target) => affectedTests.has(target)) ? [targets] : [];
+  });
+  return tests.every((test) => targetedRuns.some((targets) => targets.includes(test)));
 }
 
 export function createProductionLocalDelivery(
@@ -533,7 +538,6 @@ export function createProductionLocalDelivery(
     dependencies.createDeliveryDependencies ?? createDefaultDeliveryDependencies;
   const createPublisherSandbox = dependencies.createPublisherSandbox ?? (async () =>
     createSandbox([]));
-  const preparedCandidates = new WeakMap<VerifiedCandidate, PreparedPublication>();
 
   const createPublisherFor = async (
     context: DaemonDeliveryContext,
@@ -628,24 +632,28 @@ export function createProductionLocalDelivery(
           }),
         });
       }
-      const publisher = await createPublisherFor(context, deliveryDependencies.sandbox);
-      preparedCandidates.set(outcome, Object.freeze({
-        contractDigest: context.contractDigest,
-        publisher,
-      }));
       return outcome;
     },
     async publish(candidate: VerifiedCandidate, context: DaemonDeliveryContext) {
       assertContext(context);
-      const prepared = preparedCandidates.get(candidate);
+      const verified = snapshotVerifiedCandidate(candidate);
       if (
-        prepared === undefined ||
-        prepared.contractDigest !== context.contractDigest
+        verified.manifest.work_id !== context.workId ||
+        verified.manifest.attempt !== context.attempt ||
+        verified.manifest.approval_digest !== context.contractDigest ||
+        verified.manifest.base_sha !== context.contract.base_sha
       ) {
         throw new DeliveryContractViolation("local publication candidate");
       }
+      const affected = await codegraph.affected(
+        options.checkout,
+        verified.manifest.changes.map((change) => change.path),
+      );
+      if (!affectedTestsCovered(affected, verified, context)) {
+        throw new DeliveryContractViolation("local publication affected tests");
+      }
       await requireBoundary("publish", context);
-      return prepared.publisher.publish(candidate);
+      return (await createPublisherFor(context)).publish(verified);
     },
     async reconcilePublication(
       publication: Extract<PublicationOutcome, { readonly status: "published" }>,

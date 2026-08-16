@@ -265,6 +265,7 @@ test("composes local delivery, affected-test verification, and publication in au
       },
     },
     createDeliveryDependencies: () => Promise.resolve(inertDeliveryDependencies()),
+    createPublisherSandbox: () => Promise.resolve(inertDeliveryDependencies().sandbox),
     executeDelivery(input) {
       deliveryInput = input;
       snapshotDeliveryInput(input);
@@ -293,6 +294,7 @@ test("composes local delivery, affected-test verification, and publication in au
     "codegraph:prepare",
     "delivery:execute",
     "delivery:review",
+    "codegraph:affected",
     "codegraph:affected",
     "revalidate:publish",
     "publisher:publish",
@@ -393,6 +395,60 @@ test("an affected test missing from executed evidence blocks publication", async
   expect(publishers).toBe(0);
 });
 
+test("a non-test evidence command cannot satisfy an affected test by mentioning its path", async () => {
+  const deliveryContext = context({
+    evidenceCommand: "printf test/unit/affected.test.ts",
+  });
+  const runtime = createProductionLocalDelivery(options(), {
+    now: () => now,
+    loadRepositoryPolicy: () => Promise.resolve(approvedPolicy),
+    currentBaseSha: () => Promise.resolve(baseSha),
+    codegraph: {
+      prepare: () => Promise.resolve({
+        indexedFiles: 274,
+        indexedNodes: 3_901,
+        markdown: "# Code Context",
+      }),
+      affected: () => Promise.resolve(["test/unit/affected.test.ts"]),
+    },
+    createDeliveryDependencies: () => Promise.resolve(inertDeliveryDependencies()),
+    executeDelivery: () => Promise.resolve(candidate(deliveryContext)),
+  });
+
+  expect(await runtime.runDelivery(deliveryContext)).toMatchObject({
+    status: "work-failure",
+    report: {
+      category: "WORK_FAILURE",
+      code: "EVIDENCE_FAILED",
+      summary: "CodeGraph affected tests were not executed",
+    },
+  });
+});
+
+test("an approved test-runner prefix can target the exact affected test", async () => {
+  const deliveryContext = context({
+    evidenceCommand: "bun test test/unit/affected.test.ts",
+  });
+  const result = candidate(deliveryContext);
+  const runtime = createProductionLocalDelivery(options(), {
+    now: () => now,
+    loadRepositoryPolicy: () => Promise.resolve(approvedPolicy),
+    currentBaseSha: () => Promise.resolve(baseSha),
+    codegraph: {
+      prepare: () => Promise.resolve({
+        indexedFiles: 274,
+        indexedNodes: 3_901,
+        markdown: "# Code Context",
+      }),
+      affected: () => Promise.resolve(["test/unit/affected.test.ts"]),
+    },
+    createDeliveryDependencies: () => Promise.resolve(inertDeliveryDependencies()),
+    executeDelivery: () => Promise.resolve(result),
+  });
+
+  expect(await runtime.runDelivery(deliveryContext)).toEqual(result);
+});
+
 test("rejects any branch other than codex/issue-<issueNumber> before mutation", async () => {
   const deliveryContext = context({ targetBranch: "codex/issue-41" });
   let codegraphCalls = 0;
@@ -475,6 +531,7 @@ test("approval, base, or policy drift at the publisher boundary creates zero pul
         affected: () => Promise.resolve([]),
       },
       createDeliveryDependencies: () => Promise.resolve(inertDeliveryDependencies()),
+      createPublisherSandbox: () => Promise.resolve(inertDeliveryDependencies().sandbox),
       executeDelivery: () => Promise.resolve(candidate(deliveryContext)),
       createPublisher(publisherOptions) {
         return Object.freeze({
@@ -552,5 +609,5 @@ test("recreates exact pull-request reconciliation with the current tick deadline
 
   expect(await runtime.reconcilePublication?.(publication, reconciliationContext)).toBe("merged");
   expect(reconciliations).toBe(1);
-  expect(publisherDeadlines).toEqual([1_100_000, 1_200_000]);
+  expect(publisherDeadlines).toEqual([1_200_000]);
 });
