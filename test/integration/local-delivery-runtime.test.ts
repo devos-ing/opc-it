@@ -101,8 +101,8 @@ function options(): ProductionLocalDeliveryOptions {
       gh: "/opt/homebrew/bin/gh",
     }),
     onboarding,
+    approvedPolicy,
     approvedPolicyDigest,
-    recoveryPolicyCeiling,
     verificationKeys: Object.freeze({ [keyId]: signingKey }),
   });
 }
@@ -320,7 +320,50 @@ test("composes local delivery, affected-test verification, and publication in au
   });
   expect(Object.isFrozen(deliveryInput?.codexManifest)).toBeTrue();
   expect(runtime.approvedPolicyDigest).toBe(approvedPolicyDigest);
-  expect(runtime.recoveryPolicyCeiling).toEqual(recoveryPolicyCeiling);
+  expect(runtime.recoveryPolicyCeilingFor(deliveryContext)).toEqual(
+    recoveryPolicyCeiling,
+  );
+  expect(Object.isFrozen(runtime.recoveryPolicyCeilingFor(deliveryContext))).toBeTrue();
+});
+
+test("binds Recovery to the exact signed contract plus the approved policy evidence cap", () => {
+  const deliveryContext = context();
+  const runtime = createProductionLocalDelivery(options());
+  const ceiling = runtime.recoveryPolicyCeilingFor(deliveryContext);
+
+  expect(ceiling).toEqual({
+    version: 1,
+    writable_paths: deliveryContext.contract.paths.writable,
+    forbidden_paths: deliveryContext.contract.paths.forbidden,
+    network_domains: deliveryContext.contract.capabilities.network.allow_domains,
+    readable_host_directories:
+      deliveryContext.contract.capabilities.host_directories.readable,
+    writable_host_directories:
+      deliveryContext.contract.capabilities.host_directories.writable,
+    other_capabilities: deliveryContext.contract.capabilities.other,
+    timeout_minutes: deliveryContext.contract.limits.timeout_minutes,
+    attempts: deliveryContext.contract.limits.attempts,
+    evidence_bundle_mb: approvedPolicy.limits.evidence_bundle_mb,
+    executors: [deliveryContext.contract.codex.executor],
+    reviewers: [deliveryContext.contract.codex.reviewer],
+  });
+  expect(Object.isFrozen(ceiling.writable_paths)).toBeTrue();
+  expect(Object.isFrozen(ceiling.executors[0])).toBeTrue();
+
+  const expandedContext = context();
+  const expandedContract = validateExecutionContract({
+    ...expandedContext.contract,
+    paths: {
+      ...expandedContext.contract.paths,
+      writable: [...expandedContext.contract.paths.writable, "docs/**"],
+    },
+  });
+  expect(runtime.recoveryPolicyCeilingFor(Object.freeze({
+    ...expandedContext,
+    contract: expandedContract,
+    contractDigest: digestCanonical(expandedContract),
+  })).writable_paths).toEqual(["src/**", "test/**", "docs/**"]);
+  expect(ceiling.writable_paths).toEqual(["src/**", "test/**"]);
 });
 
 test("an unhealthy CodeGraph preflight makes zero delivery or publication mutations", async () => {

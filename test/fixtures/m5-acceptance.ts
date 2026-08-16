@@ -454,7 +454,7 @@ async function runDeliveryReplay(): Promise<{
     createLeaseId: () => "m5-publication-lease",
     delivery: {
       approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
       now: () => now,
       runDelivery: () => { deliveries += 1; return Promise.resolve(candidate as DeliveryOutcome); },
       publish: async () => {
@@ -783,7 +783,7 @@ export async function verifyCrashJournalReplay(mode: "before" | "after"): Promis
   });
   const delivery = {
     approvedPolicyDigest: submitted.digest as Sha256,
-    recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+    recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
     now: () => Date.parse("2026-08-12T03:00:10.000Z"),
     runDelivery: () => Promise.reject(new Error("MUST_NOT_RUN")),
     publish: () => Promise.reject(new Error("MUST_NOT_PUBLISH")),

@@ -12,6 +12,7 @@ import {
 import { submitWork } from "../features/planning/index.js";
 import type { CliFactories } from "./main.js";
 import { runProductionDaemon } from "./production/daemon.js";
+import { runProductionTick } from "./production/tick.js";
 import { telegramHttpRequest } from "./production/daemon.js";
 import { inspectOperationalState } from "./production/inspection.js";
 import {
@@ -377,6 +378,9 @@ export function createProductionCliFactories(
         });
         return { stopped: true, configPath };
       },
+    }),
+    tick: () => ({
+      run: (configPath) => runProductionTick(configPath),
     }),
     uninstall: () => ({
       preview: (selection) => uninstallPreview(selection),

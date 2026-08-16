@@ -155,7 +155,7 @@ test("heartbeat authority failure aborts and joins an uncooperative delivery", a
     createLeaseId: () => "heartbeat-join-lease",
     delivery: {
       approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
       now: () => heartbeatNow,
       runDelivery: () => new Promise<DeliveryOutcome>((resolve) => {
         releaseDelivery = () => {
@@ -259,7 +259,7 @@ test("an initial heartbeat failure removes the parent abort listener", async () 
     createLeaseId: () => "heartbeat-start-lease",
     delivery: {
       approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
       now: () => Date.parse("2026-08-11T00:10:02.000Z"),
       runDelivery: () => Promise.reject(new Error("DELIVERY_MUST_NOT_RUN")),
       publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
@@ -394,8 +394,8 @@ test("a push-before-terminal crash resumes without duplicating the attempt, comm
       manifest: onboardingManifest,
       digest: digestCanonical(onboardingManifest),
     }),
+    approvedPolicy,
     approvedPolicyDigest,
-    recoveryPolicyCeiling: validRecoveryPolicyCeiling,
     verificationKeys: { [installation.keyId]: signingKey },
   }, {
     now: () => runtimeNow,
@@ -579,7 +579,7 @@ test("a crash after Work Failure resumes one canonical Recovery without rerunnin
     createLeaseId: () => "recovery-loop-lease",
     delivery: {
       approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
       now: () => runtimeNow,
       runDelivery: () => {
         deliveries += 1;
@@ -662,7 +662,7 @@ test("delivery authority corruption fails closed without entering an infrastruct
     createLeaseId: () => "authority-loop-lease",
     delivery: {
       approvedPolicyDigest: submitted.digest as Sha256,
-      recoveryPolicyCeiling: validRecoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
       now: () => Date.parse("2026-08-11T04:00:02.000Z"),
       runDelivery: () => Promise.reject(marker),
       publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
@@ -693,4 +693,106 @@ test("delivery authority corruption fails closed without entering an infrastruct
   expect(events).not.toContain("incident");
   expect(events).not.toContain("work-failure");
   expect((await github.listJournalCandidates(validV2Contract.repository)).issues).toHaveLength(1);
+});
+
+test("one-delivery ceiling skips idle repositories and stops before a second claim or Codex start", async () => {
+  const signingKey = "one-delivery-ceiling-secret";
+  const installation = Object.freeze({
+    id: "one-delivery-ceiling",
+    keyId: "one-delivery-ceiling-key",
+  });
+  const started: string[] = [];
+
+  async function repositoryRuntime(
+    repository: string,
+    workId: string,
+    ready: boolean,
+  ): Promise<{ readonly runtime: EnabledRepositoryRuntime; readonly github: QueueRepository }> {
+    const github = createInMemoryGitHub({ now: () => "2026-08-11T05:00:00.000Z" });
+    const contract = deepFreeze({
+      ...validV2Contract,
+      repository,
+      work_id: workId,
+      target_branch: `codex/${workId}`,
+    });
+    let approvedPolicyDigest = digestCanonical(validPolicy);
+    if (ready) {
+      const submitted = await submitWork(contract, github);
+      approvedPolicyDigest = submitted.digest as Sha256;
+      await github.appendTransition(repository, submitted.number, JSON.stringify(signTransition({
+        version: 1,
+        installation_id: installation.id,
+        key_id: installation.keyId,
+        issue_number: submitted.number,
+        work_id: submitted.workId,
+        from: "awaiting-approval",
+        event: "approve",
+        to: "ready",
+        occurred_at: "2026-08-11T05:00:01.000Z",
+        metadata: { plan_digest: submitted.digest },
+      }, signingKey)));
+      await github.setStateLabel(repository, submitted.number, "opc:ready");
+    }
+    return {
+      github,
+      runtime: {
+        repository,
+        isEnabled: () => Promise.resolve(true),
+        github,
+        journal: createInMemoryJournal(),
+        installation,
+        signingKey,
+        verificationKeys: { [installation.keyId]: signingKey },
+        createLeaseId: () => `lease-${workId}`,
+        delivery: {
+          approvedPolicyDigest,
+          recoveryPolicyCeilingFor: () => validRecoveryPolicyCeiling,
+          now: () => Date.parse("2026-08-11T05:00:02.000Z"),
+          runDelivery: () => {
+            started.push(repository);
+            return Promise.resolve(deepFreeze({
+              status: "infrastructure-failure" as const,
+              report: {
+                category: "INFRASTRUCTURE_FAILURE" as const,
+                code: "DELIVERY_INFRASTRUCTURE_FAILURE" as const,
+                summary: "bounded acceptance stop",
+                durationMs: 1,
+              },
+            }));
+          },
+          publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
+          revalidate: (_boundary, context) => Promise.resolve({
+            enabled: true,
+            policyDigest: context.approvedPolicyDigest,
+            baseSha: context.contract.base_sha,
+            contractDigest: context.contractDigest,
+            repositoryAllowed: true,
+            leaseActive: true,
+            claim: context.claim,
+          }),
+        },
+      },
+    };
+  }
+
+  const idleFirst = await repositoryRuntime("roy/idle-first", "work-idle-first", false);
+  const readySecond = await repositoryRuntime("roy/ready-second", "work-ready-second", true);
+  expect(await runEnabledTick({
+    now: new Date("2026-08-11T05:00:02.000Z"),
+    repositories: [idleFirst.runtime, readySecond.runtime],
+    maximumDeliveries: 1,
+  })).toMatchObject({ status: "worked", repositoriesChecked: 2 });
+  expect(started).toEqual(["roy/ready-second"]);
+
+  started.length = 0;
+  const readyFirst = await repositoryRuntime("roy/ready-first", "work-ready-first", true);
+  const blockedSecond = await repositoryRuntime("roy/blocked-second", "work-blocked-second", true);
+  expect(await runEnabledTick({
+    now: new Date("2026-08-11T05:00:02.000Z"),
+    repositories: [readyFirst.runtime, blockedSecond.runtime],
+    maximumDeliveries: 1,
+  })).toMatchObject({ status: "worked", repositoriesChecked: 1 });
+  expect(started).toEqual(["roy/ready-first"]);
+  expect((await blockedSecond.github.listJournalCandidates("roy/blocked-second")).issues)
+    .toMatchObject([{ stateLabel: "opc:ready", workId: "work-blocked-second" }]);
 });

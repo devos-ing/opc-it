@@ -65,7 +65,9 @@ export interface DaemonDeliveryContext {
 
 export interface EnabledDeliveryRuntime {
   readonly approvedPolicyDigest: Sha256;
-  readonly recoveryPolicyCeiling: RecoveryPolicyCeiling;
+  readonly recoveryPolicyCeilingFor: (
+    context: DaemonDeliveryContext,
+  ) => RecoveryPolicyCeiling;
   readonly now: () => number;
   readonly runDelivery: (context: DaemonDeliveryContext) => Promise<DeliveryOutcome>;
   readonly publish: (candidate: VerifiedCandidate, context: DaemonDeliveryContext) => Promise<PublicationOutcome>;
@@ -87,6 +89,7 @@ export interface RunEnabledTickInput {
   readonly now: Date;
   readonly repositories: readonly EnabledRepositoryRuntime[];
   readonly signal?: AbortSignal;
+  readonly maximumDeliveries?: 1;
 }
 
 export interface EnabledTickDiagnostic extends QueueIssueDiagnostic {
@@ -177,8 +180,9 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       : "value" in reconcilePublicationDescriptor
         ? reconcilePublicationDescriptor.value as unknown
         : (() => { throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG"); })();
-    const recoveryPolicyCeiling = snapshotRecoveryPolicyCeiling(
-      ownDataProperty(deliveryValue, "recoveryPolicyCeiling"),
+    const recoveryPolicyCeilingFor = ownDataProperty(
+      deliveryValue,
+      "recoveryPolicyCeilingFor",
     );
     const expansionDescriptor = Object.getOwnPropertyDescriptor(deliveryValue, "authorityExpansion");
     const authorityExpansion: unknown = expansionDescriptor === undefined
@@ -193,11 +197,13 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
       typeof now !== "function" ||
       typeof publish !== "function" ||
       typeof revalidate !== "function" ||
+      typeof recoveryPolicyCeilingFor !== "function" ||
       (reconcilePublication !== undefined && typeof reconcilePublication !== "function") ||
       (authorityExpansion !== undefined && typeof authorityExpansion !== "function")
     ) {
       throw new TypeError("INVALID_ENABLED_REPOSITORY_CONFIG");
     }
+    const ceilingSnapshots = new WeakMap<object, RecoveryPolicyCeiling>();
     delivery = Object.freeze({
       approvedPolicyDigest: approvedPolicyDigest as Sha256,
       runDelivery: runDelivery as EnabledDeliveryRuntime["runDelivery"],
@@ -211,7 +217,17 @@ function snapshotRepository(value: unknown): EnabledRepositoryRuntime {
               EnabledDeliveryRuntime["reconcilePublication"]
             >,
           }),
-      recoveryPolicyCeiling,
+      recoveryPolicyCeilingFor(context: DaemonDeliveryContext) {
+        const cached = ceilingSnapshots.get(context);
+        if (cached !== undefined) return cached;
+        const resolved = snapshotRecoveryPolicyCeiling(
+          (recoveryPolicyCeilingFor as EnabledDeliveryRuntime["recoveryPolicyCeilingFor"])(
+            context,
+          ),
+        );
+        ceilingSnapshots.set(context, resolved);
+        return resolved;
+      },
       ...(authorityExpansion === undefined
         ? {}
         : {
@@ -287,6 +303,7 @@ export async function runEnabledTick(
   const diagnostics = new Map<string, EnabledTickDiagnostic>();
   let repositoriesChecked = 0;
   let worked = false;
+  let deliveries = 0;
 
   const throwIfAborted = (): void => {
     if (input.signal?.aborted === true) throw input.signal.reason;
@@ -353,6 +370,7 @@ export async function runEnabledTick(
         occurredAt,
         input.signal ?? new AbortController().signal,
       );
+      deliveries += 1;
       throwIfAborted();
     } else if (claimed.status === "active-claim") {
       await resumePublishedResult(
@@ -361,6 +379,7 @@ export async function runEnabledTick(
         occurredAt,
         input.signal ?? new AbortController().signal,
       );
+      deliveries += 1;
       throwIfAborted();
     } else if (await resumeInterruptedRecovery(
       configured,
@@ -368,6 +387,7 @@ export async function runEnabledTick(
       input.signal ?? new AbortController().signal,
     )) {
       worked = true;
+      deliveries += 1;
       throwIfAborted();
     }
 
@@ -378,6 +398,7 @@ export async function runEnabledTick(
       ...(nextEtag === undefined ? {} : { etag: nextEtag }),
     });
     throwIfAborted();
+    if (deliveries === input.maximumDeliveries) break;
   }
 
   return Object.freeze({

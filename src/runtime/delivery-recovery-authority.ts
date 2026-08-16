@@ -13,8 +13,12 @@ import {
   encodeRecoveryPolicyCeiling,
   validateRecoveryContractChainLink,
 } from "../features/recovery/index.js";
-import type { EnabledRepositoryRuntime } from "./run-enabled-tick.js";
+import type {
+  DaemonDeliveryContext,
+  EnabledRepositoryRuntime,
+} from "./run-enabled-tick.js";
 import type { LeaseMutationCoordinator } from "./lease-mutation-coordinator.js";
+import { snapshotContractRecoveryPolicyCeiling } from "./recovery-policy-ceiling.js";
 
 export function coordinatedRecoveryRepository(
   repository: QueueRepository,
@@ -53,6 +57,7 @@ export async function assertClaimedRootAuthority(
   configured: EnabledRepositoryRuntime,
   claimed: Extract<Awaited<ReturnType<typeof pollAndClaim>>, { readonly status: "claimed" }>,
   root: NonNullable<Awaited<ReturnType<EnabledRepositoryRuntime["github"]["findWork"]>>>,
+  context: DaemonDeliveryContext,
 ): Promise<void> {
   const issue = await configured.github.findWork(configured.repository, claimed.workId);
   const parsed = parseRecoveryWorkId(claimed.workId);
@@ -64,7 +69,7 @@ export async function assertClaimedRootAuthority(
     issue.digest !== claimed.digest ||
     canonicalize(decodeWorkBody(issue.body).contract) !== canonicalize(claimed.contract)
   ) throw new TypeError("INVALID_DELIVERY_ROOT");
-  await assertRecoveryIssueRooted(configured, issue, root, attempt);
+  await assertRecoveryIssueRooted(configured, issue, root, attempt, context);
 }
 
 export async function assertRecoveryIssueRooted(
@@ -72,7 +77,10 @@ export async function assertRecoveryIssueRooted(
   issue: QueueWorkIssue,
   root: QueueWorkIssue,
   attempt: 1 | 2 | 3,
+  context: DaemonDeliveryContext,
 ): Promise<void> {
+  const currentCeiling = configured.delivery?.recoveryPolicyCeilingFor(context);
+  if (currentCeiling === undefined) throw new TypeError("INVALID_DELIVERY_ROOT");
   let current = issue;
   for (let currentAttempt = attempt; currentAttempt >= 2; currentAttempt -= 1) {
     const parsed = parseRecoveryWorkId(current.workId);
@@ -102,11 +110,18 @@ export async function assertRecoveryIssueRooted(
       addendum.root_contract_digest !== parent.digest ||
       addendum.recovery_contract_digest !== current.digest
     ) throw new TypeError("INVALID_DELIVERY_ROOT");
-    const currentCeiling = configured.delivery?.recoveryPolicyCeiling;
-    if (
-      currentCeiling === undefined ||
-      encodeRecoveryPolicyCeiling(currentCeiling).digest !== addendum.policy_digest
-    ) throw new TypeError("INVALID_DELIVERY_ROOT");
+    let parentCeiling: ReturnType<typeof snapshotContractRecoveryPolicyCeiling>;
+    try {
+      parentCeiling = snapshotContractRecoveryPolicyCeiling(
+        decodeWorkBody(parent.body).contract,
+        currentCeiling.evidence_bundle_mb,
+      );
+    } catch {
+      throw new TypeError("INVALID_DELIVERY_ROOT");
+    }
+    if (encodeRecoveryPolicyCeiling(parentCeiling).digest !== addendum.policy_digest) {
+      throw new TypeError("INVALID_DELIVERY_ROOT");
+    }
     try {
       validateRecoveryContractChainLink(
         parent,

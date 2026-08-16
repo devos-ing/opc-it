@@ -58,6 +58,12 @@ import {
   runDaemonCommand,
   type DaemonCommandFactory,
 } from "./commands/daemon.js";
+import {
+  parseTickArguments,
+  runTickCommand,
+  tickOutputCodec,
+  type TickCommandFactory,
+} from "./commands/tick.js";
 import type { OutputCodec } from "./commands/output.js";
 
 export interface CliResult {
@@ -74,6 +80,7 @@ export interface CliFactories {
   readonly doctor: DoctorCommandFactory;
   readonly uninstall: UninstallCommandFactory;
   readonly daemon: DaemonCommandFactory;
+  readonly tick: TickCommandFactory;
 }
 
 export type CliFactoryOverrides = Partial<CliFactories>;
@@ -111,6 +118,7 @@ const allowedErrorCodes = new Set([
   "INVALID_RESUME_ARGUMENTS",
   "INVALID_DOCTOR_ARGUMENTS",
   "INVALID_DAEMON_ARGUMENTS",
+  "INVALID_TICK_ARGUMENTS",
   "INVALID_UNINSTALL_ARGUMENTS",
   "INVALID_UNINSTALL_PREVIEW",
   "SENSITIVE_OUTPUT_REJECTED",
@@ -252,6 +260,12 @@ const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.fr
     (configPath, factories) => runDaemonCommand(configPath, factories.daemon),
     "daemon",
     daemonOutputCodec as OutputCodec<unknown>,
+  ),
+  tick: command(
+    parseTickArguments,
+    (configPath, factories) => runTickCommand(configPath, factories.tick),
+    "tick",
+    tickOutputCodec as OutputCodec<unknown>,
   ),
 }));
 

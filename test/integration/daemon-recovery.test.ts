@@ -5,7 +5,10 @@ import {
   encodeRecoveryAddendum,
   recoverWork,
 } from "../../src/features/recovery/index.js";
-import { decodeWorkBody, submitWork } from "../../src/features/planning/index.js";
+import {
+  submitWork,
+  validateExecutionContract,
+} from "../../src/features/planning/index.js";
 import { DeliveryContractViolation } from "../../src/features/delivery/index.js";
 import {
   appendHeartbeat,
@@ -22,10 +25,8 @@ import {
 import { createInMemoryGitHub } from "../../src/platform/github/in-memory-github-adapter.js";
 import { validV2Contract } from "../fixtures/v2-contract.js";
 import type { Sha256 } from "../../src/domain/identity.js";
-import {
-  executeClaimedDelivery,
-  resumeInterruptedRecovery,
-} from "../../src/runtime/delivery-recovery-orchestration.js";
+import { executeClaimedDelivery } from "../../src/runtime/delivery-recovery-orchestration.js";
+import { snapshotContractRecoveryPolicyCeiling } from "../../src/runtime/recovery-policy-ceiling.js";
 import type { EnabledRepositoryRuntime } from "../../src/runtime/run-enabled-tick.js";
 import { runEnabledTick } from "../../src/runtime/run-enabled-tick.js";
 
@@ -46,6 +47,13 @@ const recoveryPolicyCeiling = Object.freeze({
   reviewers: Object.freeze([validV2Contract.codex.reviewer]),
 });
 const recoveryPolicyDigest = encodeRecoveryPolicyCeiling(recoveryPolicyCeiling).digest;
+const contractRecoveryPolicyCeiling = snapshotContractRecoveryPolicyCeiling(
+  validateExecutionContract(validV2Contract),
+  recoveryPolicyCeiling.evidence_bundle_mb,
+);
+const contractRecoveryPolicyDigest = encodeRecoveryPolicyCeiling(
+  contractRecoveryPolicyCeiling,
+).digest;
 
 test("the recovery addendum codec round-trips one closed canonical schema", () => {
   const addendum = Object.freeze({
@@ -276,8 +284,8 @@ function recoveryInput(
     },
     requiresExpansion: false,
     authorityDelta: null,
-    policyCeiling: recoveryPolicyCeiling,
-    policyDigest: recoveryPolicyDigest,
+    policyCeiling: contractRecoveryPolicyCeiling,
+    policyDigest: contractRecoveryPolicyDigest,
     occurredAt: "2026-08-11T00:00:04.000Z",
     deadlineEpochMs: Date.parse("2026-08-11T00:30:02.000Z"),
     installation,
@@ -310,7 +318,10 @@ function enabledRecoveryRuntime(
     createLeaseId: () => "recovery-next-tick",
     delivery: {
       approvedPolicyDigest: fixture.digest,
-      recoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: (context) => snapshotContractRecoveryPolicyCeiling(
+        context.contract,
+        recoveryPolicyCeiling.evidence_bundle_mb,
+      ),
       now: () => Date.parse(now),
       runDelivery: () => Promise.reject(new Error("DELIVERY_MUST_NOT_RERUN")),
       publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
@@ -400,7 +411,10 @@ test("a Work Failure consumes one attempt and creates its canonical Recovery slo
     createLeaseId: () => "unused",
     delivery: {
       approvedPolicyDigest: fixture.digest,
-      recoveryPolicyCeiling,
+      recoveryPolicyCeilingFor: (context) => snapshotContractRecoveryPolicyCeiling(
+        context.contract,
+        recoveryPolicyCeiling.evidence_bundle_mb,
+      ),
       now: () => Date.parse("2026-08-11T00:01:00.000Z"),
       runDelivery: () => Promise.reject(marker),
       publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
@@ -566,210 +580,37 @@ test("an infrastructure outage keeps its first signed start across reclaim, hear
   ))?.stateLabel).toBe("opc:blocked");
 });
 
-test("permission expansion creates a Recovery awaiting approval", async () => {
+test("the exact signed-contract ceiling rejects recovery authority expansion", async () => {
   const fixture = await runningRoot();
-  const authorityDelta = Object.freeze({
-    version: 1 as const,
-    writable_paths: Object.freeze(["docs/**"]),
-    network_domains: Object.freeze(["api.example.invalid"]),
-    readable_host_directories: Object.freeze([] as string[]),
-    writable_host_directories: Object.freeze([] as string[]),
-    other_capabilities: Object.freeze([] as string[]),
-    timeout_minutes: 45,
-    attempts: null,
-    executor: null,
-    reviewer: null,
-  });
-  const outcome = await recoverWork({
-    ...recoveryInput(fixture),
+  const before = await fixture.github.listTransitions(
+    validV2Contract.repository,
+    fixture.issueNumber,
+  );
+  const error = await recoverWork(recoveryInput(fixture, {
     requiresExpansion: true,
-    authorityDelta,
-    policyCeiling: recoveryPolicyCeiling,
-    policyDigest: recoveryPolicyDigest,
-  }, fixture.github);
-  expect(outcome.status).toBe("approval-required");
-  if (outcome.status !== "approval-required") throw new Error("expected approval");
-  const child = await fixture.github.findWork(
-    validV2Contract.repository,
-    deriveRecoveryWorkId(validV2Contract.work_id, 2),
-  );
-  expect(child?.stateLabel).toBe("opc:awaiting-approval");
-  expect(child?.digest).not.toBe(fixture.digest);
-  expect(decodeWorkBody(child?.body).contract).toMatchObject({
-    work_id: validV2Contract.work_id,
-    paths: { writable: ["src/**", "test/**", "docs/**"] },
-    capabilities: {
-      network: { mode: "allowlist", allow_domains: ["api.example.invalid"] },
-    },
-    limits: { timeout_minutes: 45 },
-  });
-  expect(decodeWorkBody((await fixture.github.findWork(
-    validV2Contract.repository,
-    validV2Contract.work_id,
-  ))?.body)).toMatchObject({
-    digest: fixture.digest,
-    contract: {
-      paths: { writable: ["src/**", "test/**"] },
-      capabilities: { network: { mode: "deny", allow_domains: [] } },
-      limits: { timeout_minutes: 30 },
-    },
-  });
-
-  const requestApproval = verifyTransition(JSON.parse((await fixture.github.listTransitions(
-    validV2Contract.repository,
-    outcome.issueNumber,
-  )).at(-1)?.record ?? "null") as unknown, {
-    [installation.keyId]: signingKey,
-  });
-  const addendum = decodeRecoveryAddendum(
-    requestApproval.metadata.recovery_addendum ?? "",
-    requestApproval.metadata.recovery_addendum_digest ?? "",
-  );
-  expect(addendum).toMatchObject({
-    root_contract_digest: fixture.digest,
-    recovery_contract_digest: child?.digest,
-    policy_digest: recoveryPolicyDigest,
-    authority_delta: authorityDelta,
-  });
-
-  const recoveryWorkId = deriveRecoveryWorkId(validV2Contract.work_id, 2);
-  await fixture.github.appendTransition(
-    validV2Contract.repository,
-    outcome.issueNumber,
-    JSON.stringify(signTransition({
+    authorityDelta: {
       version: 1,
-      installation_id: installation.id,
-      key_id: installation.keyId,
-      issue_number: outcome.issueNumber,
-      work_id: recoveryWorkId,
-      from: "awaiting-approval",
-      event: "approve",
-      to: "ready",
-      occurred_at: "2026-08-11T00:00:04.000Z",
-      metadata: { plan_digest: child?.digest ?? "" },
-    }, signingKey)),
-  );
-  await fixture.github.setStateLabel(
-    validV2Contract.repository,
-    outcome.issueNumber,
-    "opc:ready",
-  );
-  const claimed = await pollAndClaim({
-    repository: validV2Contract.repository,
-    github: fixture.github,
-    installation,
-    signingKey,
-    verificationKeys: { [installation.keyId]: signingKey },
-    leaseId: "approved-recovery-lease",
-    occurredAt: "2026-08-11T00:00:05.000Z",
-    leaseExpiresAt: "2026-08-11T00:30:05.000Z",
-  });
-  expect(claimed).toMatchObject({ status: "claimed", digest: child?.digest });
-  if (claimed.status !== "claimed") throw new Error("expected expanded Recovery claim");
-  const marker = new DeliveryContractViolation("expanded claim reached delivery");
-  const runtime: EnabledRepositoryRuntime = {
-    repository: validV2Contract.repository,
-    isEnabled: () => Promise.resolve(true),
-    github: fixture.github,
-    journal: {
-      loadInstallation: () => Promise.resolve(undefined),
-      saveInstallation: () => Promise.resolve(),
-      loadCursor: () => Promise.resolve(undefined),
-      saveCursor: () => Promise.resolve(),
-    },
-    installation,
-    signingKey,
-    verificationKeys: { [installation.keyId]: signingKey },
-    createLeaseId: () => "unused",
-    delivery: {
-      approvedPolicyDigest: claimed.digest as Sha256,
-      recoveryPolicyCeiling,
-      now: () => Date.parse("2026-08-11T00:00:05.000Z"),
-      runDelivery: () => Promise.reject(marker),
-      publish: () => Promise.reject(new Error("PUBLISH_MUST_NOT_RUN")),
-      revalidate: (_boundary, context) => Promise.resolve({
-        enabled: true,
-        policyDigest: context.approvedPolicyDigest,
-        baseSha: context.contract.base_sha,
-        contractDigest: context.contractDigest,
-        repositoryAllowed: true,
-        leaseActive: true,
-        claim: context.claim,
-      }),
-    },
-  };
-  expect(await executeClaimedDelivery(
-    runtime,
-    claimed,
-    "2026-08-11T00:00:05.000Z",
-    new AbortController().signal,
-  ).catch((caught: unknown) => caught)).toBe(marker);
-
-  const expandedDigest = child?.digest;
-  if (expandedDigest === undefined) throw new Error("expected expanded Recovery digest");
-  let mutationChecks = 0;
-  const recoveryCrash = await recoverWork(recoveryInput(fixture, {
-    issueNumber: outcome.issueNumber,
-    workId: recoveryWorkId,
-    contractDigest: expandedDigest as Sha256,
-    attempt: 2,
-    claim: signTransition(claimed.claim, signingKey),
-    policyCeiling: recoveryPolicyCeiling,
-    policyDigest: recoveryPolicyDigest,
-    occurredAt: "2026-08-11T00:00:06.000Z",
-    deadlineEpochMs: Date.parse("2026-08-11T00:30:05.000Z"),
-    now: () => Date.parse("2026-08-11T00:00:06.000Z"),
-    assertMutationAuthority: () => {
-      mutationChecks += 1;
-      return mutationChecks === 2
-        ? Promise.reject(new Error("EXPANSION_RECOVERY_CREATE_CRASH"))
-        : Promise.resolve();
+      writable_paths: ["docs/**"],
+      network_domains: [],
+      readable_host_directories: [],
+      writable_host_directories: [],
+      other_capabilities: [],
+      timeout_minutes: null,
+      attempts: null,
+      executor: null,
+      reviewer: null,
     },
   }), fixture.github).catch((caught: unknown) => caught);
-  expect((recoveryCrash as Error).message).toBe("EXPANSION_RECOVERY_CREATE_CRASH");
-  const expandedDelivery = runtime.delivery;
-  if (expandedDelivery === undefined) throw new Error("expected delivery runtime");
-  const resumeRuntime: EnabledRepositoryRuntime = {
-    ...runtime,
-    delivery: {
-      ...expandedDelivery,
-      now: () => Date.parse("2026-08-11T00:00:06.000Z"),
-    },
-  };
-  expect(await resumeInterruptedRecovery(
-    resumeRuntime,
-    "2026-08-11T00:00:06.000Z",
-    new AbortController().signal,
-  )).toBe(true);
+
+  expect((error as Error).message).toContain("exceeds policy ceiling");
+  expect(await fixture.github.listTransitions(
+    validV2Contract.repository,
+    fixture.issueNumber,
+  )).toHaveLength(before.length);
   expect(await fixture.github.findWork(
     validV2Contract.repository,
-    deriveRecoveryWorkId(validV2Contract.work_id, 3),
-  )).toMatchObject({ digest: expandedDigest, stateLabel: "opc:ready" });
-  const thirdClaim = await pollAndClaim({
-    repository: validV2Contract.repository,
-    github: fixture.github,
-    installation,
-    signingKey,
-    verificationKeys: { [installation.keyId]: signingKey },
-    leaseId: "expanded-attempt-three",
-    occurredAt: "2026-08-11T00:00:07.000Z",
-    leaseExpiresAt: "2026-08-11T00:30:07.000Z",
-  });
-  expect(thirdClaim).toMatchObject({ status: "claimed", digest: expandedDigest });
-  if (thirdClaim.status !== "claimed") throw new Error("expected retained authority claim");
-  const thirdRuntime: EnabledRepositoryRuntime = {
-    ...runtime,
-    delivery: {
-      ...expandedDelivery,
-      now: () => Date.parse("2026-08-11T00:00:07.000Z"),
-    },
-  };
-  expect(await executeClaimedDelivery(
-    thirdRuntime,
-    thirdClaim,
-    "2026-08-11T00:00:07.000Z",
-    new AbortController().signal,
-  ).catch((caught: unknown) => caught)).toBe(marker);
+    deriveRecoveryWorkId(validV2Contract.work_id, 2),
+  )).toBeUndefined();
 });
 
 test("an expansion delta cannot weaken root authority or mutate the journal", async () => {

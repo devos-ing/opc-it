@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../../src/cli/main.js";
+import { parseTickArguments } from "../../src/cli/commands/tick.js";
 import {
   closeDaemonDatabases,
   isApprovalUnavailable,
@@ -48,6 +49,51 @@ function statusSnapshot(enabled = false) {
 }
 
 describe("runCli", () => {
+  it("parses the exact absolute local scheduler config path", () => {
+    expect(parseTickArguments([
+      "--config",
+      "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
+    ])).toBe(
+      "/Users/roy/Library/Application Support/OPC/local-scheduler.json",
+    );
+    for (const argv of [
+      [],
+      ["--config"],
+      ["--config", "relative.json"],
+      ["--config", "/Users/roy/../roy/local-scheduler.json"],
+      ["--config", "/Users/roy/local-scheduler.json\n"],
+      ["--other", "/Users/roy/local-scheduler.json"],
+    ]) {
+      expect(() => parseTickArguments(argv)).toThrow("INVALID_TICK_ARGUMENTS");
+    }
+  });
+
+  it("runs one closed tick through a lazily constructed command factory", async () => {
+    const configPath = "/Users/roy/Library/Application Support/OPC/local-scheduler.json";
+    let constructions = 0;
+    const result = await runCli(["tick", "--config", configPath], {
+      tick: () => {
+        constructions += 1;
+        return {
+          run: (path) => Promise.resolve({
+            status: "idle" as const,
+            repositoriesChecked: path === configPath ? 1 : -1,
+          }),
+        };
+      },
+    });
+
+    expect(result).toEqual({
+      exitCode: 0,
+      message: JSON.stringify({
+        ok: true,
+        command: "tick",
+        result: { status: "idle", repositoriesChecked: 1 },
+      }),
+    });
+    expect(constructions).toBe(1);
+  });
+
   it("runs approvals before repository work in each enabled production tick", async () => {
     const events: string[] = [];
     const controller = new AbortController();

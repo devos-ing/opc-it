@@ -74,7 +74,6 @@ export async function executeClaimedDelivery(
     claimed.contract.work_id,
   );
   if (root === undefined) throw new TypeError("INVALID_DELIVERY_ROOT");
-  await assertClaimedRootAuthority(configured, claimed, root);
   const deadlineEpochMs = contractDeadlineEpochMs(
     claim,
     claimed.contract.limits.timeout_minutes,
@@ -102,6 +101,7 @@ export async function executeClaimedDelivery(
     deadlineEpochMs,
     signal: deliveryAbort.signal,
   });
+  await assertClaimedRootAuthority(configured, claimed, root, context);
   const coordinator = createLeaseMutationCoordinator();
   let heartbeat: Awaited<ReturnType<typeof startLeaseHeartbeat>> | undefined;
   try {
@@ -221,8 +221,9 @@ export async function executeClaimedDelivery(
       if (status === "approval-required" && authorityDelta === undefined) {
         throw new DeliveryContractViolation("missing exact Recovery authority delta");
       }
+      const recoveryPolicyCeiling = delivery.recoveryPolicyCeilingFor(context);
       const recoveryPolicyDigest = encodeRecoveryPolicyCeiling(
-        delivery.recoveryPolicyCeiling,
+        recoveryPolicyCeiling,
       ).digest;
     const assertRecoveryMutation = (): Promise<void> =>
       recheckDeliveryBoundary(configured, delivery, "result", context);
@@ -240,7 +241,7 @@ export async function executeClaimedDelivery(
         failure,
         requiresExpansion: authorityDelta !== undefined,
         authorityDelta: authorityDelta ?? null,
-        policyCeiling: delivery.recoveryPolicyCeiling,
+        policyCeiling: recoveryPolicyCeiling,
         policyDigest: recoveryPolicyDigest,
         occurredAt,
         deadlineEpochMs: context.deadlineEpochMs,
@@ -317,10 +318,6 @@ export async function resumeInterruptedRecovery(
     metadata.recovery_policy_ceiling ?? "",
     metadata.recovery_policy_ceiling_digest ?? "",
   );
-  if (
-    policyCeiling !== undefined &&
-    encodeRecoveryPolicyCeiling(delivery.recoveryPolicyCeiling).digest !== metadata.policy_digest
-  ) throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   const recoveryId = parseRecoveryWorkId(issue.workId);
   if (
     rootWorkId !== decoded.contract.work_id ||
@@ -343,7 +340,6 @@ export async function resumeInterruptedRecovery(
   if (root === undefined || root.workId !== rootWorkId) {
     throw new TypeError("INVALID_RECOVERY_CONTINUATION");
   }
-  await assertRecoveryIssueRooted(configured, issue, root, attempt);
   const claim = signTransition(recoveryLeaseAuthority.payload, configured.signingKey);
   const context: DaemonDeliveryContext = Object.freeze({
     repository: configured.repository,
@@ -362,6 +358,11 @@ export async function resumeInterruptedRecovery(
     ),
     signal,
   });
+  const resolvedPolicyCeiling = delivery.recoveryPolicyCeilingFor(context);
+  if (
+    encodeRecoveryPolicyCeiling(resolvedPolicyCeiling).digest !== metadata.policy_digest
+  ) throw new TypeError("INVALID_RECOVERY_CONTINUATION");
+  await assertRecoveryIssueRooted(configured, issue, root, attempt, context);
   const exhaustedBlockReplay = timeline.current.payload.event === "block";
   const assertRecoveryMutation = exhaustedBlockReplay
     ? async (): Promise<void> => {
@@ -397,8 +398,8 @@ export async function resumeInterruptedRecovery(
     failure: decodeRecoveryFailureReport(metadata.recovery_failure ?? ""),
     requiresExpansion: requiresExpansion === "true",
     authorityDelta,
-    policyCeiling,
-    policyDigest: metadata.policy_digest as Sha256,
+    policyCeiling: resolvedPolicyCeiling,
+    policyDigest: metadata.policy_digest,
     occurredAt,
     deadlineEpochMs: context.deadlineEpochMs,
     installation: configured.installation,
@@ -452,7 +453,6 @@ export async function resumePublishedResult(
   if (root === undefined || (attempt !== 1 && attempt !== 2 && attempt !== 3)) {
     throw new TypeError("INVALID_DELIVERY_RESUME");
   }
-  await assertRecoveryIssueRooted(configured, issue, root, attempt);
   const claim = signTransition(timeline.leaseAuthority.payload, configured.signingKey);
   const publicationAbort = new AbortController();
   const onParentAbort = (): void => { publicationAbort.abort(signal.reason); };
@@ -475,6 +475,7 @@ export async function resumePublishedResult(
     ),
     signal: publicationAbort.signal,
   });
+  await assertRecoveryIssueRooted(configured, issue, root, attempt, context);
   const coordinator = createLeaseMutationCoordinator();
   let heartbeat: Awaited<ReturnType<typeof startLeaseHeartbeat>> | undefined;
   try {

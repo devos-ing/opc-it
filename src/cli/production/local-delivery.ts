@@ -20,10 +20,6 @@ import type { RepositoryPolicy } from "../../domain/contracts.js";
 import { parseApprovedCommand } from "../../domain/execution.js";
 import { digestCanonical, type Sha256 } from "../../domain/identity.js";
 import {
-  snapshotRecoveryPolicyCeiling,
-  type RecoveryPolicyCeiling,
-} from "../../domain/recovery.js";
-import {
   parseRepositoryPolicyYaml,
   validateRepositoryPolicy,
 } from "../../domain/validation.js";
@@ -64,6 +60,7 @@ import type {
   DeliveryLoopBoundary,
   EnabledDeliveryRuntime,
 } from "../../runtime/run-enabled-tick.js";
+import { snapshotContractRecoveryPolicyCeiling } from "../../runtime/recovery-policy-ceiling.js";
 import { requireAbsoluteCommandPath } from "../../adapters/local/command-boundary.js";
 
 type PublisherWithReconciler = Publisher & PublicationReconciler;
@@ -83,8 +80,8 @@ export interface ProductionLocalDeliveryOptions {
     readonly gh: string;
   };
   readonly onboarding: ApprovedPublisherOnboarding;
+  readonly approvedPolicy: RepositoryPolicy;
   readonly approvedPolicyDigest: Sha256;
-  readonly recoveryPolicyCeiling: RecoveryPolicyCeiling;
   readonly verificationKeys: Readonly<Record<string, string>>;
 }
 
@@ -223,6 +220,14 @@ export function createProductionLocalDelivery(
   if (repository !== unsafeOptions.repository) {
     throw new TypeError("INVALID_LOCAL_DELIVERY_REPOSITORY");
   }
+  const approvedPolicy = snapshotPolicy(unsafeOptions.approvedPolicy);
+  const approvedPolicyDigest = requireSha256(
+    unsafeOptions.approvedPolicyDigest,
+    "POLICY_DIGEST",
+  );
+  if (digestCanonical(approvedPolicy) !== approvedPolicyDigest) {
+    throw new TypeError("INVALID_LOCAL_DELIVERY_POLICY_DIGEST");
+  }
   const options = Object.freeze({
     repository,
     checkout: requireAbsoluteCommandPath(
@@ -268,13 +273,8 @@ export function createProductionLocalDelivery(
       ),
     }),
     onboarding: snapshotApprovedPublisherOnboarding(unsafeOptions.onboarding),
-    approvedPolicyDigest: requireSha256(
-      unsafeOptions.approvedPolicyDigest,
-      "POLICY_DIGEST",
-    ),
-    recoveryPolicyCeiling: snapshotRecoveryPolicyCeiling(
-      unsafeOptions.recoveryPolicyCeiling,
-    ),
+    approvedPolicy,
+    approvedPolicyDigest,
     verificationKeys: snapshotVerificationKeys(unsafeOptions.verificationKeys),
   });
   const now = dependencies.now ?? Date.now;
@@ -558,7 +558,13 @@ export function createProductionLocalDelivery(
   };
   const runtime: EnabledDeliveryRuntime = Object.freeze({
     approvedPolicyDigest: options.approvedPolicyDigest,
-    recoveryPolicyCeiling: options.recoveryPolicyCeiling,
+    recoveryPolicyCeilingFor(context: DaemonDeliveryContext) {
+      assertContext(context);
+      return snapshotContractRecoveryPolicyCeiling(
+        context.contract,
+        options.approvedPolicy.limits.evidence_bundle_mb,
+      );
+    },
     now,
     async revalidate(
       boundary: DeliveryLoopBoundary,
