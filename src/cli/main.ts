@@ -3,7 +3,6 @@
 import { runSimulation } from "../commands/simulate.js";
 import { runQueuePlan } from "../commands/queue-plan.js";
 import { runOnboardPreview } from "../commands/onboard-preview.js";
-import { runHeartbeat } from "../commands/heartbeat.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { types } from "node:util";
 import { createProductionCliFactories } from "./production.js";
@@ -179,7 +178,6 @@ const legacyCommandNames: ReadonlySet<string> = new Set([
   "simulate",
   "queue-plan",
   "onboard-preview",
-  "heartbeat",
 ]);
 
 const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.freeze(Object.assign(Object.create(null) as Record<string, CommandRegistration>, {
@@ -200,10 +198,6 @@ const commandRegistry: Readonly<Record<string, CommandRegistration>> = Object.fr
   "onboard-preview": command(
     (argv) => argv,
     (argv) => runOnboardPreview(argv),
-  ),
-  heartbeat: command(
-    (argv) => argv,
-    (argv) => runHeartbeat(argv),
   ),
   onboard: command(
     parseOnboardArguments,

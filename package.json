@@ -19,9 +19,6 @@
     "test:watch": "bun test --watch"
   },
   "dependencies": {
-    "@actions/artifact": "^6.2.1",
-    "@actions/core": "^1.11.0",
-    "@actions/github": "^6.0.0",
     "@octokit/rest": "^22.0.0",
     "@sinclair/typebox": "^0.34.0",
     "ajv": "^8.17.0",
