@@ -41,6 +41,7 @@ Clone the control repository and install its dependencies:
 ```bash
 git clone git@github.com:devos-ing/opc-it.git
 cd opc-it
+export OPC_CONTROL_CHECKOUT="$PWD"
 bun install --frozen-lockfile
 ```
 
@@ -72,12 +73,18 @@ CODEX_HOME="$OPC_CODEX_HOME" codex login
 CODEX_HOME="$OPC_CODEX_HOME" codex login status
 ```
 
-Initialize CodeGraph once in a fresh clone, then verify a non-empty index:
+Clone the private Target separately. It must be a non-fork repository owned by
+the authenticated GitHub login; never use the control checkout as the Target:
 
 ```bash
+export OPC_REPOSITORY="<github-login>/<private-repository>"
+export OPC_TARGET_CHECKOUT="$HOME/OPC-target"
+git clone "git@github.com:${OPC_REPOSITORY}.git" "$OPC_TARGET_CHECKOUT"
+cd "$OPC_TARGET_CHECKOUT"
 codegraph init -i
-codegraph sync "$PWD"
-codegraph status --json "$PWD"
+codegraph sync "$OPC_TARGET_CHECKOUT"
+codegraph status --json "$OPC_TARGET_CHECKOUT"
+cd "$OPC_CONTROL_CHECKOUT"
 ```
 
 `codegraph status --json` must report `initialized: true` with positive file and
@@ -191,12 +198,15 @@ Do not run `opc activate` yet.
 
 ### 3. Install and prove the local scheduler while disabled
 
-Use the exact canonical checkout path. For this repository, run from its root:
+Run the scheduler from the control checkout, while passing the Target's exact
+canonical absolute checkout path. The Target origin must match
+`$OPC_REPOSITORY`:
 
 ```bash
+cd "$OPC_CONTROL_CHECKOUT"
 bun run dev:local -- install \
   --repository "$OPC_REPOSITORY" \
-  --checkout "$PWD"
+  --checkout "$OPC_TARGET_CHECKOUT"
 
 bun run dev:local -- run-once
 bun run dev:local -- status
@@ -212,8 +222,11 @@ Review the exact activation preview, enable the committed repository policy,
 set the GitHub kill switch, then activate the same approved local authority:
 
 ```bash
-# Edit and commit .codex-pipeline.yml so it contains: enabled: true
+# In the Target checkout, edit and commit .codex-pipeline.yml so it contains:
+# enabled: true
+cd "$OPC_TARGET_CHECKOUT"
 gh variable set OPC_ENABLED --body true --repo "$OPC_REPOSITORY"
+cd "$OPC_CONTROL_CHECKOUT"
 opc activate 'sha256:<activation-preview-digest>'
 bun run dev:local -- status
 ```
@@ -246,9 +259,10 @@ symbol context. Use text search only for literal strings and documentation.
 
 ## Operations
 
-Run and inspect the scheduler manually:
+From the control checkout, run and inspect the scheduler manually:
 
 ```bash
+cd "$OPC_CONTROL_CHECKOUT"
 bun run dev:local -- run-once
 bun run dev:local -- status
 tail -n 100 "$HOME/Library/Logs/OPC/daemon.stdout.log"
@@ -274,12 +288,13 @@ credentials, or retained legacy Runner state.
 
 - **`DEV_LOCAL_SCHEDULER_AUTH_FAILED`:** run `gh auth status` and confirm the
   active account is an administrator of the target repository.
-- **`DEV_LOCAL_SCHEDULER_CODEGRAPH_FAILED`:** run `codegraph sync "$PWD"` and
-  inspect `codegraph status --json "$PWD"`; initialize first if needed.
+- **`DEV_LOCAL_SCHEDULER_CODEGRAPH_FAILED`:** run `codegraph sync
+  "$OPC_TARGET_CHECKOUT"` and inspect `codegraph status --json
+  "$OPC_TARGET_CHECKOUT"`; initialize first if needed.
 - **`DEV_LOCAL_SCHEDULER_DISABLED_STATE_FAILED`:** initial installation requires
   both `OPC_ENABLED=false` and committed `.codex-pipeline.yml` `enabled: false`.
-- **`DEV_LOCAL_SCHEDULER_CHECKOUT_FAILED`:** use the real canonical repository
-  root inside the current user's home; its `origin` must match the allowlist.
+- **`DEV_LOCAL_SCHEDULER_CHECKOUT_FAILED`:** pass the real canonical Target
+  repository root in `--checkout`; its `origin` must match the allowlist.
 - **`DEV_LOCAL_SCHEDULER_DAEMON_CONFIG_FAILED`:** rerun the approved onboarding
   preview/apply sequence; do not hand-edit the private daemon configuration.
 - **Busy result:** another tick owns the process lock. Wait for it to finish;
