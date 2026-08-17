@@ -29,6 +29,7 @@ flowchart LR
 - [GitHub CLI](https://cli.github.com/) authenticated to the repository owner
 - [Codex CLI](https://developers.openai.com/codex/cli/) authenticated with ChatGPT
 - CodeGraph CLI 0.9.3 or later
+- A Telegram bot and its bot token, available only during onboarding
 - One private, non-fork Target Repository owned by the authenticated GitHub user
 
 OPC uses the credentials already owned by the current user. Do not copy tokens,
@@ -74,13 +75,47 @@ CODEX_HOME="$OPC_CODEX_HOME" codex login status
 ```
 
 Clone the private Target separately. It must be a non-fork repository owned by
-the authenticated GitHub login; never use the control checkout as the Target:
+the authenticated GitHub login; never use the control checkout as the Target.
+Set `<github-login>` to the login reported by `gh auth status` (for example,
+`devos-ing`) and `<private-repository>` to that account's Target repository:
 
 ```bash
-export OPC_REPOSITORY="<github-login>/<private-repository>"
+export OPC_GITHUB_LOGIN="<github-login>"
+export OPC_REPOSITORY="${OPC_GITHUB_LOGIN}/<private-repository>"
 export OPC_TARGET_CHECKOUT="$HOME/OPC-target"
 git clone "git@github.com:${OPC_REPOSITORY}.git" "$OPC_TARGET_CHECKOUT"
+```
+
+Prepare the Target from the two supported current templates in the Control
+checkout. The policy template starts disabled. Replace only its documented
+approver placeholder, review both complete files, then commit and push them to
+the Target before installing or checking the scheduler:
+
+```bash
+mkdir -p "$OPC_TARGET_CHECKOUT/.github/ISSUE_TEMPLATE"
+cp "$OPC_CONTROL_CHECKOUT/templates/target/.codex-pipeline.yml" \
+  "$OPC_TARGET_CHECKOUT/.codex-pipeline.yml"
+cp "$OPC_CONTROL_CHECKOUT/templates/target/.github/ISSUE_TEMPLATE/opc-work.yml" \
+  "$OPC_TARGET_CHECKOUT/.github/ISSUE_TEMPLATE/opc-work.yml"
+
 cd "$OPC_TARGET_CHECKOUT"
+perl -pi -e 's/\{\{approver_login\}\}/$ENV{OPC_GITHUB_LOGIN}/g' .codex-pipeline.yml
+git diff --check
+git diff -- .codex-pipeline.yml .github/ISSUE_TEMPLATE/opc-work.yml
+git add .codex-pipeline.yml .github/ISSUE_TEMPLATE/opc-work.yml
+git diff --cached --check
+git diff --cached -- .codex-pipeline.yml .github/ISSUE_TEMPLATE/opc-work.yml
+git commit -m "chore: configure disabled OPC target"
+git push -u origin HEAD
+git show HEAD:.codex-pipeline.yml | grep -Fx 'enabled: false'
+git diff --exit-code HEAD -- \
+  .codex-pipeline.yml .github/ISSUE_TEMPLATE/opc-work.yml
+```
+
+Stop if either committed-file check fails. With the exact disabled Target files
+now committed, initialize CodeGraph in the Target and verify a non-empty index:
+
+```bash
 codegraph init -i
 codegraph sync "$OPC_TARGET_CHECKOUT"
 codegraph status --json "$OPC_TARGET_CHECKOUT"
@@ -170,13 +205,18 @@ opc onboard --apply 'sha256:<identity-preview-digest>'
 ```
 
 Preview the disabled install stage. Applying it requires the Telegram bot token
-on standard input; OPC does not print or place that token in its configuration:
+on standard input. In the default macOS zsh, capture it silently so it never
+appears in shell history or terminal output, pipe it directly to OPC, then
+discard the shell variable. OPC never writes the token to its configuration:
 
 ```bash
 export OPC_ONBOARDING_STAGE=install
 opc onboard --preview
+read -r -s "TELEGRAM_BOT_TOKEN?Telegram bot token: "
+printf '\n'
 printf '%s\n' "$TELEGRAM_BOT_TOKEN" | \
   opc onboard --apply 'sha256:<install-preview-digest>' --telegram-token-stdin
+unset TELEGRAM_BOT_TOKEN
 ```
 
 Send the returned challenge code to the configured Telegram bot. Preserve the
@@ -202,6 +242,10 @@ Run the scheduler from the control checkout, while passing the Target's exact
 canonical absolute checkout path. The Target origin must match
 `$OPC_REPOSITORY`:
 
+Both `OPC_ENABLED=false` and the Target's committed `enabled: false` policy
+must still be in force when `run-once` starts. This development helper rejects
+an active installation.
+
 ```bash
 cd "$OPC_CONTROL_CHECKOUT"
 bun run dev:local -- install \
@@ -222,9 +266,16 @@ Review the exact activation preview, enable the committed repository policy,
 set the GitHub kill switch, then activate the same approved local authority:
 
 ```bash
-# In the Target checkout, edit and commit .codex-pipeline.yml so it contains:
-# enabled: true
 cd "$OPC_TARGET_CHECKOUT"
+# Edit .codex-pipeline.yml so it contains exactly one: enabled: true
+git diff --check
+git diff -- .codex-pipeline.yml
+git add .codex-pipeline.yml
+git diff --cached --check
+git diff --cached -- .codex-pipeline.yml
+git commit -m "chore: enable OPC target"
+git push
+git show HEAD:.codex-pipeline.yml | grep -Fx 'enabled: true'
 gh variable set OPC_ENABLED --body true --repo "$OPC_REPOSITORY"
 cd "$OPC_CONTROL_CHECKOUT"
 opc activate 'sha256:<activation-preview-digest>'
@@ -259,20 +310,38 @@ symbol context. Use text search only for literal strings and documentation.
 
 ## Operations
 
-From the control checkout, run and inspect the scheduler manually:
+On an activated installation, use the public tick command for a supported
+foreground execution, then inspect scheduler state and logs:
 
 ```bash
 cd "$OPC_CONTROL_CHECKOUT"
-bun run dev:local -- run-once
+opc tick --config "$HOME/Library/Application Support/OPC/local-scheduler.json"
 bun run dev:local -- status
 tail -n 100 "$HOME/Library/Logs/OPC/daemon.stdout.log"
 tail -n 100 "$HOME/Library/Logs/OPC/daemon.stderr.log"
 ```
 
-Stop new work before maintenance:
+`bun run dev:local -- run-once` is a disabled-state installation proof, not an
+active-operation command. It works only while both the GitHub `OPC_ENABLED`
+variable and the Target's committed policy are disabled.
+
+Stop new work before maintenance by disabling and committing the Target policy,
+then disabling the GitHub control. Review and push that policy change before
+running disabled-state diagnostics:
 
 ```bash
+cd "$OPC_TARGET_CHECKOUT"
+# Edit .codex-pipeline.yml so it contains exactly one: enabled: false
+git diff --check
+git diff -- .codex-pipeline.yml
+git add .codex-pipeline.yml
+git commit -m "chore: pause OPC target"
+git push
+git show HEAD:.codex-pipeline.yml | grep -Fx 'enabled: false'
 gh variable set OPC_ENABLED --body false --repo "$OPC_REPOSITORY"
+cd "$OPC_CONTROL_CHECKOUT"
+bun run dev:local -- run-once
+bun run dev:local -- status
 ```
 
 Remove only scheduler-owned local state:
@@ -308,9 +377,11 @@ credentials, or retained legacy Runner state.
 - Implementation and review use separate local Codex sessions.
 - Codex never receives publisher credentials.
 - Publication is limited to one deterministic branch, commit, and PR.
-- OPC never pushes directly to the default branch and never merges a PR.
+- OPC never pushes directly to the default branch.
 - Policy, approval, base SHA, and repository authority are revalidated before
   each mutation boundary.
+
+OPC never automatically merges a pull request; a human must merge every PR.
 
 ## Project documentation
 
